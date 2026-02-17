@@ -34,6 +34,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     run([sys.executable, "-m", "ruff", "check", "backend", "cli", "tools", "tests"], cwd=root)
     run([sys.executable, "-m", "mypy", "backend", "cli", "tools"], cwd=root)
+    # Fail on medium/high findings while still surfacing low-severity output in logs.
+    run([sys.executable, "-m", "bandit", "-q", "-ll", "-r", "backend", "cli", "tools"], cwd=root)
+    run([sys.executable, "tools/dependency_audit.py"], cwd=root)
     run([sys.executable, "tools/check_boundary_fitness.py"], cwd=root)
     run([sys.executable, "-m", "pytest"], cwd=root)
     run([sys.executable, "tools/migration_check.py"], cwd=root)
@@ -51,6 +54,7 @@ def main() -> int:
         maybe_run(["npm", "run", "lint"], cwd=ui_dir)
         maybe_run(["npm", "run", "typecheck"], cwd=ui_dir)
         maybe_run(["npm", "run", "test"], cwd=ui_dir)
+        maybe_run(["npm", "audit", "--audit-level=high"], cwd=ui_dir)
     else:
         print("SKIP ui tooling (package.json missing)")
 
