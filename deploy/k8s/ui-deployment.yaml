@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-ui
+  namespace: schemapilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-ui
+  template:
+    metadata:
+      labels:
+        app: schemapilot-ui
+    spec:
+      containers:
+        - name: ui
+          image: ghcr.io/example/schemapilot-ui:latest
+          ports:
+            - containerPort: 5173

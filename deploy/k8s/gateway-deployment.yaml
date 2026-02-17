@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-gateway
+  namespace: schemapilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-gateway
+  template:
+    metadata:
+      labels:
+        app: schemapilot-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/example/schemapilot-gateway:latest
+          ports:
+            - containerPort: 8001

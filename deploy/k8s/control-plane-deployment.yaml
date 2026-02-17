@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-control-plane
+  namespace: schemapilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-control-plane
+  template:
+    metadata:
+      labels:
+        app: schemapilot-control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: ghcr.io/example/schemapilot-control-plane:latest
+          ports:
+            - containerPort: 8000
