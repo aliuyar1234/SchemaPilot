@@ -1,0 +1,7 @@
+{
+  "expected_family_keys": [
+    "customers",
+    "invoices"
+  ],
+  "expected_invoice_pk": "invoice_id"
+}

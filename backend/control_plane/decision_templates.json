@@ -1,0 +1,10 @@
+[
+  {"id": "T1", "name": "Postgres + DuckDB (Starter)", "components": ["postgres", "duckdb"]},
+  {"id": "T2", "name": "Object Store + Iceberg + DuckDB", "components": ["object_store", "iceberg", "duckdb"]},
+  {"id": "T3", "name": "Lakehouse (Iceberg) + Trino", "components": ["object_store", "iceberg", "trino"]},
+  {"id": "T4", "name": "Lakehouse + Trino + Search", "components": ["object_store", "iceberg", "trino", "opensearch"]},
+  {"id": "T5", "name": "Lakehouse + Trino + Vector", "components": ["object_store", "iceberg", "trino", "qdrant"]},
+  {"id": "T6", "name": "OLTP + Lakehouse split", "components": ["oltp", "object_store", "iceberg", "trino"]},
+  {"id": "T7", "name": "Lakehouse + Trino + ClickHouse mart", "components": ["object_store", "iceberg", "trino", "clickhouse"]},
+  {"id": "T8", "name": "Streaming + Lakehouse", "components": ["stream", "object_store", "iceberg", "trino"]}
+]

@@ -1,0 +1,14 @@
+{
+  "operations": {
+    "gateway_execute_sql_ms": {
+      "max_ms": 25.0
+    },
+    "decision_engine_report_ms": {
+      "max_ms": 25.0
+    },
+    "messybench_harness_ms": {
+      "max_ms": 250.0
+    }
+  },
+  "tolerance_multiplier": 2.5
+}

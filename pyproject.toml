@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schemapilot"
+version = "0.1.0"
+description = "SchemaPilot implementation scaffold"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "prometheus-client>=0.20.0,<1.0.0",
+  "pydantic>=2.9.0,<3.0.0",
+  "sqlalchemy>=2.0.0,<3.0.0",
+  "uvicorn>=0.30.0,<1.0.0",
+  "typer>=0.12.0,<1.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "alembic>=1.13.0,<2.0.0",
+  "httpx>=0.27.0,<1.0.0",
+  "mypy>=1.11.0,<2.0.0",
+  "pytest>=8.2.0,<9.0.0",
+  "ruff>=0.6.0,<1.0.0"
+]
+
+[project.scripts]
+schemapilot = "cli.schemapilot_cli.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*", "cli*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["ui"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["ui", "evidence", "spec", "checks", "templates"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,1 @@
+"""SchemaPilot CLI package boundary."""

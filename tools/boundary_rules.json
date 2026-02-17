@@ -1,0 +1,36 @@
+{
+  "modules": [
+    "control_plane",
+    "gateway",
+    "workers",
+    "shared_domain",
+    "cli"
+  ],
+  "python_module_roots": {
+    "control_plane": "backend/control_plane",
+    "gateway": "backend/gateway",
+    "workers": "backend/workers",
+    "shared_domain": "backend/shared_domain",
+    "cli": "cli/schemapilot_cli"
+  },
+  "allowed_module_imports": {
+    "control_plane": ["shared_domain"],
+    "gateway": ["shared_domain"],
+    "workers": ["shared_domain"],
+    "shared_domain": [],
+    "cli": ["shared_domain"]
+  },
+  "engine_client_import_roots": [
+    "duckdb",
+    "trino",
+    "opensearchpy",
+    "qdrant_client"
+  ],
+  "forbidden_ui_import_patterns": [
+    "backend/",
+    "backend\\",
+    "cli/",
+    "cli\\"
+  ]
+}
+
