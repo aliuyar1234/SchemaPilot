@@ -1,0 +1,58 @@
+﻿All checks passed!
+Success: no issues found in 62 source files
+PASS CHK-BOUNDARY-FITNESS
+..............................................................           [100%]
+62 passed in 2.57s
+python : INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+In Zeile:2 Zeichen:1
++ python tools/check_tooling_baseline.py 2>&1 | Out-File -Encoding utf8 ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (INFO  [alembic....mpl SQLiteImpl.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001_initial_schema, Initial metadata schema.
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running downgrade 0001_initial_schema -> , Initial metadata schema.
+$ C:\Python312\python.exe -m alembic -c C:\Users\User\AppData\Local\Temp\alembic_9uwpby0w.ini upgrade head
+$ C:\Python312\python.exe -m alembic -c C:\Users\User\AppData\Local\Temp\alembic_9uwpby0w.ini downgrade base
+PASS CHK-MIGRATIONS
+PASS CHK-SECRETS-HYGIENE
+PASS secrets rotation drill
+runtime/secrets_rotation_drill/report.json
+PASS CHK-BACKUP-RESTORE
+runtime/backup_restore_drill/report.json
+PASS MessyBench harness
+runtime/messybench/results.json
+PASS CHK-PERF-HARNESS
+runtime/perf/results.json
+CHK-CORE-FILES: PASS
+CHK-NO-ADHOC-FILES: PASS
+CHK-REF-INTEGRITY: PASS
+FAIL evidence/t0046/final_schemapilot_check.txt: expected 07c3e3cdc13abf65b1cf5c72c2c4d9ae70858762962c8f91efc476a831f0f47a got 1e0fb1771466921e3f16e644b2545bde938ff4f557c45418c06ec3fe814f2e99
+FAIL
+$ C:\Python312\python.exe -m ruff check backend cli tools tests
+$ C:\Python312\python.exe -m mypy backend cli tools
+$ C:\Python312\python.exe tools/check_boundary_fitness.py
+$ C:\Python312\python.exe -m pytest
+$ C:\Python312\python.exe tools/migration_check.py
+$ C:\Python312\python.exe tools/secrets_hygiene_check.py
+$ C:\Python312\python.exe tools/secrets_rotation_drill.py
+$ C:\Python312\python.exe tools/backup_restore_drill.py
+$ C:\Python312\python.exe tools/messybench_harness.py
+$ C:\Python312\python.exe tools/perf_harness.py
+$ C:\Python312\python.exe tools/ssot_verify.py
+$ C:\Python312\python.exe tools/verify_manifest.py
+Traceback (most recent call last):
+  File "E:\Projekte\SchemaPilot\tools\check_tooling_baseline.py", line 62, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "E:\Projekte\SchemaPilot\tools\check_tooling_baseline.py", line 46, in main
+    run([sys.executable, "tools/verify_manifest.py"], cwd=root)
+  File "E:\Projekte\SchemaPilot\tools\check_tooling_baseline.py", line 14, in run
+    subprocess.run(cmd, cwd=cwd, check=True)
+  File "C:\Python312\Lib\subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['C:\\Python312\\python.exe', 'tools/verify_manifest.py']' returned non-zero 
+exit status 1.

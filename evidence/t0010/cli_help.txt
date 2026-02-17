@@ -1,0 +1,22 @@
+﻿                                                                               
+ Usage: python -m cli.schemapilot_cli.main [OPTIONS] COMMAND [ARGS]...         
+                                                                               
+ SchemaPilot CLI                                                               
+                                                                               
++- Options -------------------------------------------------------------------+
+| --install-completion          Install completion for the current shell.     |
+| --show-completion             Show completion for the current shell, to     |
+|                               copy it or customize the installation.        |
+| --help                        Show this message and exit.                   |
++-----------------------------------------------------------------------------+
++- Commands ------------------------------------------------------------------+
+| doctor        Run environment preflight checks.                             |
+| init          Generate local config skeleton.                               |
+| connect       Register source intent (bootstrap placeholder).               |
+| run           Start a run (bootstrap placeholder).                          |
+| status        Show run/task status (bootstrap placeholder).                 |
+| check         Run local quality checks.                                     |
+| ssot-verify   Run SSOT verification checks.                                 |
++-----------------------------------------------------------------------------+
+
+

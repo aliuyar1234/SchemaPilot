@@ -1,0 +1,2 @@
+﻿PASS CHK-PERF-HARNESS
+runtime/perf/results.json

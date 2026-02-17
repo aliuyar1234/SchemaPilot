@@ -1,0 +1,6 @@
+﻿        <h2>Review Queue</h2>
+                  <div>Evidence: {task.evidence_bundle_uri ?? "n/a"}</div>
+                  <div>Confidence: {task.confidence ?? "n/a"}</div>
+                    Approve
+                    Reject
+                    Defer

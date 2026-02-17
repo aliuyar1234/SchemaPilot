@@ -1,0 +1,4 @@
+﻿$ C:\Python312\python.exe -m alembic -c C:\Users\User\AppData\Local\Temp\alembic_hqjcxt6s.ini upgrade head
+$ C:\Python312\python.exe -m alembic -c C:\Users\User\AppData\Local\Temp\alembic_hqjcxt6s.ini downgrade base
+PASS CHK-MIGRATIONS
+

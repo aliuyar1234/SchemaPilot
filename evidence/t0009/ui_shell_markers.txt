@@ -1,0 +1,37 @@
+﻿type Workspace = {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
+  const [newWorkspaceName, setNewWorkspaceName] = useState<string>("");
+  const selectedWorkspace = useMemo(
+    () => workspaces.find((workspace) => workspace.workspace_id === selectedWorkspaceId),
+    [selectedWorkspaceId, workspaces]
+        await refreshWorkspaces();
+    if (!selectedWorkspaceId) {
+        const response = await fetch(`/api/v1/workspaces/${selectedWorkspaceId}/review_tasks`);
+  }, [selectedWorkspaceId]);
+  const refreshWorkspaces = async () => {
+      setWorkspaces([]);
+    const data: Workspace[] = await response.json();
+    setWorkspaces(data);
+    if (!selectedWorkspaceId && data.length > 0) {
+      setSelectedWorkspaceId(data[0].workspace_id);
+  const createWorkspace = async (event: FormEvent) => {
+    if (!newWorkspaceName.trim()) {
+        name: newWorkspaceName.trim(),
+    const created: Workspace = await response.json();
+    await refreshWorkspaces();
+    setSelectedWorkspaceId(created.workspace_id);
+    setNewWorkspaceName("");
+        <h2>Workspace</h2>
+        <form onSubmit={createWorkspace}>
+            placeholder="Workspace name"
+            value={newWorkspaceName}
+            onChange={(event) => setNewWorkspaceName(event.target.value)}
+          value={selectedWorkspaceId}
+          onChange={(event) => setSelectedWorkspaceId(event.target.value)}
+        {selectedWorkspace ? (
+            Active workspace: <strong>{selectedWorkspace.name}</strong>
+        <h2>Wizard Stepper</h2>
+        <h2>Review Queue</h2>
+        {selectedWorkspaceId ? (
+

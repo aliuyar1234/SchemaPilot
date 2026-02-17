@@ -1,0 +1,4 @@
+﻿        <h2>Recommendation Report</h2>
+          Generate Recommendation
+            <div>Approval required: {String(recommendation.approval_required)}</div>
+            <div>Missing evidence: {recommendation.missing_evidence.join(", ") || "none"}</div>

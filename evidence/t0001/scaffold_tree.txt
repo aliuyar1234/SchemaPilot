@@ -1,0 +1,15 @@
+﻿cli/schemapilot_cli/__init__.py
+backend/workers/__init__.py
+deploy/README.md
+cli/README.md
+deploy/docker-compose.yml
+ui/index.html
+ui/README.md
+backend/README.md
+backend/gateway/__init__.py
+ui/src/App.tsx
+ui/src/main.tsx
+backend/control_plane/__init__.py
+backend/shared_domain/__init__.py
+
+

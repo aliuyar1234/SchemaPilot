@@ -1,0 +1,2 @@
+﻿Generated MANIFEST.sha256
+
