@@ -95,6 +95,16 @@
   - evidence: PROGRESS.md :: PHASE_7_OBSERVABILITY_TESTS_RELEASE
   - evidence: DECISIONS.md :: D-0023 Release readiness baseline (`schemapilot check` includes governance/perf/backup/rotation drills)
 
+## v1.0.9
+- Hardened release-validation protocol for enterprise-like staging:
+  - added clean-room install/bootstrap validation command
+  - added deterministic Python dependency audit based on declared project requirements
+  - added automated release-gate orchestration with machine-readable `go/no-go` output
+  - added CI workflows for security scans and tag-driven release gating
+  - added enterprise release checklist with P0/P1 matrix and sign-off flow
+  - evidence: DECISIONS.md :: D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
+  - evidence: PROGRESS.md :: PHASE_7_OBSERVABILITY_TESTS_RELEASE
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

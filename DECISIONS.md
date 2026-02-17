@@ -24,6 +24,7 @@
 - D-0021 MessyBench and performance harness baseline (machine-readable outputs + regression thresholds)
 - D-0022 Packaging baseline (compose progressive profiles + optional k8s skeleton)
 - D-0023 Release readiness baseline (`schemapilot check` includes governance/perf/backup/rotation drills)
+- D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
 
 ---
 
@@ -884,6 +885,51 @@ Consolidates release gating into one deterministic command that local and CI env
 - Critical flow impacted: YES  
 - Unsafe/high-risk: YES (false release readiness if checks drift)  
 - Conservative baseline available: YES (single command + fail-on-error)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
+
+**Decision**  
+Add an enterprise-like validation layer that is deterministic in local and CI contexts:
+- clean-room bootstrap validation via `tools/cleanroom_install_check.py`,
+- project-scoped Python dependency audit via `tools/dependency_audit.py`,
+- automated release-gate orchestration via `tools/release_gate.py`,
+- dedicated CI workflows for security scans and tagged releases.
+
+**Rationale**  
+`pip-audit` against a shared developer environment can produce nondeterministic failures unrelated to the project. The new baseline audits dependencies declared in `pyproject.toml`, preserves strict vulnerability gating, and combines critical-flow checks into one machine-readable release decision.
+
+**Alternatives considered**  
+- Continue scanning the full active Python environment (rejected: ambient editable packages and unrelated dependencies cause false/noisy failures).
+- Keep release checks fully manual (rejected: weak repeatability and evidence quality).
+
+**Implications**  
+- Release readiness now has a single `go/no-go` report artifact.
+- Security workflows stay strict but focus on project dependency scope.
+- Enterprise controls remain conservative simulations unless externally constrained integrations are configured.
+
+**Affected files**  
+- evidence: tools/dependency_audit.py :: Audit project dependencies declared in pyproject.toml.
+- evidence: tools/release_gate.py :: RG-010
+- evidence: tools/cleanroom_install_check.py :: PASS clean-room install check
+- evidence: .github/workflows/security.yml :: Python dependency vulnerability scan (pip-audit)
+- evidence: .github/workflows/release.yml :: Run release gate
+- evidence: ENTERPRISE_RELEASE_CHECKLIST.md :: Automated Gate Command
+
+**Verification impact**  
+- evidence: tools/check_tooling_baseline.py :: tools/dependency_audit.py
+- evidence: tools/release_gate.py :: RG-003
+- evidence: tools/release_gate.py :: RG-010
+- evidence: ENTERPRISE_RELEASE_CHECKLIST.md :: Release decision:
+
+**DSC summary**  
+- Externally constrained: YES (true enterprise topology/auth/compliance controls vary by org)  
+- Critical flow impacted: YES (security, non-bypass, deletion, backup/restore, release acceptance)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (fail-closed enterprise simulation with no compliance claims)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

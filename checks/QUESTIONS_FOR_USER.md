@@ -86,3 +86,13 @@ evidence: spec/00_PROJECT_FINGERPRINT.md :: Decision Safety Classifier
 - where encoded: runbook deployment; operability gates.
 - what proceeds safely now: OSS deployments and a simple “one env” ops model.
 - risk if wrong: Enterprises may require stricter separation; baseline does not claim to satisfy it.
+
+---
+
+### Q-0009 - blocking: NO
+- why needed: Enterprise staging parity depends on org-specific topology (IdP, network segmentation, ingress controls, managed DB/object-store standards, audit export requirements).
+- what it blocks: Final "environment-parity verified" sign-off for a specific enterprise target.
+- safe default if non-blocking: Use enterprise-profile simulation with fail-closed checks (clean-room install, security scans, gateway non-bypass tests, backup/restore and secrets drills, automated release gate).
+- where encoded: DECISIONS.md D-0024; ENTERPRISE_RELEASE_CHECKLIST.md; tools/release_gate.py.
+- what proceeds safely now: OSS release readiness and conservative enterprise-like validation without compliance claims.
+- risk if wrong: Environment-specific integration issues may appear during first customer staging rollout.

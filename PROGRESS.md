@@ -188,8 +188,11 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
   - evidence: evidence/t0043/messybench_harness.txt :: PASS MessyBench harness
 - T-0044 — status: DONE
   - evidence: tools/check_tooling_baseline.py :: tools/perf_harness.py
+  - evidence: tools/check_tooling_baseline.py :: tools/dependency_audit.py
+  - evidence: tools/dependency_audit.py :: PASS dependency audit
   - evidence: tools/perf_harness.py :: PASS CHK-PERF-HARNESS
   - evidence: .github/workflows/ci.yml :: Run SchemaPilot checks
+  - evidence: .github/workflows/security.yml :: Python static security scan (bandit)
   - evidence: evidence/t0044/perf_harness.txt :: PASS CHK-PERF-HARNESS
 - T-0045 — status: DONE
   - evidence: deploy/docker-compose.yml :: profiles: ["starter", "team", "enterprise"]
@@ -198,6 +201,10 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - T-0046 — status: DONE
   - evidence: spec/12_RUNBOOK.md :: Maintenance Playbook
   - evidence: tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+  - evidence: tools/cleanroom_install_check.py :: PASS clean-room install check
+  - evidence: tools/release_gate.py :: RG-010
+  - evidence: .github/workflows/release.yml :: Run release gate
+  - evidence: ENTERPRISE_RELEASE_CHECKLIST.md :: Automated Gate Command
   - evidence: evidence/t0044/check_tooling_baseline_pre_manifest.txt :: All checks passed!
 ## Session history (SSOT pack only)
 - 2026-02-17 â€” Initial SSOT pack generated; manifest created; self-audit recorded.
@@ -208,5 +215,6 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-17 â€” Completed PHASE_4 silver/gold baseline, gateway execution, non-bypass checks, and upgrade drill tasks.
 - 2026-02-17 â€” Completed PHASE_5 decision engine template/gating/scoring/confidence/report tasks.
 - 2026-02-17 — Completed PHASE_6 governance/retrieval hardening and PHASE_7 observability/perf/packaging/release-readiness tasks.
+- 2026-02-17 — Hardened enterprise-like release validation with clean-room install, project-scoped dependency audit, and automated release-gate reporting.
 
 
