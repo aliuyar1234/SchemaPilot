@@ -141,3 +141,37 @@ def test_kpi_report_invokes_tracker_script(monkeypatch) -> None:
     assert "tools/kpi_tracker.py" in command
     assert "--week" in command
     assert "2026-W08" in command
+
+
+def test_migrate_up_invokes_alembic_upgrade_head(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(command: list[str], *, cwd=None):  # type: ignore[no-untyped-def]
+        captured["command"] = command
+        captured["cwd"] = cwd
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._run", fake_run)
+    result = runner.invoke(
+        app,
+        ["migrate-up", "--alembic-ini", "custom.ini"],
+    )
+    assert result.exit_code == 0
+    command = captured["command"]
+    assert command[1:] == ["-m", "alembic", "-c", "custom.ini", "upgrade", "head"]
+
+
+def test_migrate_status_invokes_alembic_current(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(command: list[str], *, cwd=None):  # type: ignore[no-untyped-def]
+        captured["command"] = command
+        captured["cwd"] = cwd
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._run", fake_run)
+    result = runner.invoke(
+        app,
+        ["migrate-status", "--alembic-ini", "custom.ini"],
+    )
+    assert result.exit_code == 0
+    command = captured["command"]
+    assert command[1:] == ["-m", "alembic", "-c", "custom.ini", "current"]

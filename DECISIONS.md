@@ -39,6 +39,18 @@
 - D-0036 Plugin runtime baseline (entry-point connector loading + worker fallback wiring)
 - D-0037 KPI extraction baseline (runtime-derived weekly KPI snapshot generation)
 - D-0038 Completion baseline for deploy/community/UI thin slice (compose smoke validated, OSS templates added, UI kept intentionally lightweight)
+- D-0039 Post-PR018 execution backlog baseline (S0-first, no timeline planning, minimal UI scope)
+- D-0040 OIDC JWT verification and deploy no-bypass enforcement baseline (shared auth path, strict startup guards, and static deploy checks)
+- D-0041 Audit fail-closed enforcement baseline (gateway/control-plane deny on audit write failures with explicit observability)
+- D-0042 Gateway workspace isolation baseline (deny cross-workspace dataset access for AI SQL and retrieval paths)
+- D-0043 Gateway actor throttling baseline (per-actor rate and concurrency deny controls with fail-closed decisions)
+- D-0044 Migration-state startup enforcement baseline (non-local bind requires expected alembic revision; local bind retains bootstrap autocreate)
+- D-0045 Backup/restore toolchain baseline (explicit backup + restore utilities with drill integration and regression tests)
+- D-0046 Strict ingest completeness baseline (team/enterprise default strict mode with fail-closed evidence and blocking quality tasks)
+- D-0047 Retention/deletion governance baseline (retention policy + purge controls and separation-of-duties deletion workflow)
+- D-0048 Provenance and policy lifecycle baseline (provenance v1 contract, audit export, policy-pack approval/rollback controls)
+- D-0049 Plugin security and contract gate baseline (plugin allowlist isolation + OpenAPI compatibility + golden-path regression gate)
+- D-0050 Team query engine upgrade baseline (gateway trino adapter with duckdb fallback and docs/runbook finalization)
 
 ---
 
@@ -1559,6 +1571,533 @@ The project objective is backend governance reliability and installability. This
 - Critical flow impacted: YES (deployment and contributor workflow)  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES (thin UI retained; hardening defaults unchanged)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0039 Post-PR018 execution backlog baseline (S0-first, no timeline planning, minimal UI scope)
+
+**Decision**  
+Replace the completed PR-001..PR-018 board with a strict next-step execution queue:
+- Preserve completed baseline as reference, then execute PR-019 onward in explicit order.
+- Prioritize S0 security/governance tasks before scaling or polish work.
+- Keep UI scope minimal and blocker-only while backend, policy, and deploy hardening continue.
+- Avoid timeline/date planning in the task board; execution is order-driven.
+
+**Rationale**  
+The next phase needs a clear production-hardening sequence without reopening already-finished work or diluting effort into non-critical UI expansion.
+
+**Alternatives considered**  
+- Keep legacy board unchanged and track new work in ad-hoc notes (rejected: unclear execution order and weaker traceability).  
+- Add roadmap timelines/dates into `TASKLIST.md` (rejected: user asked for no timeline planning).
+
+**Implications**  
+- Contributors have a single ordered queue for remaining work.
+- S0 gatekeeping (authn, no-bypass, audit fail-closed, workspace isolation) becomes explicit.
+- UI remains intentionally thin unless a core-flow blocker appears.
+
+**Affected files**  
+- evidence: TASKLIST.md :: # SchemaPilot Execution Board (Post PR-018)
+- evidence: TASKLIST.md :: ## Active Queue (Execute In Order)
+- evidence: TASKLIST.md :: ## Backlog (After PR-030)
+
+**Verification impact**  
+- evidence: tools/verify_manifest.py :: PASS
+- evidence: tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (execution sequencing for security/reliability work)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (S0-first and fail-closed defaults preserved)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0040 OIDC JWT verification and deploy no-bypass enforcement baseline (shared auth path, strict startup guards, and static deploy checks)
+
+**Decision**  
+Implement the first post-PR018 S0 lane by shipping:
+- shared `oidc_jwt` authentication mode with JWKS-backed JWT verification in `shared_domain/auth.py`,
+- unified gateway/control-plane auth resolution through shared auth helpers,
+- strict startup guards for trusted-proxy OIDC usage on non-local bind,
+- static deploy no-bypass checker wired into tooling baseline.
+
+**Rationale**  
+Production-ready auth and no-bypass enforcement are immediate critical-path blockers. Shipping them first reduces the highest-risk security gaps while preserving existing local/trusted-proxy compatibility.
+
+**Alternatives considered**  
+- Keep gateway-specific auth logic and add JWT there only (rejected: divergence risk between control plane and gateway).  
+- Defer deploy no-bypass checks to release-only scripts (rejected: weaker day-to-day regression protection).
+
+**Implications**  
+- `auth_mode=oidc_jwt` is now available with fail-closed verification semantics.
+- Existing `auth_mode=oidc` behavior is preserved as trusted-proxy mode (alias), while non-local usage requires explicit `oidc_trusted_proxy=true`.
+- Deploy artifact checks now fail fast if direct engine/index ports are exposed.
+
+**Affected files**  
+- evidence: backend/shared_domain/auth.py :: authenticated_actor_from_oidc_jwt
+- evidence: backend/shared_domain/config.py :: def validate(self)
+- evidence: backend/gateway/app.py :: create_gateway_app
+- evidence: tools/check_no_bypass_ports.py :: validate_no_bypass_ports
+- evidence: tools/check_tooling_baseline.py :: tools/check_no_bypass_ports.py
+- evidence: tests/test_gateway_oidc_jwt_auth.py :: test_gateway_oidc_jwt_allows_valid_token
+- evidence: tests/test_control_plane_oidc_jwt_auth.py :: test_control_plane_oidc_jwt_allows_platform_admin
+- evidence: tests/test_startup_security.py :: test_gateway_fails_on_non_local_trusted_proxy_without_explicit_trust
+
+**Verification impact**  
+- evidence: tests/test_gateway_oidc_auth.py :: test_gateway_oidc_allows_valid_claims_mapping
+- evidence: tests/test_gateway_oidc_jwt_auth.py :: test_gateway_oidc_jwt_denies_invalid_signature
+- evidence: tests/test_control_plane_oidc_jwt_auth.py :: test_control_plane_oidc_jwt_denies_insufficient_role
+- evidence: tests/test_startup_security.py :: test_control_plane_fails_on_non_local_trusted_proxy_without_explicit_trust
+- evidence: tests/test_no_bypass_deploy_artifacts.py :: test_deploy_artifacts_do_not_expose_bypass_ports
+- evidence: tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (authentication and deployment boundary controls)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (local mode remains available; trusted-proxy requires explicit opt-in)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0041 Audit fail-closed enforcement baseline (gateway/control-plane deny on audit write failures with explicit observability)
+
+**Decision**  
+Enforce explicit fail-closed behavior when audit writes fail:
+- gateway access-decision persistence now raises a policy denial with `reason=audit_unavailable` if audit commit fails,
+- control-plane audit append is wrapped and converted to policy denial on failures,
+- audit write failures are counted via `schemapilot_audit_write_failures_total`.
+
+**Rationale**  
+Governed operation claims are not credible if critical flows can continue without durable audit evidence.
+
+**Alternatives considered**  
+- Return generic 500 without explicit deny semantics (rejected: unclear policy behavior).  
+- Fail open and only log errors (rejected: violates governance guarantees).
+
+**Implications**  
+- Critical request paths are blocked when audit storage is unavailable.
+- Failures are visible in metrics and structured logs for incident triage.
+- Existing happy-path behavior remains unchanged when audit storage is healthy.
+
+**Affected files**  
+- evidence: backend/gateway/app.py :: _record_access_decision
+- evidence: backend/control_plane/app.py :: def append_audit_event(
+- evidence: backend/shared_domain/observability.py :: schemapilot_audit_write_failures_total
+- evidence: tests/test_audit_fail_closed.py :: test_gateway_denies_query_when_audit_write_fails
+- evidence: tests/test_audit_fail_closed.py :: test_control_plane_denies_mutation_when_audit_write_fails
+
+**Verification impact**  
+- evidence: tests/test_audit_fail_closed.py :: test_gateway_denies_query_when_audit_write_fails
+- evidence: tests/test_audit_fail_closed.py :: test_control_plane_denies_mutation_when_audit_write_fails
+- evidence: tests/test_gateway_audit.py :: test_gateway_query_writes_audit_and_access_decision
+- evidence: tests/test_control_plane_auth.py :: test_control_plane_allows_admin_and_steward_roles_for_mutating_flows
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (query/mutation authorization and auditable operations)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny on audit failure)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0042 Gateway workspace isolation baseline (deny cross-workspace dataset access for AI SQL and retrieval paths)
+
+**Decision**  
+Enforce explicit workspace isolation checks in gateway AI access paths:
+- SQL query path now denies when requested `dataset_id` is known but belongs to another workspace.
+- Retrieval path now denies when actor dataset entitlements include dataset IDs known to other workspaces.
+- Denials use `reason=dataset_workspace_mismatch` and are audited.
+
+**Rationale**  
+Cross-workspace bleed is a critical policy violation. Workspace boundary checks must be explicit even when IDs are guessed or entitlements are mis-scoped.
+
+**Alternatives considered**  
+- Rely only on actor `allowed_dataset_ids` checks (rejected: does not enforce workspace ownership).  
+- Require dataset existence for every request and deny unknown IDs globally (rejected for now to avoid breaking existing local demo/default flows).
+
+**Implications**  
+- Known foreign datasets cannot be queried or retrieved across workspace boundaries.
+- Unknown dataset IDs preserve current behavior for compatibility, while known cross-workspace IDs are blocked.
+- Access decision evidence now captures cross-workspace mismatch denials.
+
+**Affected files**  
+- evidence: backend/gateway/app.py :: _dataset_belongs_to_other_workspace
+- evidence: backend/gateway/app.py :: dataset_workspace_mismatch
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_retrieve_denies_cross_workspace_dataset_entitlement
+
+**Verification impact**  
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_retrieve_denies_cross_workspace_dataset_entitlement
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_query_for_unentitled_dataset
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_for_allowlisted_ai_identity
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (authorization boundary checks in gateway)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny known foreign datasets, keep compatibility for unknown IDs)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0043 Gateway actor throttling baseline (per-actor rate and concurrency deny controls with fail-closed decisions)
+
+**Decision**  
+Add in-memory per-actor throttling controls for gateway query and retrieval paths:
+- per-minute request caps (`rate_limit_exceeded`),
+- per-actor in-flight caps (`concurrency_limit_exceeded`),
+- fail-closed denial behavior with policy/audit records.
+
+**Rationale**  
+Operational safety needs explicit throttling to reduce runaway query load and abusive request patterns.
+
+**Alternatives considered**  
+- Defer throttling until external API gateway integration (rejected: leaves core service unprotected).  
+- Global process-wide limits only (rejected: weaker tenant/actor isolation).
+
+**Implications**  
+- Gateway can deny requests before execution when actor limits are exceeded.
+- Denials are surfaced via existing policy denial/audit paths.
+- Limits are configurable through environment variables with safe defaults.
+
+**Affected files**  
+- evidence: backend/shared_domain/rate_limit.py :: InMemoryActorRateLimiter
+- evidence: backend/gateway/app.py :: SCHEMAPILOT_GATEWAY_MAX_REQUESTS_PER_MINUTE
+- evidence: backend/gateway/app.py :: SCHEMAPILOT_GATEWAY_MAX_CONCURRENT_PER_ACTOR
+- evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_rate_limit_exceeded
+- evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_concurrency_limit_exceeded
+
+**Verification impact**  
+- evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_rate_limit_exceeded
+- evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_concurrency_limit_exceeded
+- evidence: tests/test_gateway_query_execution.py :: test_gateway_executes_sql_and_returns_provenance
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_for_allowlisted_ai_identity
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (gateway availability and policy deny paths)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny on limit breaches)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0044 Migration-state startup enforcement baseline (non-local bind requires expected alembic revision; local bind retains bootstrap autocreate)
+
+**Decision**  
+Introduce explicit migration-state startup checks:
+- non-local binds require `alembic_version` table and expected revision match (`SCHEMAPILOT_REQUIRED_DB_REVISION`, default `0001_initial_schema`),
+- local bind retains bootstrap `create_all` behavior for dev/test workflows,
+- add CLI migration helpers (`migrate-up`, `migrate-status`) and regression tests.
+
+**Rationale**  
+Production startup should not silently create schema state. Non-local deployments must prove migration compatibility before serving requests.
+
+**Alternatives considered**  
+- Keep unconditional `create_all` on startup everywhere (rejected: unsafe for non-local/prod paths).  
+- Require migrations even for local bind (rejected: unnecessary friction for fast local onboarding and tests).
+
+**Implications**  
+- Non-local misconfigured DBs fail fast at startup with explicit configuration errors.
+- Local development remains simple and backward compatible.
+- CLI now includes explicit migration commands for operator workflows.
+
+**Affected files**  
+- evidence: backend/shared_domain/db.py :: prepare_database
+- evidence: backend/shared_domain/db.py :: ensure_required_revision
+- evidence: backend/control_plane/app.py :: prepare_database(settings)
+- evidence: backend/gateway/app.py :: prepare_database(settings)
+- evidence: cli/schemapilot_cli/main.py :: @app.command("migrate-up")
+- evidence: cli/schemapilot_cli/main.py :: @app.command("migrate-status")
+- evidence: tests/test_migrations_enforced.py :: test_gateway_non_local_requires_migration_state
+- evidence: tests/test_cli_commands.py :: test_migrate_up_invokes_alembic_upgrade_head
+
+**Verification impact**  
+- evidence: tests/test_migrations_enforced.py :: test_control_plane_non_local_requires_migration_state
+- evidence: tests/test_migrations_enforced.py :: test_non_local_allows_expected_revision_present
+- evidence: tests/test_migrations_enforced.py :: test_non_local_denies_revision_mismatch
+- evidence: tests/test_cli_commands.py :: test_migrate_status_invokes_alembic_current
+- evidence: tests/test_startup_security.py :: test_gateway_fails_on_non_local_without_auth
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (service startup safety in non-local environments)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (strict non-local checks + local bootstrap compatibility)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0045 Backup/restore toolchain baseline (explicit backup + restore utilities with drill integration and regression tests)
+
+**Decision**  
+Split backup and restore behavior into dedicated tools and wire the drill through those utilities:
+- add `tools/backup.py` for metadata+storage snapshot creation with manifest output,
+- add `tools/restore.py` for deterministic restore from backup snapshots,
+- update `tools/backup_restore_drill.py` to call these tools directly,
+- add regression tests for backup/restore round-trip and drill pass behavior.
+
+**Rationale**  
+Operator-facing backup/restore workflows are clearer and more reusable when exposed as explicit tools instead of only being embedded inside a single drill script.
+
+**Alternatives considered**  
+- Keep backup/restore logic only in drill script (rejected: weak operator ergonomics and lower testability).  
+- Add external backup dependencies immediately (rejected: unnecessary complexity for current single-node baseline).
+
+**Implications**  
+- Backup and restore can be invoked independently in runbooks and automation.
+- Drill remains the acceptance check while sharing production-like tool paths.
+- Report/manifests become explicit artifacts for troubleshooting.
+
+**Affected files**  
+- evidence: tools/backup.py :: backup_runtime_state
+- evidence: tools/restore.py :: restore_runtime_state
+- evidence: tools/backup_restore_drill.py :: backup_runtime_state(
+- evidence: tests/test_backup_restore_tools.py :: test_backup_and_restore_tools_roundtrip
+- evidence: tests/test_backup_restore_drill.py :: test_backup_restore_drill_passes
+
+**Verification impact**  
+- evidence: tests/test_backup_restore_tools.py :: test_backup_and_restore_tools_roundtrip
+- evidence: tests/test_backup_restore_drill.py :: test_backup_restore_drill_passes
+- evidence: tools/backup_restore_drill.py :: PASS CHK-BACKUP-RESTORE
+- evidence: tools/check_tooling_baseline.py :: tools/backup_restore_drill.py
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (data recovery and operational resilience)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (filesystem+sqlite toolchain with explicit manifests)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0046 Strict ingest completeness baseline (team/enterprise default strict mode with fail-closed evidence and blocking quality tasks)
+
+**Decision**  
+Enforce strict ingest completeness as the default for Team/Enterprise worker profiles:
+- unreadable/unparseable discovered items fail the run,
+- completeness failures are written to immutable evidence bundles,
+- blocking quality-critical review tasks are created for strict ingest failures.
+
+**Rationale**  
+Silent partial ingest is a high-risk correctness failure. Strict mode with evidence-backed failures preserves trust in downstream catalog/build/query surfaces.
+
+**Alternatives considered**  
+- Continue best-effort ingest with warnings only (rejected: allows silent data loss).  
+- Make strict mode always-on for all profiles (rejected for now to preserve starter/local flexibility).
+
+**Implications**  
+- Team/Enterprise workers default to fail-closed ingest behavior.
+- Failure evidence becomes first-class and review-gated.
+- Publish remains blocked while strict completeness issues are open.
+
+**Affected files**  
+- evidence: backend/workers/run_processor.py :: StrictIngestCompletenessError
+- evidence: backend/workers/service.py :: strict_ingest
+- evidence: tests/test_strict_ingest_completeness.py :: test_strict_ingest_fails_closed_and_creates_blocking_task
+- evidence: tests/test_worker_runner.py :: test_worker_service_config_defaults_strict_ingest_for_team_profile
+
+**Verification impact**  
+- evidence: tests/test_strict_ingest_completeness.py :: test_non_strict_ingest_records_warning_and_continues
+- evidence: tests/test_worker_runner.py :: test_worker_service_config_allows_explicit_non_strict_override
+- evidence: tools/check_tooling_baseline.py :: run([sys.executable, "tools/e2e_golden_path.py", "--smoke"], cwd=root)
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (ingest correctness and fail-closed governance)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (strict default for Team/Enterprise)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0047 Retention/deletion governance baseline (retention policy + purge controls and separation-of-duties deletion workflow)
+
+**Decision**  
+Implement retention and deletion governance with explicit safety gates:
+- retention policy and purge execution are workspace-scoped and disabled-by-default until configured,
+- purge requires explicit enablement, legal-hold clear state, and immutable evidence output,
+- deletion flow enforces request/approve/execute state transitions with requester non-self-approval and legal-hold server-side truth.
+
+**Rationale**  
+Data lifecycle controls must be auditable and fail-closed before claiming enterprise readiness.
+
+**Alternatives considered**  
+- Keep deletion/retention as doc-only stubs (rejected: insufficient operational confidence).  
+- Allow direct one-step deletion execution (rejected: violates separation of duties).
+
+**Implications**  
+- Operators must explicitly enable retention purge and deletion execution features.
+- Governance flows now produce auditable/evidence-backed artifacts.
+- Control-plane endpoints deny unsafe lifecycle actions by default.
+
+**Affected files**  
+- evidence: backend/control_plane/retention.py :: execute_retention_purge
+- evidence: backend/shared_domain/purge.py :: purge_workspace_artifacts
+- evidence: backend/control_plane/deletion.py :: approve_deletion_request
+- evidence: backend/control_plane/deletion.py :: execute_deletion_request
+- evidence: tests/test_retention_purge_fail_closed.py :: test_retention_purge_requires_explicit_purge_path_config
+- evidence: tests/test_deletion_separation_of_duties.py :: test_deletion_workflow_enforces_separation_of_duties
+
+**Verification impact**  
+- evidence: tests/test_deletion_separation_of_duties.py :: test_legal_hold_is_server_side_truth_for_deletions
+- evidence: tests/test_retention_purge_fail_closed.py :: test_retention_purge_succeeds_with_evidence_and_file_cleanup
+- evidence: tools/backup_restore_drill.py :: PASS CHK-BACKUP-RESTORE
+
+**DSC summary**  
+- Externally constrained: YES (retention/legal requirements vary by org)  
+- Critical flow impacted: YES (governance lifecycle and deletion safety)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (features disabled unless explicitly configured)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0048 Provenance and policy lifecycle baseline (provenance v1 contract, audit export, policy-pack approval/rollback controls)
+
+**Decision**  
+Ship stable governance contracts for runtime decisions:
+- versioned provenance payload builder (`provenance_version=1`) with required fields and fail-closed gateway handling,
+- deterministic audit export utility for append-only audit/access-decision rows,
+- policy-pack change requests with review-task gating, apply/rollback semantics, and effective policy-pack visibility in gateway.
+
+**Rationale**  
+Governance confidence depends on stable contracts and auditable policy lifecycle transitions.
+
+**Alternatives considered**  
+- Keep ad-hoc provenance dictionaries with best-effort fields (rejected: contract drift risk).  
+- Apply policy-pack changes directly without staged approval (rejected: weak governance controls).
+
+**Implications**  
+- Provenance schema is now a test-enforced compatibility surface.
+- Policy-pack changes are review-gated and rollbackable.
+- Gateway audit/provenance now includes effective policy-pack context.
+
+**Affected files**  
+- evidence: backend/shared_domain/provenance.py :: build_provenance_v1
+- evidence: tools/audit_export.py :: export_audit_jsonl
+- evidence: backend/control_plane/policy_pack_service.py :: request_policy_pack_change
+- evidence: backend/control_plane/policy_pack_service.py :: rollback_policy_pack
+- evidence: tests/test_provenance_schema_stability.py :: test_gateway_query_provenance_v1_fields_are_stable
+- evidence: tests/test_policy_pack_change_gating.py :: test_policy_pack_change_is_approval_gated_and_rollbackable
+
+**Verification impact**  
+- evidence: tests/test_provenance_schema_stability.py :: test_audit_export_jsonl_is_deterministic
+- evidence: tests/test_policy_pack_change_gating.py :: test_policy_pack_change_is_approval_gated_and_rollbackable
+- evidence: tools/check_openapi_compat.py :: PASS CHK-CONTRACT-COMPAT
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (policy decisions, provenance, audit contract stability)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny on provenance contract failure)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0049 Plugin security and contract gate baseline (plugin allowlist isolation + OpenAPI compatibility + golden-path regression gate)
+
+**Decision**  
+Harden extension and compatibility surfaces:
+- require explicit connector plugin allowlist and isolated subprocess plugin execution,
+- add committed OpenAPI baseline artifacts with compatibility checker gate,
+- add deterministic golden-path e2e smoke and MessyBench regression threshold mode to quality/release gates.
+
+**Rationale**  
+Plugin extensibility and API evolution are major regression vectors; they need first-class fail-closed enforcement in normal CI/release flow.
+
+**Alternatives considered**  
+- Keep plugin runtime permissive and rely on docs (rejected: supply-chain risk).  
+- Run OpenAPI/e2e checks only manually (rejected: drift risk).
+
+**Implications**  
+- Unknown/unallowlisted plugin source types are denied.
+- API contract drift is automatically detected against committed baselines.
+- End-to-end regressions are caught earlier with deterministic harnesses.
+
+**Affected files**  
+- evidence: backend/shared_domain/plugin_loader.py :: configured_plugin_allowlist
+- evidence: backend/workers/connectors/plugin_runner.py :: _run_plugin_in_subprocess
+- evidence: tools/check_openapi_compat.py :: main
+- evidence: tools/e2e_golden_path.py :: run_golden_path
+- evidence: tools/messybench_harness.py :: --regression
+- evidence: tests/test_plugin_allowlist.py :: test_source_connect_denied_when_plugin_not_allowlisted
+- evidence: tests/test_openapi_contracts.py :: test_openapi_contract_baselines_are_compatible
+- evidence: tests/test_e2e_golden_path_smoke.py :: test_e2e_golden_path_smoke
+
+**Verification impact**  
+- evidence: tools/check_tooling_baseline.py :: tools/check_openapi_compat.py
+- evidence: tools/check_tooling_baseline.py :: run([sys.executable, "tools/e2e_golden_path.py", "--smoke"], cwd=root)
+- evidence: tools/release_gate.py :: RG-007
+- evidence: tools/release_gate.py :: RG-008
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (plugin supply-chain safety, API compatibility, release regression control)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny-by-default plugin loading and strict compatibility checks)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0050 Team query engine upgrade baseline (gateway trino adapter with duckdb fallback and docs/runbook finalization)
+
+**Decision**  
+Enable progressive query-engine selection in gateway:
+- keep `duckdb` as default query engine,
+- add `trino` adapter path configured by explicit environment settings,
+- preserve SQL safety checks and no-bypass deployment posture across both modes,
+- finalize runbook/readme/doc index updates for implemented security/operability defaults while keeping UI intentionally minimal.
+
+**Rationale**  
+Team profile readiness requires a scalable engine path without weakening existing secure defaults.
+
+**Alternatives considered**  
+- Replace DuckDB entirely with Trino (rejected: reduces starter/local simplicity).  
+- Keep Trino as a future-only stub (rejected: blocks team upgrade validation).
+
+**Implications**  
+- Gateway can query through Trino when configured while retaining DuckDB fallback.
+- Deploy remains gateway-first with no direct engine exposure.
+- Operator docs now reflect implemented auth, ingest, plugin, and regression controls.
+
+**Affected files**  
+- evidence: backend/shared_domain/config.py :: SUPPORTED_QUERY_ENGINES
+- evidence: backend/gateway/executor.py :: execute_sql
+- evidence: backend/gateway/executor_trino.py :: execute_sql_trino
+- evidence: tests/test_gateway_trino_adapter.py :: test_gateway_query_can_use_trino_engine_path
+- evidence: README.md :: Implemented Safe Defaults (Current)
+- evidence: spec/12_RUNBOOK.md :: OIDC-first enterprise integration
+- evidence: docs/runbook/README.md :: Operator Runbook Index
+
+**Verification impact**  
+- evidence: tests/test_gateway_trino_adapter.py :: test_execute_sql_uses_trino_adapter_with_pagination
+- evidence: tests/test_gateway_sql_safety.py :: test_gateway_denies_unsafe_sql_keyword_in_select_path
+- evidence: tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+- evidence: tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (query execution and deployment security posture)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (duckdb default, trino opt-in)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

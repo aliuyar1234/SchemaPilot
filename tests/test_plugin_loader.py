@@ -38,4 +38,14 @@ def test_connector_plugin_loader_requires_callable_plugins(monkeypatch) -> None:
     entries = [_FakeEntryPoint(name="bad", value={"not": "callable"})]
     monkeypatch.setattr(plugin_loader, "_select_entry_points", lambda group: entries)
     with pytest.raises(TypeError, match="not callable"):
-        plugin_loader.load_connector_plugins()
+        plugin_loader.load_connector_plugin_specs(allowlist={"bad"})
+
+
+def test_connector_plugin_loader_respects_allowlist(monkeypatch) -> None:
+    entries = [
+        _FakeEntryPoint(name="allowed", value=lambda scope: []),
+        _FakeEntryPoint(name="blocked", value=lambda scope: []),
+    ]
+    monkeypatch.setattr(plugin_loader, "_select_entry_points", lambda group: entries)
+    specs = plugin_loader.load_connector_plugin_specs(allowlist={"allowed"})
+    assert set(specs.keys()) == {"allowed"}

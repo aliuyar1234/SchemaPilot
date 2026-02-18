@@ -205,6 +205,22 @@ def kpi_report(
     )
 
 
+@app.command("migrate-up")
+def migrate_up(
+    alembic_ini: str = typer.Option("alembic.ini", "--alembic-ini"),
+) -> None:
+    """Apply database migrations to latest revision."""
+    _run([sys.executable, "-m", "alembic", "-c", alembic_ini, "upgrade", "head"])
+
+
+@app.command("migrate-status")
+def migrate_status(
+    alembic_ini: str = typer.Option("alembic.ini", "--alembic-ini"),
+) -> None:
+    """Show current database migration revision."""
+    _run([sys.executable, "-m", "alembic", "-c", alembic_ini, "current"])
+
+
 @app.command()
 def check() -> None:
     """Run local quality checks."""

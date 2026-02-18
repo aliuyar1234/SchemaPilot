@@ -3,10 +3,22 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import shutil
 import sqlite3
 from pathlib import Path
+
+
+def _import_tool_module(module_name: str):
+    try:
+        return importlib.import_module(f"tools.{module_name}")
+    except ModuleNotFoundError:
+        return importlib.import_module(module_name)
+
+
+backup_module = _import_tool_module("backup")
+restore_module = _import_tool_module("restore")
 
 
 def _write_seed_state(db_path: Path, storage_path: Path) -> None:
@@ -51,11 +63,15 @@ def main() -> int:
     source_storage = source_dir / "storage"
     _write_seed_state(source_db, source_storage)
 
-    shutil.copy2(source_db, backup_dir / "metadata.db")
-    shutil.copytree(source_storage, backup_dir / "storage", dirs_exist_ok=True)
-
-    shutil.copy2(backup_dir / "metadata.db", restored_dir / "metadata.db")
-    shutil.copytree(backup_dir / "storage", restored_dir / "storage", dirs_exist_ok=True)
+    backup_module.backup_runtime_state(
+        source_db=source_db,
+        source_storage=source_storage,
+        output_dir=backup_dir,
+    )
+    restore_module.restore_runtime_state(
+        backup_dir=backup_dir,
+        restore_dir=restored_dir,
+    )
 
     run_count, snapshot_id = _verify_restored_state(
         restored_dir / "metadata.db",

@@ -119,6 +119,66 @@ class GovernancePolicy(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class GovernanceRetentionPolicy(Base):
+    """Retention policy configuration (disabled by default)."""
+
+    __tablename__ = "governance_retention_policies"
+
+    retention_policy_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    purge_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    legal_hold_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+
+
+class GovernancePurgeRun(Base):
+    """Retention purge execution metadata and evidence linkage."""
+
+    __tablename__ = "governance_purge_runs"
+
+    purge_run_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    retention_policy_id: Mapped[str] = mapped_column(String(26), nullable=False)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    deleted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deleted_paths_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    evidence_bundle_uri: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class GovernanceDeletionRequest(Base):
+    """Deletion workflow request state."""
+
+    __tablename__ = "governance_deletion_requests"
+
+    deletion_request_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    requester_actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_selector_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    affected_snapshots_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    affected_indexes_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    legal_hold_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_bundle_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GovernanceDeletionApproval(Base):
+    """Deletion approval records enforcing separation of duties."""
+
+    __tablename__ = "governance_deletion_approvals"
+
+    deletion_approval_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    deletion_request_id: Mapped[str] = mapped_column(String(26), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    approver_actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 __all__ = [
     "Workspace",
     "CatalogSource",
@@ -128,7 +188,10 @@ __all__ = [
     "ReviewTask",
     "ReviewApproval",
     "GovernancePolicy",
+    "GovernanceRetentionPolicy",
+    "GovernancePurgeRun",
+    "GovernanceDeletionRequest",
+    "GovernanceDeletionApproval",
     "AuditEvent",
     "AccessDecision",
 ]
-

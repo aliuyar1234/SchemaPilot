@@ -94,6 +94,11 @@ def execute_sql(
     timeout_ms: int = 5000,
     workspace_id: str | None = None,
     storage_root: str = "./runtime/storage",
+    query_engine: str = "duckdb",
+    trino_url: str = "http://trino:8080",
+    trino_user: str = "schemapilot",
+    trino_catalog: str = "memory",
+    trino_schema: str = "default",
 ) -> QueryResult:
     """Execute SQL using an in-memory DuckDB engine for gateway behavior."""
     query = _validate_read_only_query(sql or "select 1 as one")
@@ -101,6 +106,30 @@ def execute_sql(
     budget_ms = max(1, min(timeout_ms, 60_000))
     if budget_ms <= 1:
         raise QueryTimeoutError("query_timeout_exceeded")
+
+    if query_engine == "trino":
+        from backend.gateway.executor_trino import execute_sql_trino
+
+        started_at = perf_counter()
+        columns, trino_rows = execute_sql_trino(
+            query=query,
+            max_rows=capped_rows,
+            timeout_ms=budget_ms,
+            trino_url=trino_url,
+            trino_user=trino_user,
+            trino_catalog=trino_catalog,
+            trino_schema=trino_schema,
+        )
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        if elapsed_ms > float(budget_ms):
+            raise QueryTimeoutError("query_timeout_exceeded")
+        rows = _apply_optional_row_filter(
+            columns=columns,
+            rows=trino_rows,
+            row_filter=row_filter,
+            capped_rows=capped_rows,
+        )
+        return QueryResult(columns=columns, rows=rows, row_count=len(rows))
 
     connection = duckdb.connect(database=":memory:")
     try:
@@ -124,24 +153,44 @@ def execute_sql(
             for item in description
         ]
         if row_filter is None:
-            rows = cursor.fetchmany(capped_rows)
+            rows = [list(row) for row in cursor.fetchmany(capped_rows)]
         else:
-            filter_column, filter_value = row_filter
-            normalized_column = _validate_filter_column(filter_column)
-            column_names = [column["name"] for column in columns]
-            try:
-                filter_idx = column_names.index(normalized_column)
-            except ValueError:
-                rows = []
-            else:
-                all_rows = cursor.fetchall()
-                rows = [
-                    row for row in all_rows if str(row[filter_idx]) == str(filter_value)
-                ][:capped_rows]
+            rows = _apply_optional_row_filter(
+                columns=columns,
+                rows=[list(row) for row in cursor.fetchall()],
+                row_filter=row_filter,
+                capped_rows=capped_rows,
+            )
     finally:
         connection.close()
-    serialized_rows = [list(row) for row in rows]
-    return QueryResult(columns=columns, rows=serialized_rows, row_count=len(serialized_rows))
+    return QueryResult(columns=columns, rows=rows, row_count=len(rows))
+
+
+def _apply_optional_row_filter(
+    *,
+    columns: list[dict[str, str]],
+    rows: list[list[object]],
+    row_filter: tuple[str, str] | None,
+    capped_rows: int,
+) -> list[list[object]]:
+    if row_filter is None:
+        return rows[:capped_rows]
+    filter_column, filter_value = row_filter
+    normalized_column = _validate_filter_column(filter_column)
+    column_names = [column["name"] for column in columns]
+    try:
+        filter_idx = column_names.index(normalized_column)
+    except ValueError:
+        return []
+    filtered: list[list[object]] = []
+    for row in rows:
+        if filter_idx >= len(row):
+            continue
+        if str(row[filter_idx]) == str(filter_value):
+            filtered.append(list(row))
+        if len(filtered) >= capped_rows:
+            break
+    return filtered
 
 
 def _prepare_published_gold_views(

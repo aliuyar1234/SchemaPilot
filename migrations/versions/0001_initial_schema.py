@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0001_initial_schema"
@@ -93,6 +93,70 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=32), nullable=False),
     )
     op.create_table(
+        "governance_retention_policies",
+        sa.Column("retention_policy_id", sa.String(length=26), primary_key=True),
+        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("retention_days", sa.Integer(), nullable=False),
+        sa.Column("enabled", sa.Boolean(), nullable=False),
+        sa.Column("purge_enabled", sa.Boolean(), nullable=False),
+        sa.Column("legal_hold_active", sa.Boolean(), nullable=False),
+        sa.Column("created_by", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+    )
+    op.create_index(
+        "ix_governance_retention_policies_workspace_id",
+        "governance_retention_policies",
+        ["workspace_id"],
+    )
+    op.create_table(
+        "governance_purge_runs",
+        sa.Column("purge_run_id", sa.String(length=26), primary_key=True),
+        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("retention_policy_id", sa.String(length=26), nullable=False),
+        sa.Column("dry_run", sa.Boolean(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("deleted_count", sa.Integer(), nullable=False),
+        sa.Column("deleted_paths_json", sa.JSON(), nullable=False),
+        sa.Column("evidence_bundle_uri", sa.Text(), nullable=False),
+    )
+    op.create_index(
+        "ix_governance_purge_runs_workspace_id",
+        "governance_purge_runs",
+        ["workspace_id"],
+    )
+    op.create_table(
+        "governance_deletion_requests",
+        sa.Column("deletion_request_id", sa.String(length=26), primary_key=True),
+        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("requester_actor_id", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("subject_selector_json", sa.JSON(), nullable=False),
+        sa.Column("affected_snapshots_json", sa.JSON(), nullable=False),
+        sa.Column("affected_indexes_json", sa.JSON(), nullable=False),
+        sa.Column("legal_hold_active", sa.Boolean(), nullable=False),
+        sa.Column("approval_reason", sa.Text(), nullable=True),
+        sa.Column("evidence_bundle_uri", sa.Text(), nullable=True),
+    )
+    op.create_index(
+        "ix_governance_deletion_requests_workspace_id",
+        "governance_deletion_requests",
+        ["workspace_id"],
+    )
+    op.create_table(
+        "governance_deletion_approvals",
+        sa.Column("deletion_approval_id", sa.String(length=26), primary_key=True),
+        sa.Column("deletion_request_id", sa.String(length=26), nullable=False),
+        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("approver_actor_id", sa.Text(), nullable=False),
+        sa.Column("decision", sa.String(length=32), nullable=False),
+        sa.Column("decision_reason", sa.Text(), nullable=False),
+    )
+    op.create_index(
+        "ix_governance_deletion_approvals_workspace_id",
+        "governance_deletion_approvals",
+        ["workspace_id"],
+    )
+    op.create_table(
         "audit_audit_events",
         sa.Column("audit_event_id", sa.String(length=26), primary_key=True),
         sa.Column("workspace_id", sa.String(length=36), nullable=True),
@@ -118,6 +182,23 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("audit_access_decisions")
     op.drop_table("audit_audit_events")
+    op.drop_index(
+        "ix_governance_deletion_approvals_workspace_id",
+        table_name="governance_deletion_approvals",
+    )
+    op.drop_table("governance_deletion_approvals")
+    op.drop_index(
+        "ix_governance_deletion_requests_workspace_id",
+        table_name="governance_deletion_requests",
+    )
+    op.drop_table("governance_deletion_requests")
+    op.drop_index("ix_governance_purge_runs_workspace_id", table_name="governance_purge_runs")
+    op.drop_table("governance_purge_runs")
+    op.drop_index(
+        "ix_governance_retention_policies_workspace_id",
+        table_name="governance_retention_policies",
+    )
+    op.drop_table("governance_retention_policies")
     op.drop_table("governance_policies")
     op.drop_table("review_approvals")
     op.drop_table("review_review_tasks")

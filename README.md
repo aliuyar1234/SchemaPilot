@@ -114,6 +114,19 @@ Expected:
 - applied filters/masks metadata,
 - append-only audit rows in gateway audit tables.
 
+## Implemented Safe Defaults (Current)
+
+- Control Plane and Gateway enforce fail-closed auth for non-local binds.
+- `oidc_jwt` is supported with JWKS verification; trusted-proxy claims mode requires explicit trust config.
+- Gateway remains the single query enforcement point; deploy checks block direct engine/index exposure.
+- SQL execution is read-only and deny-by-default for unsafe statements.
+- AI query/retrieval access requires dataset entitlements and workspace isolation.
+- Strict ingest completeness is enabled by default for Team/Enterprise worker profiles.
+- Retention and deletion execution remain disabled-by-default unless explicitly enabled/configured.
+- Plugin connectors are allowlist-gated and run in isolated subprocess execution paths.
+- OpenAPI compatibility and golden-path e2e checks are part of tooling/release gates.
+- UI stays intentionally minimal; core governance and operability are backend-first.
+
 ## Weekly KPI Tracking
 
 Track adoption and reliability every week:

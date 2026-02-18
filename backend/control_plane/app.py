@@ -12,10 +12,23 @@ from sqlalchemy.orm import Session
 
 from backend.control_plane import db_models
 from backend.control_plane.decision_engine import build_recommendation_report
-from backend.control_plane.deletion import DeletionRequest, execute_deletion_workflow
+from backend.control_plane.deletion import (
+    approve_deletion_request,
+    execute_deletion_request,
+    get_deletion_request,
+    submit_deletion_request,
+)
 from backend.control_plane.gating import evaluate_gold_publish_gate
+from backend.control_plane.policy_pack_service import (
+    decide_policy_pack_change,
+    get_effective_policy_pack,
+    request_policy_pack_change,
+    rollback_policy_pack,
+)
 from backend.control_plane.repository import (
-    append_audit_event,
+    append_audit_event as _append_audit_event,
+)
+from backend.control_plane.repository import (
     create_run,
     create_source,
     create_workspace,
@@ -26,6 +39,11 @@ from backend.control_plane.repository import (
     list_sources,
     list_workspaces,
     update_source,
+)
+from backend.control_plane.retention import (
+    configure_retention_policy,
+    execute_retention_purge,
+    get_retention_policy,
 )
 from backend.control_plane.review_repository import (
     create_proposal,
@@ -50,7 +68,7 @@ from backend.shared_domain.auth import (
 )
 from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.contract_reports import load_build_contract_report
-from backend.shared_domain.db import get_engine, get_session_factory
+from backend.shared_domain.db import get_session_factory, prepare_database
 from backend.shared_domain.errors import PolicyDeniedError, SchemaPilotError
 from backend.shared_domain.evidence_store import load_evidence_bundle, store_evidence_bundle
 from backend.shared_domain.gold_pointer import (
@@ -60,11 +78,13 @@ from backend.shared_domain.gold_pointer import (
 )
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.observability import (
+    increment_audit_write_failure,
     increment_contract_failure,
     log_structured_event,
     render_metrics,
     set_review_queue_backlog,
 )
+from backend.shared_domain.plugin_loader import load_connector_plugin_specs
 from backend.shared_domain.policy_packs import list_policy_pack_summaries
 
 
@@ -79,7 +99,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         if db_file.parent.as_posix() != ".":
             db_file.parent.mkdir(parents=True, exist_ok=True)
     session_factory = get_session_factory(settings.database_url)
-    db_models.Base.metadata.create_all(bind=get_engine(settings.database_url))
+    prepare_database(settings)
     app = FastAPI(title="SchemaPilot Control Plane", version="0.1.0")
 
     def get_session() -> Generator[Session, None, None]:
@@ -165,6 +185,45 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return JSONResponse(status_code=404, content=payload.model_dump())
 
+    def append_audit_event(
+        session: Session,
+        *,
+        workspace_id: str | None,
+        actor_id: str,
+        event_type: str,
+        event_json: dict[str, object],
+        correlation_id: str,
+    ) -> dict[str, object]:
+        try:
+            return _append_audit_event(
+                session,
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+                event_type=event_type,
+                event_json=event_json,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:
+            increment_audit_write_failure(
+                workspace_id=workspace_id or "unknown",
+                service="control_plane",
+                operation=event_type,
+            )
+            log_structured_event(
+                level="error",
+                msg="audit.write_failed",
+                service="control_plane",
+                correlation_id=correlation_id,
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+                event_type="audit.write_failed",
+                extra={"operation": event_type, "error": str(exc)},
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "audit_unavailable", "operation": event_type},
+            ) from exc
+
     def ensure_contract_failure_review_task(
         *,
         session: Session,
@@ -247,11 +306,191 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     async def api_list_policy_packs() -> list[dict[str, str]]:
         return list_policy_pack_summaries()
 
+    @app.get("/api/v1/workspaces/{workspace_id}/policy-pack")
+    async def api_get_effective_policy_pack(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        policy_pack = get_effective_policy_pack(session, workspace_id=workspace_id)
+        if policy_pack is not None:
+            return policy_pack
+        return not_found_response(
+            request=request,
+            message="Effective policy pack not found.",
+            details={"workspace_id": workspace_id},
+        )  # type: ignore[return-value]
+
+    @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/change-request")
+    async def api_request_policy_pack_change(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        requested_pack_id = str(payload.get("pack_id", "")).strip()
+        if not requested_pack_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_pack_id"},
+            )
+        change_request = request_policy_pack_change(
+            session,
+            workspace_id=workspace_id,
+            requester_actor_id=str(actor.get("actor_id", "unknown")),
+            requested_pack_id=requested_pack_id,
+            storage_root=settings.storage_root,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="policy_pack.change_requested",
+            event_json=change_request,
+            correlation_id=request.state.request_id,
+        )
+        return change_request
+
+    @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_request_id}/decision")
+    async def api_decide_policy_pack_change(
+        workspace_id: str,
+        change_request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        decision = str(payload.get("decision", "defer"))
+        reason = str(payload.get("decision_reason", ""))
+        result = decide_policy_pack_change(
+            session,
+            workspace_id=workspace_id,
+            change_request_id=change_request_id,
+            approver_actor_id=str(actor.get("actor_id", "unknown")),
+            decision=decision,
+            reason=reason,
+        )
+        if result is None:
+            return not_found_response(
+                request=request,
+                message="Policy pack change request not found.",
+                details={"workspace_id": workspace_id, "change_request_id": change_request_id},
+            )  # type: ignore[return-value]
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="policy_pack.change_decided",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/rollback")
+    async def api_rollback_policy_pack(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        result = rollback_policy_pack(session, workspace_id=workspace_id)
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="policy_pack.rolled_back",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
     @app.get("/api/v1/workspaces")
     async def api_list_workspaces(
         session: Session = Depends(get_session),
     ) -> list[dict[str, object]]:
         return list_workspaces(session)
+
+    @app.get("/api/v1/workspaces/{workspace_id}/retention/policy")
+    async def api_get_retention_policy(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        policy = get_retention_policy(session, workspace_id=workspace_id)
+        if policy is not None:
+            return policy
+        return not_found_response(
+            request=request,
+            message="Retention policy not found.",
+            details={"workspace_id": workspace_id},
+        )  # type: ignore[return-value]
+
+    @app.post("/api/v1/workspaces/{workspace_id}/retention/policy")
+    async def api_configure_retention_policy(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        retention_days_raw = payload.get("retention_days", 30)
+        retention_days = (
+            int(retention_days_raw)
+            if isinstance(retention_days_raw, (int, float, str))
+            else 30
+        )
+        enabled = bool(payload.get("enabled", False))
+        purge_enabled = bool(payload.get("purge_enabled", False))
+        legal_hold_active = bool(payload.get("legal_hold_active", False))
+        policy = configure_retention_policy(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            retention_days=retention_days,
+            enabled=enabled,
+            purge_enabled=purge_enabled,
+            legal_hold_active=legal_hold_active,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="retention.policy_configured",
+            event_json=policy,
+            correlation_id=request.state.request_id,
+        )
+        return policy
+
+    @app.post("/api/v1/workspaces/{workspace_id}/retention/purge")
+    async def api_execute_retention_purge(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        dry_run_raw = payload.get("dry_run", True)
+        dry_run = bool(dry_run_raw)
+        result = execute_retention_purge(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            storage_root=settings.storage_root,
+            purge_root=settings.retention_purge_root,
+            dry_run=dry_run,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="retention.purge_executed",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
 
     @app.post("/api/v1/workspaces")
     async def api_create_workspace(
@@ -297,6 +536,17 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
+        built_in_source_types = {"filesystem", "s3", "database"}
+        if payload.source_type not in built_in_source_types:
+            plugin_specs = load_connector_plugin_specs()
+            if payload.source_type not in plugin_specs:
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": "plugin_not_allowlisted_or_unavailable",
+                        "source_type": payload.source_type,
+                    },
+                )
         source = create_source(
             session,
             workspace_id=workspace_id,
@@ -744,13 +994,18 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         return payload
 
     @app.post("/api/v1/workspaces/{workspace_id}/deletions")
-    async def api_execute_deletion(
+    async def api_create_deletion_request(
         workspace_id: str,
         payload: dict[str, object],
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
-        actor = require_actor(request, roles=platform_admin_roles)
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        if not settings.deletion_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "deletion_disabled"},
+            )
         subject_selector_raw = payload.get("subject_selector", {})
         subject_selector: dict[str, object] = (
             subject_selector_raw if isinstance(subject_selector_raw, dict) else {}
@@ -767,28 +1022,119 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             if isinstance(affected_indexes_raw, list)
             else []
         )
-        request_obj = DeletionRequest(
+        deletion_request = submit_deletion_request(
+            session,
             workspace_id=workspace_id,
             subject_selector=subject_selector,
-            legal_hold_active=bool(payload.get("legal_hold_active", False)),
-            approved=bool(payload.get("approved", False)),
             affected_snapshots=affected_snapshots,
             affected_indexes=affected_indexes,
-            backup_reference=(
-                str(payload.get("backup_reference"))
-                if payload.get("backup_reference") is not None
-                else None
-            ),
-        )
-        result = execute_deletion_workflow(
-            request_obj,
-            output_root=str(payload.get("output_root", "./runtime")),
+            requester_actor_id=str(actor.get("actor_id", "unknown")),
         )
         append_audit_event(
             session,
             workspace_id=workspace_id,
             actor_id=str(actor.get("actor_id", "unknown")),
-            event_type="deletion.workflow",
+            event_type="deletion.requested",
+            event_json=deletion_request,
+            correlation_id=request.state.request_id,
+        )
+        return deletion_request
+
+    @app.get("/api/v1/workspaces/{workspace_id}/deletions/{deletion_request_id}")
+    async def api_get_deletion_request(
+        workspace_id: str,
+        deletion_request_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        deletion_request = get_deletion_request(
+            session,
+            workspace_id=workspace_id,
+            deletion_request_id=deletion_request_id,
+        )
+        if deletion_request is not None:
+            return deletion_request
+        return not_found_response(
+            request=request,
+            message="Deletion request not found.",
+            details={"workspace_id": workspace_id, "deletion_request_id": deletion_request_id},
+        )  # type: ignore[return-value]
+
+    @app.post("/api/v1/workspaces/{workspace_id}/deletions/{deletion_request_id}/approve")
+    async def api_approve_deletion_request(
+        workspace_id: str,
+        deletion_request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        if not settings.deletion_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "deletion_disabled"},
+            )
+        decision = str(payload.get("decision", "defer"))
+        reason = str(payload.get("decision_reason", ""))
+        approval = approve_deletion_request(
+            session,
+            workspace_id=workspace_id,
+            deletion_request_id=deletion_request_id,
+            approver_actor_id=str(actor.get("actor_id", "unknown")),
+            decision=decision,
+            reason=reason,
+        )
+        if approval is None:
+            return not_found_response(
+                request=request,
+                message="Deletion request not found.",
+                details={"workspace_id": workspace_id, "deletion_request_id": deletion_request_id},
+            )  # type: ignore[return-value]
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="deletion.approved",
+            event_json=approval,
+            correlation_id=request.state.request_id,
+        )
+        return approval
+
+    @app.post("/api/v1/workspaces/{workspace_id}/deletions/{deletion_request_id}/execute")
+    async def api_execute_deletion_request(
+        workspace_id: str,
+        deletion_request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        if not settings.deletion_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "deletion_disabled"},
+            )
+        backup_reference = payload.get("backup_reference")
+        result = execute_deletion_request(
+            session,
+            workspace_id=workspace_id,
+            deletion_request_id=deletion_request_id,
+            output_root=str(payload.get("output_root", "./runtime")),
+            storage_root=settings.storage_root,
+            backup_reference=str(backup_reference) if backup_reference is not None else None,
+        )
+        if result is None:
+            return not_found_response(
+                request=request,
+                message="Deletion request not found.",
+                details={"workspace_id": workspace_id, "deletion_request_id": deletion_request_id},
+            )  # type: ignore[return-value]
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="deletion.executed",
             event_json=result,
             correlation_id=request.state.request_id,
         )

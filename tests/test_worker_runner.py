@@ -5,8 +5,9 @@ from pathlib import Path
 from backend.control_plane.repository import create_run, create_source, create_workspace, get_run
 from backend.shared_domain.db import get_engine, get_session_factory
 from backend.shared_domain.metadata_models import Base
+from backend.shared_domain.plugin_loader import ConnectorPluginSpec
 from backend.workers import run_processor
-from backend.workers.service import process_queued_runs_once
+from backend.workers.service import load_worker_service_config, process_queued_runs_once
 
 
 def _session_factory(tmp_path: Path):
@@ -125,7 +126,17 @@ def test_worker_runner_uses_connector_plugin_for_non_filesystem_source(
             }
         ]
 
-    monkeypatch.setattr(run_processor, "load_connector_plugins", lambda: {"custom": plugin})
+    monkeypatch.setattr(
+        run_processor,
+        "load_connector_plugin_specs",
+        lambda: {
+            "custom": ConnectorPluginSpec(
+                name="custom",
+                plugin=plugin,
+                entrypoint=None,
+            )
+        },
+    )
 
     session_factory = _session_factory(tmp_path)
     with session_factory() as session:
@@ -164,3 +175,17 @@ def test_worker_runner_uses_connector_plugin_for_non_filesystem_source(
         )
         assert run_state is not None
         assert run_state["status"] == "succeeded"
+
+
+def test_worker_service_config_defaults_strict_ingest_for_team_profile(monkeypatch) -> None:
+    monkeypatch.setenv("SCHEMAPILOT_PROFILE", "team")
+    monkeypatch.delenv("SCHEMAPILOT_INGEST_STRICT", raising=False)
+    config = load_worker_service_config()
+    assert config.strict_ingest is True
+
+
+def test_worker_service_config_allows_explicit_non_strict_override(monkeypatch) -> None:
+    monkeypatch.setenv("SCHEMAPILOT_PROFILE", "enterprise")
+    monkeypatch.setenv("SCHEMAPILOT_INGEST_STRICT", "false")
+    config = load_worker_service_config()
+    assert config.strict_ingest is False

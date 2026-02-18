@@ -79,6 +79,12 @@ COST_BYTES_SCANNED_TOTAL = Counter(
     labelnames=("workspace_id", "engine"),
     registry=REGISTRY,
 )
+AUDIT_WRITE_FAILURES_TOTAL = Counter(
+    "schemapilot_audit_write_failures_total",
+    "Audit write failures that forced fail-closed behavior.",
+    labelnames=("workspace_id", "service", "operation"),
+    registry=REGISTRY,
+)
 
 LOGGER = logging.getLogger("schemapilot")
 if not LOGGER.handlers:
@@ -110,6 +116,13 @@ def increment_policy_denial(*, workspace_id: str, reason: str) -> None:
 def increment_cost_bytes_scanned(*, workspace_id: str, engine: str, bytes_scanned: int) -> None:
     """Increment estimated bytes scanned."""
     COST_BYTES_SCANNED_TOTAL.labels(workspace_id=workspace_id, engine=engine).inc(bytes_scanned)
+
+
+def increment_audit_write_failure(*, workspace_id: str, service: str, operation: str) -> None:
+    """Increment audit write failure counter."""
+    AUDIT_WRITE_FAILURES_TOTAL.labels(
+        workspace_id=workspace_id, service=service, operation=operation
+    ).inc()
 
 
 def increment_contract_failure(*, workspace_id: str, layer: str) -> None:

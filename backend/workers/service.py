@@ -21,17 +21,26 @@ class WorkerServiceConfig:
     storage_root: str
     poll_interval_seconds: float = 2.0
     max_runs_per_tick: int = 1
+    strict_ingest: bool = True
 
 
 def process_queued_runs_once(
-    *, session_factory: sessionmaker[Session], storage_root: str, max_runs: int = 1
+    *,
+    session_factory: sessionmaker[Session],
+    storage_root: str,
+    max_runs: int = 1,
+    strict_ingest: bool = True,
 ) -> int:
     """Process up to max_runs queued jobs and return processed count."""
     processed = 0
     session = session_factory()
     try:
         while processed < max_runs:
-            outcome = process_next_queued_run(session, storage_root=storage_root)
+            outcome = process_next_queued_run(
+                session,
+                storage_root=storage_root,
+                strict_ingest=strict_ingest,
+            )
             if outcome is None:
                 break
             processed += 1
@@ -55,6 +64,7 @@ def run_forever(config: WorkerServiceConfig) -> None:
             session_factory=session_factory,
             storage_root=config.storage_root,
             max_runs=max(config.max_runs_per_tick, 1),
+            strict_ingest=config.strict_ingest,
         )
         if processed == 0:
             time.sleep(poll_interval)
@@ -62,11 +72,18 @@ def run_forever(config: WorkerServiceConfig) -> None:
 
 def load_worker_service_config() -> WorkerServiceConfig:
     """Load worker config from env using control-plane compatible defaults."""
+    profile = os.getenv("SCHEMAPILOT_PROFILE", "starter").strip().lower()
+    strict_default = profile in {"team", "enterprise"}
+    strict_raw = os.getenv("SCHEMAPILOT_INGEST_STRICT")
+    strict_ingest = strict_default
+    if strict_raw is not None:
+        strict_ingest = strict_raw.strip().lower() in {"1", "true", "yes", "on"}
     return WorkerServiceConfig(
         database_url=os.getenv("SCHEMAPILOT_DATABASE_URL", "sqlite:///./runtime/schemapilot.db"),
         storage_root=os.getenv("SCHEMAPILOT_STORAGE_ROOT", "./runtime/storage"),
         poll_interval_seconds=float(os.getenv("SCHEMAPILOT_WORKER_POLL_SECONDS", "2")),
         max_runs_per_tick=int(os.getenv("SCHEMAPILOT_WORKER_MAX_RUNS_PER_TICK", "1")),
+        strict_ingest=strict_ingest,
     )
 
 

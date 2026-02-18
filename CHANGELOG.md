@@ -238,6 +238,98 @@
   - evidence: TASKLIST.md :: [x] PR-018 `ui-wizard-upgrade` (low priority by design)
   - evidence: ui/src/App.test.tsx :: submits review decisions and recommendation requests for selected workspace
 
+## v1.0.24
+- Post-PR018 S0 hardening execution update:
+  - added shared `oidc_jwt` JWT/JWKS verification in shared auth with fail-closed claim/time validation
+  - unified gateway auth resolution to use shared auth helpers (removing duplicated gateway-local auth parsing)
+  - enforced trusted-proxy startup guardrails for non-local binds and added OIDC JWT startup misconfiguration tests
+  - added deploy no-bypass static checker and wired it into tooling baseline checks
+  - evidence: DECISIONS.md :: D-0040 OIDC JWT verification and deploy no-bypass enforcement baseline (shared auth path, strict startup guards, and static deploy checks)
+  - evidence: TASKLIST.md :: [x] PR-019 `gateway-oidc-jwt-verification` (S0)
+  - evidence: TASKLIST.md :: [x] PR-020 `control-plane-oidc-jwt-verification` (S0)
+  - evidence: TASKLIST.md :: [x] PR-021 `deploy-no-bypass-enforcement` (S0)
+  - evidence: tests/test_gateway_oidc_jwt_auth.py :: test_gateway_oidc_jwt_allows_valid_token
+  - evidence: tests/test_control_plane_oidc_jwt_auth.py :: test_control_plane_oidc_jwt_allows_platform_admin
+  - evidence: tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+## v1.0.25
+- Audit fail-closed hardening update:
+  - gateway access-decision audit persistence now denies requests on audit write failure (`reason=audit_unavailable`)
+  - control-plane audit append path now denies mutating requests when audit persistence fails
+  - added `schemapilot_audit_write_failures_total` metric for explicit operational visibility
+  - added regression tests for gateway/control-plane deny behavior under audit persistence failure
+  - evidence: DECISIONS.md :: D-0041 Audit fail-closed enforcement baseline (gateway/control-plane deny on audit write failures with explicit observability)
+  - evidence: TASKLIST.md :: [x] PR-022 `audit-fail-closed-critical-flows` (S0)
+  - evidence: tests/test_audit_fail_closed.py :: test_gateway_denies_query_when_audit_write_fails
+  - evidence: tests/test_audit_fail_closed.py :: test_control_plane_denies_mutation_when_audit_write_fails
+
+## v1.0.26
+- Gateway workspace-isolation hardening update:
+  - added cross-workspace dataset ownership checks for AI SQL query dataset context
+  - added retrieval entitlement cross-workspace checks and deny path (`dataset_workspace_mismatch`)
+  - added regression tests proving known foreign dataset IDs are denied for query and retrieval
+  - evidence: DECISIONS.md :: D-0042 Gateway workspace isolation baseline (deny cross-workspace dataset access for AI SQL and retrieval paths)
+  - evidence: TASKLIST.md :: [x] PR-023 `gateway-workspace-isolation` (S0)
+  - evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+  - evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_retrieve_denies_cross_workspace_dataset_entitlement
+
+## v1.0.27
+- Gateway throttling hardening update:
+  - added in-memory per-actor request-rate and in-flight concurrency guards in gateway
+  - enforced fail-closed deny reasons for throttled requests (`rate_limit_exceeded`, `concurrency_limit_exceeded`)
+  - added dedicated regression tests for both rate-limit and concurrency-limit denial paths
+  - evidence: DECISIONS.md :: D-0043 Gateway actor throttling baseline (per-actor rate and concurrency deny controls with fail-closed decisions)
+  - evidence: TASKLIST.md :: [x] PR-024 `gateway-rate-limit-and-cancel` (S1)
+  - evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_rate_limit_exceeded
+  - evidence: tests/test_gateway_rate_limits.py :: test_gateway_denies_when_concurrency_limit_exceeded
+
+## v1.0.28
+- Migration/startup safety hardening update:
+  - introduced non-local startup migration-state enforcement via `alembic_version` revision checks
+  - kept local-bind bootstrap autocreate path for developer workflow compatibility
+  - added CLI migration commands (`migrate-up`, `migrate-status`)
+  - added migration enforcement regression tests for missing/mismatched revision handling
+  - evidence: DECISIONS.md :: D-0044 Migration-state startup enforcement baseline (non-local bind requires expected alembic revision; local bind retains bootstrap autocreate)
+  - evidence: TASKLIST.md :: [x] PR-025 `migrations-enforced-at-startup` (S1)
+  - evidence: tests/test_migrations_enforced.py :: test_gateway_non_local_requires_migration_state
+  - evidence: tests/test_cli_commands.py :: test_migrate_up_invokes_alembic_upgrade_head
+
+## v1.0.29
+- Backup/restore operability hardening update:
+  - added dedicated backup and restore utilities for metadata+storage snapshots
+  - refactored backup/restore drill to execute through those utilities
+  - added regression test coverage for explicit backup/restore round-trip behavior
+  - evidence: DECISIONS.md :: D-0045 Backup/restore toolchain baseline (explicit backup + restore utilities with drill integration and regression tests)
+  - evidence: TASKLIST.md :: [x] PR-026 `backup-restore-drill-hardening` (S1)
+  - evidence: tests/test_backup_restore_tools.py :: test_backup_and_restore_tools_roundtrip
+  - evidence: tests/test_backup_restore_drill.py :: test_backup_restore_drill_passes
+
+## v1.0.30
+- Post-PR026 governance and reliability completion update:
+  - enforced strict ingest completeness defaults with fail-closed evidence/task behavior
+  - added retention policy + purge workflow and separation-of-duties deletion workflow with server-side legal-hold checks
+  - added provenance v1 contract and deterministic audit export tool
+  - added policy-pack change/approval/rollback lifecycle controls
+  - hardened plugin runtime with explicit allowlist + isolated execution path
+  - added OpenAPI compatibility gating and deterministic golden-path/e2e regression harness wiring
+  - evidence: DECISIONS.md :: D-0046 Strict ingest completeness baseline (team/enterprise default strict mode with fail-closed evidence and blocking quality tasks)
+  - evidence: DECISIONS.md :: D-0047 Retention/deletion governance baseline (retention policy + purge controls and separation-of-duties deletion workflow)
+  - evidence: DECISIONS.md :: D-0048 Provenance and policy lifecycle baseline (provenance v1 contract, audit export, policy-pack approval/rollback controls)
+  - evidence: DECISIONS.md :: D-0049 Plugin security and contract gate baseline (plugin allowlist isolation + OpenAPI compatibility + golden-path regression gate)
+  - evidence: TASKLIST.md :: [x] PR-027 `strict-ingest-completeness` (S1)
+  - evidence: TASKLIST.md :: [x] PR-034 `e2e-golden-path-regression-gate` (S2)
+
+## v1.0.31
+- Team engine + docs finalization update:
+  - added optional Trino gateway engine path with DuckDB fallback and SQL safety preserved
+  - finalized runbook/readme/docs index for implemented auth, no-bypass, strict ingest, retention/deletion, plugin, and regression gates
+  - marked execution board complete through PR-036 while keeping UI intentionally minimal
+  - evidence: DECISIONS.md :: D-0050 Team query engine upgrade baseline (gateway trino adapter with duckdb fallback and docs/runbook finalization)
+  - evidence: TASKLIST.md :: [x] PR-035 `team-engine-upgrade-path` (S2)
+  - evidence: TASKLIST.md :: [x] PR-036 `docs-runbook-security-finalization` (S2)
+  - evidence: spec/12_RUNBOOK.md :: Contract and regression gates
+  - evidence: README.md :: Implemented Safe Defaults (Current)
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

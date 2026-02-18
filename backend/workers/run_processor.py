@@ -20,9 +20,10 @@ from backend.shared_domain.metadata_models import (
     ReviewTask,
     RunRecord,
 )
-from backend.shared_domain.plugin_loader import ConnectorPlugin, load_connector_plugins
+from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
 from backend.workers.bronze import ingest_file_to_bronze
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
+from backend.workers.connectors.plugin_runner import execute_connector_plugin
 from backend.workers.drift import detect_schema_drift
 from backend.workers.pii import detect_pii_proposals
 from backend.workers.profiler import profile_csv_file
@@ -45,7 +46,27 @@ class ProcessedRun:
     output_refs: dict[str, object]
 
 
-def process_next_queued_run(session: Session, *, storage_root: str) -> ProcessedRun | None:
+class StrictIngestCompletenessError(ValueError):
+    """Raised when strict ingest detects incomplete discovery/ingest execution."""
+
+    def __init__(
+        self,
+        *,
+        evidence_bundle_uri: str,
+        failure_count: int,
+        proposal_id: str | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        super().__init__("strict_ingest_completeness_failed")
+        self.evidence_bundle_uri = evidence_bundle_uri
+        self.failure_count = failure_count
+        self.proposal_id = proposal_id
+        self.task_id = task_id
+
+
+def process_next_queued_run(
+    session: Session, *, storage_root: str, strict_ingest: bool = True
+) -> ProcessedRun | None:
     """Process the oldest queued run deterministically."""
     run = (
         session.execute(
@@ -59,10 +80,17 @@ def process_next_queued_run(session: Session, *, storage_root: str) -> Processed
     )
     if run is None:
         return None
-    return process_run_by_id(session, run_id=run.run_id, storage_root=storage_root)
+    return process_run_by_id(
+        session,
+        run_id=run.run_id,
+        storage_root=storage_root,
+        strict_ingest=strict_ingest,
+    )
 
 
-def process_run_by_id(session: Session, *, run_id: str, storage_root: str) -> ProcessedRun | None:
+def process_run_by_id(
+    session: Session, *, run_id: str, storage_root: str, strict_ingest: bool = True
+) -> ProcessedRun | None:
     """Process a specific run if it is queued."""
     run = session.get(RunRecord, run_id)
     if run is None:
@@ -75,10 +103,17 @@ def process_run_by_id(session: Session, *, run_id: str, storage_root: str) -> Pr
             status=run.status,
             output_refs=_json_dict(run.output_refs_json),
         )
-    return _process_queued_run(session, run=run, storage_root=storage_root)
+    return _process_queued_run(
+        session,
+        run=run,
+        storage_root=storage_root,
+        strict_ingest=strict_ingest,
+    )
 
 
-def _process_queued_run(session: Session, *, run: RunRecord, storage_root: str) -> ProcessedRun:
+def _process_queued_run(
+    session: Session, *, run: RunRecord, storage_root: str, strict_ingest: bool
+) -> ProcessedRun:
     run.status = "running"
     session.flush()
     _append_run_audit_event(
@@ -89,7 +124,12 @@ def _process_queued_run(session: Session, *, run: RunRecord, storage_root: str) 
         payload={"run_id": run.run_id, "run_type": run.run_type},
     )
     try:
-        output_refs = _execute_run(session, run=run, storage_root=storage_root)
+        output_refs = _execute_run(
+            session,
+            run=run,
+            storage_root=storage_root,
+            strict_ingest=strict_ingest,
+        )
         run.status = "succeeded"
         run.output_refs_json = output_refs
         session.flush()
@@ -113,6 +153,14 @@ def _process_queued_run(session: Session, *, run: RunRecord, storage_root: str) 
             "run_type": run.run_type,
             "error": str(exc),
         }
+        if isinstance(exc, StrictIngestCompletenessError):
+            failure_payload["reason"] = "strict_ingest_completeness_failed"
+            failure_payload["failure_count"] = exc.failure_count
+            failure_payload["evidence_bundle_uri"] = exc.evidence_bundle_uri
+            if exc.proposal_id is not None:
+                failure_payload["proposal_id"] = exc.proposal_id
+            if exc.task_id is not None:
+                failure_payload["task_id"] = exc.task_id
         run.status = "failed"
         run.output_refs_json = failure_payload
         session.flush()
@@ -132,14 +180,25 @@ def _process_queued_run(session: Session, *, run: RunRecord, storage_root: str) 
         )
 
 
-def _execute_run(session: Session, *, run: RunRecord, storage_root: str) -> dict[str, object]:
+def _execute_run(
+    session: Session, *, run: RunRecord, storage_root: str, strict_ingest: bool
+) -> dict[str, object]:
     if run.run_type == "discover":
-        return _process_discover_run(session, run=run, storage_root=storage_root)
+        return _process_discover_run(
+            session,
+            run=run,
+            storage_root=storage_root,
+            strict_ingest=strict_ingest,
+        )
     raise ValueError(f"Unsupported run_type for worker processor: {run.run_type}")
 
 
 def _process_discover_run(
-    session: Session, *, run: RunRecord, storage_root: str
+    session: Session,
+    *,
+    run: RunRecord,
+    storage_root: str,
+    strict_ingest: bool,
 ) -> dict[str, object]:
     sources = (
         session.execute(
@@ -165,131 +224,230 @@ def _process_discover_run(
     dataset_ids: set[str] = set()
     artifact_manifests: list[dict[str, object]] = []
     evidence_bundles: list[dict[str, object]] = []
+    completeness_expected_items: list[dict[str, object]] = []
+    completeness_failures: list[dict[str, object]] = []
+    successful_item_count = 0
     pii_blocking_tasks_created = 0
     drift_blocking_tasks_created = 0
-    connector_plugins = load_connector_plugins()
+    connector_plugins = load_connector_plugin_specs()
 
     for source in sources:
         scope = _json_dict(source.scope_json)
-        if source.source_type == "filesystem":
-            root_path = str(scope.get("root_path", "")).strip()
-            if not root_path:
-                raise ValueError(f"Filesystem source {source.source_id} is missing root_path.")
-            include_globs = _string_list(scope.get("include_globs"), default=DEFAULT_INCLUDE_GLOBS)
-            exclude_globs = _string_list(scope.get("exclude_globs"), default=[])
-            discovered_files = discover_files(
-                root_path=root_path,
-                include_globs=include_globs,
-                exclude_globs=exclude_globs,
+        try:
+            if source.source_type == "filesystem":
+                root_path = str(scope.get("root_path", "")).strip()
+                if not root_path:
+                    raise ValueError(
+                        f"Filesystem source {source.source_id} is missing root_path."
+                    )
+                include_globs = _string_list(
+                    scope.get("include_globs"),
+                    default=DEFAULT_INCLUDE_GLOBS,
+                )
+                exclude_globs = _string_list(scope.get("exclude_globs"), default=[])
+                discovered_files = discover_files(
+                    root_path=root_path,
+                    include_globs=include_globs,
+                    exclude_globs=exclude_globs,
+                )
+            else:
+                plugin = connector_plugins.get(source.source_type)
+                if plugin is None:
+                    raise ValueError(
+                        f"Unsupported source_type for discover run: {source.source_type}"
+                    )
+                root_path = str(scope.get("root_path", "")).strip() or "."
+                discovered_files = _discover_files_via_plugin(
+                    plugin,
+                    scope=scope,
+                    source_type=source.source_type,
+                )
+        except Exception as exc:
+            completeness_failures.append(
+                {
+                    "source_id": source.source_id,
+                    "source_type": source.source_type,
+                    "stage": "discovery",
+                    "error": str(exc),
+                }
             )
-        else:
-            plugin = connector_plugins.get(source.source_type)
-            if plugin is None:
-                raise ValueError(f"Unsupported source_type for discover run: {source.source_type}")
-            root_path = str(scope.get("root_path", "")).strip() or "."
-            discovered_files = _discover_files_via_plugin(
-                plugin,
-                scope=scope,
-                source_type=source.source_type,
-            )
+            continue
         for discovered in discovered_files:
             physical_locator = _relative_locator(root_path=root_path, path=discovered.path)
-            logical_name = discovered.dataset_family or Path(physical_locator).stem
-            dataset = _upsert_catalog_dataset(
-                session,
-                workspace_id=run.workspace_id,
-                source_id=source.source_id,
-                physical_locator=physical_locator,
-                logical_name=logical_name,
-            )
-            dataset_ids.add(dataset.dataset_id)
-
-            bronze_result = ingest_file_to_bronze(
-                workspace_id=run.workspace_id,
-                source_id=source.source_id,
-                dataset_id=dataset.dataset_id,
-                source_file=discovered.path,
-                storage_root=storage_root,
-                run_id=run.run_id,
-            )
-            artifact_manifests.append(
+            completeness_expected_items.append(
                 {
-                    "dataset_id": dataset.dataset_id,
-                    "artifact_id": bronze_result.artifact_id,
-                    "manifest_path": bronze_result.manifest_path,
+                    "source_id": source.source_id,
+                    "source_type": source.source_type,
+                    "path": discovered.path,
+                    "physical_locator": physical_locator,
                 }
             )
-
-            if discovered.path.lower().endswith(".csv"):
-                evidence = profile_csv_file(discovered.path, sample_limit=PROFILE_SAMPLE_LIMIT)
-                previous_summary = _json_dict(dataset.sensitivity_summary_json)
-                previous_profile = previous_summary.get("profile", {})
-                previous_columns = (
-                    [
-                        str(column)
-                        for column in previous_profile.get("schema_columns", [])
-                        if isinstance(column, (str, int, float))
-                    ]
-                    if isinstance(previous_profile, dict)
-                    else []
-                )
-                stored_evidence = store_evidence_bundle(
+            try:
+                logical_name = discovered.dataset_family or Path(physical_locator).stem
+                dataset = _upsert_catalog_dataset(
+                    session,
                     workspace_id=run.workspace_id,
-                    storage_root=storage_root,
-                    bundle_type="profile",
-                    payload={
-                        "dataset_id": dataset.dataset_id,
-                        "source_id": source.source_id,
-                        "physical_locator": physical_locator,
-                        "profile": evidence.to_dict(),
-                    },
+                    source_id=source.source_id,
+                    physical_locator=physical_locator,
+                    logical_name=logical_name,
                 )
-                summary = previous_summary
-                summary["profile"] = {
-                    "row_count_sampled": evidence.row_count_sampled,
-                    "parse_error_rate": evidence.parse_error_rate,
-                    "schema_columns": evidence.schema_columns,
-                }
-                summary["last_evidence_bundle_uri"] = stored_evidence.evidence_bundle_uri
-                summary["last_evidence_content_hash"] = stored_evidence.content_hash
-                dataset.sensitivity_summary_json = summary
-                evidence_bundles.append(
+                dataset_ids.add(dataset.dataset_id)
+
+                bronze_result = ingest_file_to_bronze(
+                    workspace_id=run.workspace_id,
+                    source_id=source.source_id,
+                    dataset_id=dataset.dataset_id,
+                    source_file=discovered.path,
+                    storage_root=storage_root,
+                    run_id=run.run_id,
+                )
+                artifact_manifests.append(
                     {
                         "dataset_id": dataset.dataset_id,
-                        "evidence_bundle_uri": stored_evidence.evidence_bundle_uri,
-                        "content_hash": stored_evidence.content_hash,
-                        "evidence_path": stored_evidence.path,
-                        "row_count_sampled": evidence.row_count_sampled,
+                        "artifact_id": bronze_result.artifact_id,
+                        "manifest_path": bronze_result.manifest_path,
                     }
                 )
-                pii_blocking_tasks_created += _create_pii_review_tasks_from_csv(
-                    session,
-                    workspace_id=run.workspace_id,
-                    dataset_id=dataset.dataset_id,
-                    source_id=source.source_id,
-                    csv_path=discovered.path,
-                    physical_locator=physical_locator,
-                    storage_root=storage_root,
+
+                if discovered.path.lower().endswith(".csv"):
+                    evidence = profile_csv_file(discovered.path, sample_limit=PROFILE_SAMPLE_LIMIT)
+                    previous_summary = _json_dict(dataset.sensitivity_summary_json)
+                    previous_profile = previous_summary.get("profile", {})
+                    previous_columns = (
+                        [
+                            str(column)
+                            for column in previous_profile.get("schema_columns", [])
+                            if isinstance(column, (str, int, float))
+                        ]
+                        if isinstance(previous_profile, dict)
+                        else []
+                    )
+                    stored_evidence = store_evidence_bundle(
+                        workspace_id=run.workspace_id,
+                        storage_root=storage_root,
+                        bundle_type="profile",
+                        payload={
+                            "dataset_id": dataset.dataset_id,
+                            "source_id": source.source_id,
+                            "physical_locator": physical_locator,
+                            "profile": evidence.to_dict(),
+                        },
+                    )
+                    summary = previous_summary
+                    summary["profile"] = {
+                        "row_count_sampled": evidence.row_count_sampled,
+                        "parse_error_rate": evidence.parse_error_rate,
+                        "schema_columns": evidence.schema_columns,
+                    }
+                    summary["last_evidence_bundle_uri"] = stored_evidence.evidence_bundle_uri
+                    summary["last_evidence_content_hash"] = stored_evidence.content_hash
+                    dataset.sensitivity_summary_json = summary
+                    evidence_bundles.append(
+                        {
+                            "dataset_id": dataset.dataset_id,
+                            "evidence_bundle_uri": stored_evidence.evidence_bundle_uri,
+                            "content_hash": stored_evidence.content_hash,
+                            "evidence_path": stored_evidence.path,
+                            "row_count_sampled": evidence.row_count_sampled,
+                        }
+                    )
+                    pii_blocking_tasks_created += _create_pii_review_tasks_from_csv(
+                        session,
+                        workspace_id=run.workspace_id,
+                        dataset_id=dataset.dataset_id,
+                        source_id=source.source_id,
+                        csv_path=discovered.path,
+                        physical_locator=physical_locator,
+                        storage_root=storage_root,
+                    )
+                    drift_blocking_tasks_created += _create_drift_review_task_if_needed(
+                        session,
+                        workspace_id=run.workspace_id,
+                        dataset_id=dataset.dataset_id,
+                        source_id=source.source_id,
+                        physical_locator=physical_locator,
+                        previous_columns=previous_columns,
+                        current_columns=evidence.schema_columns,
+                        storage_root=storage_root,
+                    )
+                    session.flush()
+                successful_item_count += 1
+            except Exception as exc:
+                completeness_failures.append(
+                    {
+                        "source_id": source.source_id,
+                        "source_type": source.source_type,
+                        "path": discovered.path,
+                        "physical_locator": physical_locator,
+                        "stage": "ingest_profile",
+                        "error": str(exc),
+                    }
                 )
-                drift_blocking_tasks_created += _create_drift_review_task_if_needed(
-                    session,
-                    workspace_id=run.workspace_id,
-                    dataset_id=dataset.dataset_id,
-                    source_id=source.source_id,
-                    physical_locator=physical_locator,
-                    previous_columns=previous_columns,
-                    current_columns=evidence.schema_columns,
-                    storage_root=storage_root,
-                )
-                session.flush()
 
     sorted_dataset_ids = sorted(dataset_ids)
+    if completeness_failures:
+        completeness_payload = {
+            "workspace_id": run.workspace_id,
+            "run_id": run.run_id,
+            "strict_mode": strict_ingest,
+            "expected_items": sorted(
+                completeness_expected_items,
+                key=lambda row: (
+                    str(row.get("source_id")),
+                    str(row.get("physical_locator")),
+                ),
+            ),
+            "failure_count": len(completeness_failures),
+            "success_count": successful_item_count,
+            "failures": sorted(
+                completeness_failures,
+                key=lambda row: (
+                    str(row.get("source_id")),
+                    str(row.get("stage")),
+                    str(row.get("physical_locator", row.get("path", ""))),
+                ),
+            ),
+        }
+        if strict_ingest:
+            stored_failure = store_evidence_bundle(
+                workspace_id=run.workspace_id,
+                storage_root=storage_root,
+                bundle_type="ingest_completeness_failure",
+                payload=completeness_payload,
+            )
+            failure_task = _ensure_ingest_completeness_review_task(
+                session=session,
+                workspace_id=run.workspace_id,
+                evidence_bundle_uri=stored_failure.evidence_bundle_uri,
+            )
+            raise StrictIngestCompletenessError(
+                evidence_bundle_uri=stored_failure.evidence_bundle_uri,
+                failure_count=len(completeness_failures),
+                proposal_id=str(failure_task["proposal_id"]),
+                task_id=str(failure_task["task_id"]),
+            )
+        stored_warning = store_evidence_bundle(
+            workspace_id=run.workspace_id,
+            storage_root=storage_root,
+            bundle_type="ingest_completeness_warning",
+            payload=completeness_payload,
+        )
+    else:
+        stored_warning = None
+
     return {
         "source_ids": [source.source_id for source in sources],
         "dataset_ids": sorted_dataset_ids,
         "dataset_count": len(sorted_dataset_ids),
+        "strict_ingest": strict_ingest,
         "pii_blocking_tasks_created": pii_blocking_tasks_created,
         "drift_blocking_tasks_created": drift_blocking_tasks_created,
+        "expected_item_count": len(completeness_expected_items),
+        "processed_item_count": successful_item_count,
+        "completeness_failure_count": len(completeness_failures),
+        "completeness_warning_evidence_uri": (
+            stored_warning.evidence_bundle_uri if stored_warning is not None else None
+        ),
         "artifact_manifests": sorted(
             artifact_manifests,
             key=lambda row: (str(row.get("dataset_id")), str(row.get("artifact_id"))),
@@ -305,12 +463,12 @@ def _process_discover_run(
 
 
 def _discover_files_via_plugin(
-    plugin: ConnectorPlugin,
+    plugin_spec: ConnectorPluginSpec,
     *,
     scope: dict[str, object],
     source_type: str,
 ) -> list[DiscoveredFile]:
-    raw = plugin(scope)
+    raw = execute_connector_plugin(plugin_spec=plugin_spec, scope=scope)
     if not isinstance(raw, list):
         raise ValueError(
             f"Connector plugin '{source_type}' must return a list of discovery rows."
@@ -523,6 +681,47 @@ def _create_blocking_review_task_if_missing(
     )
     session.flush()
     return True
+
+
+def _ensure_ingest_completeness_review_task(
+    session: Session,
+    *,
+    workspace_id: str,
+    evidence_bundle_uri: str,
+) -> dict[str, str]:
+    proposal = _get_or_create_review_proposal(
+        session,
+        workspace_id=workspace_id,
+        proposal_type="ingest_completeness_proposal",
+        evidence_bundle_uri=evidence_bundle_uri,
+        confidence=1.0,
+    )
+    existing = (
+        session.execute(
+            select(ReviewTask).where(
+                ReviewTask.workspace_id == workspace_id,
+                ReviewTask.subject_ref == proposal.proposal_id,
+                ReviewTask.priority == "quality_critical",
+                ReviewTask.blocking.is_(True),
+                ReviewTask.status.in_(("open", "in_review")),
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        return {"proposal_id": proposal.proposal_id, "task_id": existing.task_id}
+    task = ReviewTask(
+        task_id=new_ulid(),
+        workspace_id=workspace_id,
+        priority="quality_critical",
+        subject_ref=proposal.proposal_id,
+        status="open",
+        blocking=True,
+    )
+    session.add(task)
+    session.flush()
+    return {"proposal_id": proposal.proposal_id, "task_id": task.task_id}
 
 
 def _upsert_catalog_dataset(

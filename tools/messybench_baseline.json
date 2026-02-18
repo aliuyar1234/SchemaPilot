@@ -1,0 +1,8 @@
+{
+  "max_duration_ms": 15000,
+  "required_checks": [
+    "family_keys_match",
+    "invoice_pk_candidate",
+    "relationship_overlap_present"
+  ]
+}

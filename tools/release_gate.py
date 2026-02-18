@@ -135,7 +135,13 @@ def main() -> int:
         (
             "RG-007",
             "MessyBench harness",
-            [sys.executable, "tools/messybench_harness.py"],
+            [sys.executable, "tools/messybench_harness.py", "--regression"],
+            None,
+        ),
+        (
+            "RG-007A",
+            "Golden-path e2e smoke",
+            [sys.executable, "tools/e2e_golden_path.py", "--smoke"],
             None,
         ),
         (

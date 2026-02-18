@@ -233,5 +233,17 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-18 — Completed PR-015: added runtime connector plugin loading via Python entry points and worker-side plugin discovery fallback for non-filesystem source types.
 - 2026-02-18 — Completed PR-016: added runtime KPI extraction tooling to generate weekly KPI snapshots directly from metadata/audit state with deterministic-rebuild and policy-denial metrics.
 - 2026-02-18 — Completed remaining board items: validated runnable compose smoke end-to-end (build/up/health/auth/down), added OSS contributor templates (`CONTRIBUTING`, issue/PR templates), and closed low-priority UI wizard card with additional behavioral test coverage.
+- 2026-02-18 — Replaced task board with post-PR018 execution queue (`PR-019` onward): S0-first ordering, no timeline planning, and explicit minimal-UI scope while core hardening continues.
+- 2026-02-18 — Completed PR-019 through PR-021: added shared `oidc_jwt` JWT/JWKS verification path for gateway/control-plane, enforced trusted-proxy startup guards for non-local bind, unified gateway auth through shared-domain auth, and added deploy no-bypass static checker wired into tooling baseline.
+- 2026-02-18 — Completed PR-022: enforced explicit audit fail-closed behavior in gateway/control-plane request flows, added audit-write-failure observability metric, and added regression tests covering denied operations when audit persistence is unavailable.
+- 2026-02-18 — Completed PR-023: added gateway workspace-isolation checks that deny known cross-workspace dataset access in AI SQL/retrieval paths with audited `dataset_workspace_mismatch` denials and regression coverage.
+- 2026-02-18 — Completed PR-024: added in-memory per-actor gateway throttling (per-minute rate and concurrency limits), wired fail-closed deny reasons for over-limit requests, and added regression coverage for both denial paths.
+- 2026-02-18 — Completed PR-025: enforced migration-state startup checks for non-local binds, kept local bootstrap autocreate behavior, added CLI migration commands (`migrate-up`, `migrate-status`), and added migration enforcement regression tests.
+- 2026-02-18 — Completed PR-026: added dedicated backup/restore tools, refactored backup/restore drill to use those utilities, and added round-trip regression coverage for backup/restore artifacts.
+- 2026-02-18 — Completed PR-027: enforced strict ingest completeness defaults for Team/Enterprise workers with immutable evidence bundles and blocking quality-task creation on completeness failures.
+- 2026-02-18 — Completed PR-028 and PR-029: added retention policy/purge governance controls and deletion separation-of-duties workflow with server-side legal-hold enforcement and disabled-by-default execution gates.
+- 2026-02-18 — Completed PR-030 and PR-031: introduced provenance schema v1 + deterministic audit export and added approval-gated policy-pack lifecycle controls with rollback support and gateway visibility.
+- 2026-02-18 — Completed PR-032 through PR-034: hardened plugin allowlist/isolated execution, added OpenAPI compatibility checks with committed baselines, and wired deterministic golden-path + regression harness gating.
+- 2026-02-18 — Completed PR-035 and PR-036: added optional gateway Trino engine adapter with DuckDB fallback, finalized runbook/security documentation, and marked the execution board complete while keeping UI intentionally minimal.
 
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -16,6 +17,16 @@ from backend.workers.inference import (
     infer_primary_key_candidates,
     infer_relationship_candidates,
 )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--regression",
+        action="store_true",
+        help="Enforce baseline regression thresholds from tools/messybench_baseline.json.",
+    )
+    return parser.parse_args()
 
 
 def _load_csv_rows(path: Path) -> list[dict[str, object]]:
@@ -38,6 +49,7 @@ def _normalize_invoice_rows(rows: list[dict[str, object]]) -> list[dict[str, obj
 
 
 def main() -> int:
+    args = _parse_args()
     root = Path(__file__).resolve().parents[1]
     output_root = root / "runtime" / "messybench"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -104,7 +116,35 @@ def main() -> int:
         "status": "pass" if passed else "fail",
         "duration_ms": round((perf_counter() - started) * 1000.0, 3),
         "checks": checks,
+        "regression_mode": args.regression,
     }
+    if args.regression:
+        baseline_path = root / "tools" / "messybench_baseline.json"
+        if not baseline_path.exists():
+            result["status"] = "fail"
+            result["regression_error"] = "missing_baseline_file"
+        else:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            expected_checks = baseline.get("required_checks", [])
+            max_duration_ms = baseline.get("max_duration_ms", 0)
+            if not isinstance(expected_checks, list):
+                expected_checks = []
+            check_map = {str(item.get("id", "")): bool(item.get("pass", False)) for item in checks}
+            missing_or_failed = [
+                check_id
+                for check_id in expected_checks
+                if not check_map.get(str(check_id), False)
+            ]
+            if missing_or_failed:
+                result["status"] = "fail"
+                result["regression_error"] = "required_checks_failed"
+                result["failed_required_checks"] = sorted(str(item) for item in missing_or_failed)
+            if isinstance(max_duration_ms, (int, float)) and max_duration_ms > 0:
+                if float(result["duration_ms"]) > float(max_duration_ms):
+                    result["status"] = "fail"
+                    result["regression_error"] = "duration_regression"
+                    result["max_duration_ms"] = float(max_duration_ms)
+
     report_path = output_root / "results.json"
     report_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
 

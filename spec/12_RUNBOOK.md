@@ -39,7 +39,9 @@ Expected:
 - `SCHEMAPILOT_PROFILE=team`
 - `SCHEMAPILOT_BIND_ADDRESS=127.0.0.1`
 - `SCHEMAPILOT_STORAGE_ROOT=/var/lib/schemapilot`
-- `SCHEMAPILOT_POSTGRES_DSN=...`
+- `SCHEMAPILOT_DATABASE_URL=...`
+- `SCHEMAPILOT_QUERY_ENGINE=duckdb` (or `trino`)
+- `SCHEMAPILOT_TRINO_URL=http://trino:8080` (when `SCHEMAPILOT_QUERY_ENGINE=trino`)
 
 2) Start services:
 ```bash
@@ -96,8 +98,18 @@ Procedure:
 4) Run security denial tests before allowing external traffic.
 
 OIDC-first enterprise integration:
-- `SCHEMAPILOT_AUTH_MODE=oidc`
-- `SCHEMAPILOT_OIDC_CLAIMS_HEADER=x-schemapilot-oidc-claims`
+- JWT verification mode (preferred):
+  - `SCHEMAPILOT_AUTH_MODE=oidc_jwt`
+  - `SCHEMAPILOT_OIDC_JWKS_URL=<jwks_url>` (or issuer discovery)
+  - `SCHEMAPILOT_OIDC_REQUIRED_ISSUER=<issuer>`
+  - `SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE=<audience>`
+  - `SCHEMAPILOT_OIDC_JWT_ALLOWED_ALGS=RS256`
+  - `SCHEMAPILOT_OIDC_CLOCK_SKEW_SECONDS=30`
+
+- Trusted proxy claims mode (only behind validated ingress):
+  - `SCHEMAPILOT_AUTH_MODE=oidc_trusted_proxy`
+  - `SCHEMAPILOT_OIDC_TRUSTED_PROXY=true`
+  - `SCHEMAPILOT_OIDC_CLAIMS_HEADER=x-schemapilot-oidc-claims`
 - `SCHEMAPILOT_OIDC_REQUIRED_ISSUER=<issuer>`
 - `SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE=<audience>`
 - `SCHEMAPILOT_OIDC_ACTOR_ID_CLAIM=sub`
@@ -105,7 +117,10 @@ OIDC-first enterprise integration:
 - `SCHEMAPILOT_OIDC_ATTRIBUTES_CLAIM=attributes`
 
 Fail-closed auth behavior:
-- missing trusted claims header -> deny
+- invalid/expired/wrong-signature JWT -> deny
+- JWKS unavailable with no valid cache -> deny
+- trusted-proxy mode without explicit trust flag on non-local bind -> fail to start
+- missing trusted claims header (trusted-proxy mode) -> deny
 - issuer/audience mismatch -> deny
 - missing roles -> deny by default policy
 
@@ -228,6 +243,32 @@ Expected:
 - output includes `PASS KPI report generated: runtime/kpi/weekly/<week>.json`
 - `runtime/kpi/latest.json` is updated
 
+Strict ingest completeness defaults:
+- `SCHEMAPILOT_INGEST_STRICT=true` is the default for Team/Enterprise worker profile.
+- Any unreadable/unparseable discovered item fails the run and writes evidence; no silent partial ingest.
+
+Retention/deletion safety defaults:
+- retention and purge are disabled until explicitly configured per workspace policy.
+- deletion execution is disabled unless `SCHEMAPILOT_DELETION_ENABLED=true`.
+- deletion requires separation-of-duties approvals and legal-hold server checks.
+
+Plugin security defaults:
+- non-builtin connector types require allowlisted plugins.
+- set explicit allowlist with `SCHEMAPILOT_PLUGINS_ALLOWED=plugin_a,plugin_b`.
+- plugin connector execution is isolated in subprocess mode and fails closed on errors.
+
+Contract and regression gates:
+```bash
+python tools/check_openapi_compat.py
+python tools/e2e_golden_path.py --smoke
+python tools/messybench_harness.py --regression
+```
+
+Expected:
+- OpenAPI compatibility check passes against committed baselines.
+- golden path produces `runtime/e2e_golden_path/results.json`.
+- regression harness produces `runtime/messybench/results.json` with threshold validation.
+
 Deletion workflow reference:
 evidence: spec/05_DATASTORE_AND_MIGRATIONS.md :: Retention and Deletion Mechanics
 
@@ -249,6 +290,7 @@ Check:
 - actor roles/attributes
 - masking rules applied
 - OIDC claim mapping (`iss`, `aud`, role claim, attributes claim) when `SCHEMAPILOT_AUTH_MODE=oidc`
+- JWT/JWKS config correctness when `SCHEMAPILOT_AUTH_MODE=oidc_jwt`
 
 Reference:
 evidence: spec/05_DATASTORE_AND_MIGRATIONS.md :: audit.access_decisions (append-only)
@@ -264,6 +306,18 @@ Check:
 - actor `allowed_dataset_ids` entitlements
 - server-side corpus files under `runtime/storage/documents/<workspace_id>`
 - query text and dataset filters
+
+### Symptom: Trino query path fails
+Check:
+- `SCHEMAPILOT_QUERY_ENGINE=trino` is set for gateway.
+- `SCHEMAPILOT_TRINO_URL`, `SCHEMAPILOT_TRINO_CATALOG`, `SCHEMAPILOT_TRINO_SCHEMA`, `SCHEMAPILOT_TRINO_USER` are configured.
+- Trino service is reachable from gateway network only (no direct client exposure).
+
+### Symptom: custom connector source type is denied
+Check:
+- plugin package is installed and entry point is valid.
+- source type is included in `SCHEMAPILOT_PLUGINS_ALLOWED`.
+- worker logs for `plugin_execution_failed:*` fail-closed reasons.
 
 ### Symptom: missing observability signals
 Check:
