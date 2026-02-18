@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from urllib import error as urlerror
@@ -33,6 +34,21 @@ DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_CP_AUTH_TOKEN = os.getenv("SCHEMAPILOT_CP_TOKEN", "local-platform-admin-token")
 DEFAULT_GATEWAY_AUTH_TOKEN = os.getenv("SCHEMAPILOT_GATEWAY_TOKEN", "local-analyst-token")
 DEFAULT_DATABASE_URL = os.getenv("SCHEMAPILOT_DATABASE_URL", "sqlite:///./runtime/schemapilot.db")
+TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
+PACK_QUERY_SUGGESTIONS: dict[str, dict[str, str]] = {
+    "invoices": {
+        "sql": "select sum(amount) as gross_revenue from silver.invoice",
+        "dataset_id": "dataset-invoice",
+    },
+    "crm": {
+        "sql": "select stage, count(lead_id) as lead_count from silver.lead group by stage",
+        "dataset_id": "dataset-lead",
+    },
+    "support": {
+        "sql": "select status, count(ticket_id) as ticket_count from silver.ticket group by status",
+        "dataset_id": "dataset-ticket",
+    },
+}
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> None:
@@ -94,6 +110,68 @@ def _as_dict(payload: dict[str, object] | list[dict[str, object]]) -> dict[str, 
     return payload if isinstance(payload, dict) else {}
 
 
+def _normalize_template_pack(pack: str | None) -> str | None:
+    value = (pack or "").strip().lower()
+    if not value or value == "none":
+        return None
+    if value not in list_gold_template_packs():
+        raise ValueError(f"unknown_template_pack:{value}")
+    return value
+
+
+def _wait_for_run_completion(
+    *,
+    api_base_url: str,
+    workspace_id: str,
+    run_id: str,
+    timeout_seconds: int,
+    poll_interval_seconds: float,
+) -> dict[str, object]:
+    deadline = time.monotonic() + max(timeout_seconds, 1)
+    interval = max(poll_interval_seconds, 0.1)
+    latest: dict[str, object] = {"run_id": run_id, "status": "unknown"}
+    while time.monotonic() <= deadline:
+        response = _request_json(
+            "GET",
+            f"{api_base_url}/api/v1/workspaces/{workspace_id}/runs/{run_id}",
+        )
+        latest = _as_dict(response)
+        status = str(latest.get("status", "")).strip().lower()
+        if status in TERMINAL_RUN_STATUSES:
+            return latest
+        time.sleep(interval)
+    latest = dict(latest)
+    latest["status"] = str(latest.get("status", "timeout"))
+    latest["timed_out"] = True
+    latest["timeout_seconds"] = max(timeout_seconds, 1)
+    return latest
+
+
+def _next_steps_payload(
+    *,
+    workspace_id: str,
+    pack: str | None,
+    gateway_base_url: str,
+) -> list[str]:
+    query_suggestion = PACK_QUERY_SUGGESTIONS.get(
+        pack or "",
+        {"sql": "select 1 as one", "dataset_id": "dataset-1"},
+    )
+    sql = query_suggestion["sql"]
+    dataset_id = query_suggestion["dataset_id"]
+    return [
+        f"schemapilot status --workspace {workspace_id}",
+        (
+            "schemapilot query "
+            f"--workspace {workspace_id} "
+            f'--sql "{sql}" '
+            f"--dataset-id {dataset_id} "
+            f"--gateway-base-url {gateway_base_url}"
+        ),
+        f"schemapilot analyze --workspace {workspace_id}",
+    ]
+
+
 @app.command()
 def doctor(
     config_path: str | None = typer.Option(
@@ -113,10 +191,46 @@ def init(
     interactive: bool = typer.Option(False, "--interactive/--no-interactive"),
     api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
     run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
+    template_pack: str = typer.Option(
+        "none",
+        "--template-pack",
+        help="Starter semantic/gold pack: invoices|crm|support|none.",
+    ),
+    wait_for_run: bool = typer.Option(
+        False,
+        "--wait-for-run/--no-wait-for-run",
+        help="Wait for discover run to reach terminal status.",
+    ),
+    wait_timeout_seconds: int = typer.Option(
+        180,
+        "--wait-timeout-seconds",
+        help="Maximum wait time for run completion.",
+    ),
+    poll_interval_seconds: float = typer.Option(
+        2.0,
+        "--poll-interval-seconds",
+        help="Polling interval while waiting for run completion.",
+    ),
+    template_output_root: str = typer.Option(
+        "runtime/gold_templates",
+        "--template-output-root",
+        help="Output directory for generated template bundles.",
+    ),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
 ) -> None:
     """Generate local config skeleton."""
     if interactive:
-        init_interactive(api_base_url=api_base_url, profile=profile, run_discover=run_discover)
+        init_interactive(
+            api_base_url=api_base_url,
+            profile=profile,
+            run_discover=run_discover,
+            template_pack=template_pack,
+            wait_for_run=wait_for_run,
+            wait_timeout_seconds=wait_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            template_output_root=template_output_root,
+            gateway_base_url=gateway_base_url,
+        )
         return
     config = {
         "profile": profile,
@@ -137,6 +251,12 @@ def init_interactive(
     api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
     profile: str = typer.Option("team", "--profile"),
     run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
+    template_pack: str = typer.Option("none", "--template-pack"),
+    wait_for_run: bool = typer.Option(False, "--wait-for-run/--no-wait-for-run"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    template_output_root: str = typer.Option("runtime/gold_templates", "--template-output-root"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
 ) -> None:
     """Interactive onboarding: workspace + source + optional discover run."""
     workspace_name = typer.prompt("Workspace name", default="Team Workspace").strip()
@@ -174,6 +294,7 @@ def init_interactive(
         },
     )
     run_response: dict[str, object] = {}
+    run_observed: dict[str, object] = {}
     if run_discover:
         run_payload = _request_json(
             "POST",
@@ -181,6 +302,34 @@ def init_interactive(
             {"run_type": "discover"},
         )
         run_response = _as_dict(run_payload)
+        run_id = str(run_response.get("run_id", "")).strip()
+        if wait_for_run and run_id:
+            run_observed = _wait_for_run_completion(
+                api_base_url=api_base_url,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                timeout_seconds=wait_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+    normalized_pack: str | None
+    try:
+        normalized_pack = _normalize_template_pack(template_pack)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    template_bundle: dict[str, object] = {}
+    if normalized_pack is not None:
+        try:
+            template_bundle = generate_gold_template_bundle(
+                pack_id=normalized_pack,
+                workspace_id=workspace_id,
+                output_root=template_output_root,
+                overwrite=True,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
 
     typer.echo(
         json.dumps(
@@ -189,6 +338,13 @@ def init_interactive(
                 "workspace_name": workspace_name,
                 "source": _as_dict(source_response),
                 "run": run_response,
+                "run_observed": run_observed,
+                "template_bundle": template_bundle,
+                "next_steps": _next_steps_payload(
+                    workspace_id=workspace_id,
+                    pack=normalized_pack,
+                    gateway_base_url=gateway_base_url,
+                ),
             },
             indent=2,
             sort_keys=True,
@@ -561,6 +717,104 @@ def demo_generate(
     """Generate deterministic first-hour demo data files."""
     result = generate_demo_scenario(output_root=output_root)
     typer.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("first-hour")
+def first_hour(
+    workspace_name: str = typer.Option("First Hour Demo", "--workspace-name"),
+    profile: str = typer.Option("team", "--profile"),
+    output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
+    source_type: str = typer.Option("filesystem", "--source-type"),
+    template_pack: str = typer.Option("invoices", "--template-pack"),
+    template_output_root: str = typer.Option("runtime/gold_templates", "--template-output-root"),
+    run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
+    wait_for_run: bool = typer.Option(True, "--wait-for-run/--no-wait-for-run"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """One-command onboarding path: demo data -> workspace -> source -> discover -> template."""
+    scenario = generate_demo_scenario(output_root=output_root)
+    workspace_response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces",
+        {"name": workspace_name, "profile": profile, "security_baseline": "strict"},
+    )
+    workspace_id = str(_as_dict(workspace_response).get("workspace_id", "")).strip()
+    if not workspace_id:
+        typer.echo("Workspace creation did not return workspace_id.", err=True)
+        raise typer.Exit(code=1)
+
+    source_response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace_id}/sources",
+        {
+            "source_type": source_type.strip().lower() or "filesystem",
+            "scope": {"root_path": scenario.exports_path},
+            "display_name": scenario.exports_path,
+        },
+    )
+
+    run_response: dict[str, object] = {}
+    run_observed: dict[str, object] = {}
+    if run_discover:
+        run_payload = _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace_id}/runs",
+            {"run_type": "discover"},
+        )
+        run_response = _as_dict(run_payload)
+        run_id = str(run_response.get("run_id", "")).strip()
+        if wait_for_run and run_id:
+            run_observed = _wait_for_run_completion(
+                api_base_url=api_base_url,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                timeout_seconds=wait_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+    try:
+        normalized_pack = _normalize_template_pack(template_pack)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    template_bundle: dict[str, object] = {}
+    if normalized_pack is not None:
+        try:
+            template_bundle = generate_gold_template_bundle(
+                pack_id=normalized_pack,
+                workspace_id=workspace_id,
+                output_root=template_output_root,
+                overwrite=True,
+            )
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        json.dumps(
+            {
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "profile": profile,
+                "demo_data": scenario.to_dict(),
+                "source": _as_dict(source_response),
+                "run": run_response,
+                "run_observed": run_observed,
+                "template_bundle": template_bundle,
+                "next_steps": _next_steps_payload(
+                    workspace_id=workspace_id,
+                    pack=normalized_pack,
+                    gateway_base_url=gateway_base_url,
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("kpi-report")

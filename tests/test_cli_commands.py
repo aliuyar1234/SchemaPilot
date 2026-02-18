@@ -372,6 +372,102 @@ def test_init_interactive_bootstraps_workspace_source_and_run(monkeypatch) -> No
     assert calls[2][1] == "http://cp/api/v1/workspaces/w-interactive/runs"
 
 
+def test_init_interactive_waits_and_generates_template_bundle(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-init"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-init"}
+        if url.endswith("/runs"):
+            return {"run_id": "r-init", "status": "queued"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    monkeypatch.setattr(
+        "cli.schemapilot_cli.main._wait_for_run_completion",
+        lambda **kwargs: {"run_id": kwargs["run_id"], "status": "succeeded"},
+    )
+    output_root = tmp_path / "template_out"
+    result = runner.invoke(
+        app,
+        [
+            "init-interactive",
+            "--api-base-url",
+            "http://cp",
+            "--template-pack",
+            "invoices",
+            "--template-output-root",
+            output_root.as_posix(),
+            "--wait-for-run",
+        ],
+        input="Init Workspace\nfilesystem\n/tmp/exports\n",
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout[result.stdout.find("{") :])
+    assert payload["workspace_id"] == "w-init"
+    assert payload["run_observed"]["status"] == "succeeded"
+    assert payload["template_bundle"]["pack_id"] == "invoices"
+    assert Path(payload["template_bundle"]["output_path"]).exists()
+
+
+def test_first_hour_command_bootstraps_demo_workspace(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-first-hour"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-first-hour"}
+        if url.endswith("/runs"):
+            return {"run_id": "r-first-hour", "status": "queued"}
+        if "/runs/" in url:
+            return {"run_id": "r-first-hour", "status": "succeeded"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    demo_root = tmp_path / "demo"
+    template_root = tmp_path / "templates"
+    result = runner.invoke(
+        app,
+        [
+            "first-hour",
+            "--workspace-name",
+            "First Hour Test",
+            "--api-base-url",
+            "http://cp",
+            "--gateway-base-url",
+            "http://gw",
+            "--output-root",
+            demo_root.as_posix(),
+            "--template-output-root",
+            template_root.as_posix(),
+            "--template-pack",
+            "invoices",
+            "--wait-for-run",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["workspace_id"] == "w-first-hour"
+    assert payload["source"]["source_id"] == "s-first-hour"
+    assert payload["run"]["run_id"] == "r-first-hour"
+    assert payload["run_observed"]["status"] == "succeeded"
+    assert payload["template_bundle"]["pack_id"] == "invoices"
+    assert Path(payload["template_bundle"]["output_path"]).exists()
+    assert Path(payload["demo_data"]["manifest_path"]).exists()
+    assert any("schemapilot query" in step for step in payload["next_steps"])
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "http://cp/api/v1/workspaces"
+
+
 def test_review_batch_requires_confirmation(monkeypatch) -> None:
     def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
         _ = (method, url, payload, auth_token)

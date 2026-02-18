@@ -44,7 +44,7 @@ docker compose -f deploy/docker-compose.yml --profile team up -d control-plane g
 ### 3) Bootstrap demo workflow
 
 ```bash
-schemapilot onboard-demo --workspace-name "Demo Workspace"
+schemapilot first-hour --workspace-name "Demo Workspace"
 ```
 
 ### 4) Run a governed query
