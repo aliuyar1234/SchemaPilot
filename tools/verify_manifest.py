@@ -20,7 +20,7 @@ IGNORED_PARTS = {
 
 
 def _is_ignored(path: Path) -> bool:
-    return any(part in IGNORED_PARTS for part in path.parts)
+    return any(part in IGNORED_PARTS or part.endswith(".egg-info") for part in path.parts)
 
 
 def _stable_file_bytes(file_path: Path) -> bytes:

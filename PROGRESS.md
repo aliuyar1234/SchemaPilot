@@ -262,5 +262,6 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-18 — Completed the remaining `TASKLIST_NEXT_V2` board (`V2-0006`..`V2-0031`): pack signing/migration + CI templates, connector conformance/state + reference connectors, CLI operator workflows, gateway cache/materialization/quota controls, tracing + plugin sandbox + fuzz/chaos/supply-chain gates, deletion attestation + artifact encryption, and deployment upgrade docs; re-verified with targeted V2 suites and full `python -m pytest -q` pass.
 - 2026-02-18 — Hardened UI dependency posture by migrating linting from ESLint to Biome, removing the unresolved ESLint/AJV advisory chain; verified UI `npm audit` (0 vulnerabilities) and re-ran full `CHK-TOOLING-BASELINE` successfully.
 - 2026-02-18 — Stabilized cross-platform manifest hashing by normalizing UTF-8 text line endings in manifest generate/verify tooling, regenerated `MANIFEST.sha256`, and revalidated `CHK-TOOLING-BASELINE` to unblock CI/release parity on Linux.
+- 2026-02-18 — Fixed CI/release manifest false negatives by excluding build-generated `*.egg-info` files from manifest scope (these are mutated by `pip install -e` in GitHub Actions), then regenerated `MANIFEST.sha256`.
 
 

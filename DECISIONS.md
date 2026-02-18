@@ -2865,10 +2865,13 @@ CI/release runs on Linux while local development often runs on Windows with `aut
 **Implications**  
 - Manifest verification is now robust across Windows/Linux text checkout differences.  
 - Binary files remain raw-byte hashed; only UTF-8 text bytes are normalized.
+- Build-generated `*.egg-info` metadata is excluded from manifest drift checks to keep CI/release reproducible after dependency installation.
 
 **Affected files**  
 - evidence: tools/generate_manifest.py :: _stable_file_bytes  
+- evidence: tools/generate_manifest.py :: part.endswith(".egg-info")
 - evidence: tools/verify_manifest.py :: _stable_file_bytes  
+- evidence: tools/verify_manifest.py :: part.endswith(".egg-info")
 - evidence: MANIFEST.sha256 :: tools/generate_manifest.py
 
 **Verification impact**  
