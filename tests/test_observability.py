@@ -68,6 +68,7 @@ def test_control_plane_metrics_tracks_review_queue_backlog() -> None:
     workspace = client.post(
         "/api/v1/workspaces",
         json={"name": "Observability", "profile": "starter", "security_baseline": "standard"},
+        headers=_auth_headers("local-platform-admin-token"),
     ).json()
     workspace_id = workspace["workspace_id"]
     client.post(
@@ -79,6 +80,7 @@ def test_control_plane_metrics_tracks_review_queue_backlog() -> None:
             "priority": "security_critical",
             "blocking": True,
         },
+        headers=_auth_headers("local-platform-admin-token"),
     )
     list_response = client.get(f"/api/v1/workspaces/{workspace_id}/review_tasks")
     assert list_response.status_code == 200

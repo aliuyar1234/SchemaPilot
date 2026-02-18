@@ -132,6 +132,112 @@
   - evidence: spec/12_RUNBOOK.md :: Symptom: CHK-MANIFEST-VERIFY fails
   - evidence: tests/test_s3_connector.py :: test_s3_connector_fails_closed_when_max_keys_reached_without_truncation_metadata
 
+## v1.0.13
+- Systematic task-board execution update:
+  - implemented control-plane auth hardening with role-based mutation guards (deny-by-default)
+  - hardened gateway SQL path with read-only safety checks, timeout budgeting, and AI dataset entitlement enforcement
+  - normalized service port conventions (CP `8000`, GW `8001`) across entrypoints and tests
+  - replaced compose placeholders with Dockerfile-backed services and removed direct Trino port exposure
+  - evidence: DECISIONS.md :: D-0027 Execution-priority hardening baseline (control-plane auth, gateway SQL safety/entitlements, and runnable deploy defaults)
+  - evidence: TASKLIST.md :: Now (Sprint 1: S0 blockers)
+  - evidence: tests/test_control_plane_auth.py :: test_control_plane_denies_missing_token_for_mutation
+  - evidence: tests/test_gateway_sql_safety.py :: test_gateway_denies_non_read_sql
+  - evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_query_for_unentitled_dataset
+
+## v1.0.14
+- Shared metadata model relocation update:
+  - moved canonical metadata SQLAlchemy models into `backend/shared_domain/metadata_models.py`
+  - kept `backend/control_plane/db_models.py` as compatibility re-export to avoid breakage
+  - updated control-plane repositories to import shared metadata models directly
+  - evidence: DECISIONS.md :: D-0028 Shared metadata model relocation baseline (move control-plane SQLAlchemy metadata models into shared domain)
+  - evidence: TASKLIST.md :: PR-006 `shared-metadata-models-refactor`
+
+## v1.0.15
+- Worker orchestration and evidence-store update:
+  - added deterministic worker run runner (`backend/workers/service.py`, `backend/workers/run_processor.py`) with queued-run status transitions and fail-closed run-type handling
+  - wired discover runs to real catalog dataset creation, bronze ingest manifests, and profiling evidence outputs
+  - introduced immutable evidence store with `evidence://` URIs and authenticated control-plane evidence retrieval endpoint
+  - added worker/pipeline/evidence test coverage and compose worker container wiring
+  - evidence: DECISIONS.md :: D-0029 Worker orchestration baseline (deterministic queued-run processor and discover-to-catalog pipeline)
+  - evidence: DECISIONS.md :: D-0030 Evidence bundle immutability baseline (content-addressed evidence store + authenticated retrieval)
+  - evidence: TASKLIST.md :: [x] PR-007 `worker-runner-service`
+  - evidence: TASKLIST.md :: [x] PR-008 `discover-to-catalog-pipeline`
+  - evidence: TASKLIST.md :: [x] PR-009 `evidence-bundle-store`
+
+## v1.0.16
+- PII governance automation update:
+  - extended discover pipeline to evaluate high-risk PII patterns and create blocking review tasks automatically
+  - persisted PII proposals with immutable evidence bundles and deduplicated open task creation on reruns
+  - added pipeline regression test for end-to-end PII detection -> review queue behavior
+  - evidence: DECISIONS.md :: D-0031 PII governance automation baseline (high-risk detection to blocking review tasks)
+  - evidence: TASKLIST.md :: [x] PR-010 `pii-to-review-queue`
+  - evidence: tests/test_pipeline_pii_review.py :: test_discover_pipeline_creates_blocking_pii_review_tasks
+
+## v1.0.17
+- Contract publish-gate hardening update:
+  - added server-side contract report persistence/loading helpers and removed trust in client-provided contract pass flags
+  - made publish fail closed when contract reports are missing or failing
+  - added automatic quality-critical blocking review-task creation for contract failure signals
+  - evidence: DECISIONS.md :: D-0032 Contract gate hardening baseline (server-side contract reports + fail-closed publish + quality tasks)
+  - evidence: TASKLIST.md :: [x] PR-011 `contracts-and-quarantine-hard-gate`
+  - evidence: tests/test_contracts_block_publish.py :: test_publish_fails_closed_without_contract_report_and_creates_quality_task
+
+## v1.0.18
+- Gold publish/rollback operationalization update:
+  - added server-side gold pointer persistence with history tracking
+  - publish endpoint now writes real pointer state only when gates pass and reports before/after pointers
+  - rollback endpoint now restores pointer targets from history with stable not-found behavior
+  - evidence: DECISIONS.md :: D-0033 Gold publish pointer baseline (server-side pointer writes + auditable rollback)
+  - evidence: TASKLIST.md :: [x] PR-012 `gold-publish-and-rollback`
+  - evidence: tests/test_gold_publish_rollback.py :: test_gold_publish_updates_pointer_and_rollback_restores_previous_build
+
+## v1.0.19
+- Gateway DuckDB read-path update:
+  - replaced gateway SQLite execution path with DuckDB in-memory execution
+  - bound queryable views to server-side published gold pointers (`gold.fact_metrics`)
+  - expanded SQL safety denylist to block direct external file scan functions
+  - evidence: DECISIONS.md :: D-0034 Gateway DuckDB read-path baseline (published gold views only + external scan denial)
+  - evidence: TASKLIST.md :: [x] PR-013 `gateway-duckdb-read-path`
+  - evidence: tests/test_gateway_duckdb_readonly.py :: test_gateway_reads_published_gold_metrics_from_duckdb
+
+## v1.0.20
+- Drift governance loop update:
+  - connected schema drift detection to discover-run orchestration with immutable drift evidence bundles
+  - created blocking quality-critical drift review tasks on schema changes (excluding initial baseline)
+  - verified drift-generated blocking tasks prevent publish even when contract reports pass
+  - evidence: DECISIONS.md :: D-0035 Drift governance baseline (schema-drift proposals from discover runs + publish blocking loop)
+  - evidence: TASKLIST.md :: [x] PR-014 `drift-into-ops-loop`
+  - evidence: tests/test_drift_blocks_publish.py :: test_schema_drift_creates_blocking_task_and_blocks_publish
+
+## v1.0.21
+- Connector plugin runtime update:
+  - added Python entry-point plugin loader with duplicate/callable safety checks
+  - wired worker discover pipeline to use plugin connectors for non-filesystem source types
+  - added plugin loader and plugin-backed worker execution tests
+  - evidence: DECISIONS.md :: D-0036 Plugin runtime baseline (entry-point connector loading + worker fallback wiring)
+  - evidence: TASKLIST.md :: [x] PR-015 `plugin-loader-runtime`
+  - evidence: tests/test_plugin_loader.py :: test_connector_plugin_loader_requires_callable_plugins
+
+## v1.0.22
+- KPI extraction automation update:
+  - added `tools/kpi_extract.py` to derive weekly KPI snapshots from runtime metadata/audit state
+  - added deterministic rebuild-rate and blocking-review backlog extraction
+  - added regression test coverage for KPI extraction payloads
+  - evidence: DECISIONS.md :: D-0037 KPI extraction baseline (runtime-derived weekly KPI snapshot generation)
+  - evidence: TASKLIST.md :: [x] PR-016 `kpi-auto-extraction`
+  - evidence: tests/test_kpi_extract.py :: test_kpi_extract_derives_runtime_metrics_from_metadata
+
+## v1.0.23
+- Deploy/community/UI completion update:
+  - completed runnable compose verification with real local smoke cycle (`up --build`, health checks, auth fail-closed check, `down`)
+  - added OSS contributor baseline documents and templates (`CONTRIBUTING.md`, issue templates, PR template)
+  - closed low-priority UI card with additional behavior test coverage for review decisions and recommendation actions
+  - evidence: DECISIONS.md :: D-0038 Completion baseline for deploy/community/UI thin slice (compose smoke validated, OSS templates added, UI kept intentionally lightweight)
+  - evidence: TASKLIST.md :: [x] PR-005 `runnable-compose-profile-team`
+  - evidence: TASKLIST.md :: [x] PR-017 `oss-community-basics`
+  - evidence: TASKLIST.md :: [x] PR-018 `ui-wizard-upgrade` (low priority by design)
+  - evidence: ui/src/App.test.tsx :: submits review decisions and recommendation requests for selected workspace
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

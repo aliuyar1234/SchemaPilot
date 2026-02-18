@@ -25,6 +25,19 @@ docker compose --profile enterprise up -d
 Starter uses the minimal stack. Team and Enterprise add modules progressively without requiring
 source re-ingestion.
 
+Compose now builds service images from:
+
+- `deploy/Dockerfile.control-plane`
+- `deploy/Dockerfile.gateway`
+- `deploy/Dockerfile.worker`
+- `deploy/Dockerfile.ui`
+
+The compose stack also includes a background `worker` service that polls queued runs and
+executes deterministic discover pipelines into the catalog.
+
+Local control-plane mutating endpoints are auth-protected by default.
+For local development, the CLI and UI use `Bearer local-platform-admin-token` unless overridden.
+
 ## Enterprise auth path (OIDC-first)
 
 Enterprise deployments should terminate authentication in a trusted ingress/proxy and forward

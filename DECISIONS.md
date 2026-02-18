@@ -27,6 +27,18 @@
 - D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
 - D-0025 Security and determinism hardening baseline (authenticated gateway context, enforced ABAC filtering, server-side retrieval corpus, and fail-closed ingest/build checks)
 - D-0026 Adoption roadmap hardening baseline (demo-first onboarding, operator docs depth, and enterprise extension guidance)
+- D-0027 Execution-priority hardening baseline (control-plane auth, gateway SQL safety/entitlements, and runnable deploy defaults)
+- D-0028 Shared metadata model relocation baseline (move control-plane SQLAlchemy metadata models into shared domain)
+- D-0029 Worker orchestration baseline (deterministic queued-run processor and discover-to-catalog pipeline)
+- D-0030 Evidence bundle immutability baseline (content-addressed evidence store + authenticated retrieval)
+- D-0031 PII governance automation baseline (high-risk detection to blocking review tasks)
+- D-0032 Contract gate hardening baseline (server-side contract reports + fail-closed publish + quality tasks)
+- D-0033 Gold publish pointer baseline (server-side pointer writes + auditable rollback)
+- D-0034 Gateway DuckDB read-path baseline (published gold views only + external scan denial)
+- D-0035 Drift governance baseline (schema-drift proposals from discover runs + publish blocking loop)
+- D-0036 Plugin runtime baseline (entry-point connector loading + worker fallback wiring)
+- D-0037 KPI extraction baseline (runtime-derived weekly KPI snapshot generation)
+- D-0038 Completion baseline for deploy/community/UI thin slice (compose smoke validated, OSS templates added, UI kept intentionally lightweight)
 
 ---
 
@@ -1034,6 +1046,519 @@ Broader adoption requires low-friction onboarding, clearer operator recovery pla
 - Critical flow impacted: YES (auth, policy enforcement, release/operator recovery)  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES (deny-by-default auth/policy behavior and documented fail-closed recovery paths)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0027 Execution-priority hardening baseline (control-plane auth, gateway SQL safety/entitlements, and runnable deploy defaults)
+
+**Decision**  
+Execute the `TASKLIST.md` backlog in strict security-first order and ship the first block as baseline hardening:
+- Control Plane mutating endpoints require authenticated actors with role checks.
+- Gateway SQL execution is read-only with unsafe SQL denial, timeout budgeting, and row-limit clamping.
+- AI SQL requests require dataset context and dataset entitlement membership.
+- Runtime conventions are normalized (Control Plane `8000`, Gateway `8001`) and compose assets move from placeholders to runnable Dockerfile-backed services.
+
+**Rationale**  
+This sequence removes the highest-risk exposure paths first while preserving adoption momentum through runnable local deployment assets.
+
+**Alternatives considered**  
+- Prioritize UI-first improvements (rejected: increases polish while leaving core security/runnability gaps).  
+- Add full engine stack before SQL sandboxing (rejected: expands blast radius before guardrails).
+
+**Implications**  
+- Mutating control-plane API calls now require bearer auth and suitable roles.
+- Gateway denies unsafe SQL operations before execution.
+- AI actors cannot run SQL without explicit dataset entitlements.
+- Compose defaults now align with the documented service ports and local profile behavior.
+
+**Affected files**  
+- evidence: backend/control_plane/app.py :: require_actor
+- evidence: backend/shared_domain/auth.py :: load_local_auth_tokens
+- evidence: backend/gateway/executor.py :: _validate_read_only_query
+- evidence: backend/gateway/app.py :: reason = "sql_unsafe"
+- evidence: backend/gateway/app.py :: reason = "dataset_not_allowed"
+- evidence: backend/control_plane/main.py :: CONTROL_PLANE_PORT = 8000
+- evidence: backend/gateway/main.py :: GATEWAY_PORT = 8001
+- evidence: deploy/docker-compose.yml :: dockerfile: deploy/Dockerfile.control-plane
+
+**Verification impact**  
+- evidence: tests/test_control_plane_auth.py :: test_control_plane_denies_missing_token_for_mutation
+- evidence: tests/test_gateway_sql_safety.py :: test_gateway_denies_non_read_sql
+- evidence: tests/test_gateway_sql_safety.py :: test_gateway_denies_query_that_exceeds_timeout_budget
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_query_for_unentitled_dataset
+- evidence: tests/test_port_conventions.py :: test_port_conventions_are_consistent
+- evidence: tests/test_deploy_no_bypass_ports.py :: test_compose_does_not_publish_direct_query_engine_or_index_ports
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (deny-by-default auth and SQL rejection on unsafe/ambiguous execution paths)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0028 Shared metadata model relocation baseline (move control-plane SQLAlchemy metadata models into shared domain)
+
+**Decision**  
+Relocate canonical metadata SQLAlchemy models from `backend/control_plane/db_models.py` to
+`backend/shared_domain/metadata_models.py`, and keep `backend/control_plane/db_models.py` as a
+compatibility re-export shim.
+
+**Rationale**  
+This avoids future boundary erosion when worker/orchestration services need direct metadata model
+access, while preserving backward compatibility for existing control-plane imports.
+
+**Alternatives considered**  
+- Keep models under control-plane and duplicate worker-side model definitions (rejected: drift risk).  
+- Move models and break all old imports immediately (rejected: unnecessary migration friction).
+
+**Implications**  
+- Shared domain becomes the canonical source of metadata table models.
+- Existing control-plane code remains stable via explicit re-export compatibility.
+- Worker-side orchestration can import metadata models without cross-layer violations.
+
+**Affected files**  
+- evidence: backend/shared_domain/metadata_models.py :: class Workspace
+- evidence: backend/control_plane/db_models.py :: Compatibility re-export for shared metadata SQLAlchemy models.
+- evidence: backend/control_plane/repository.py :: from backend.shared_domain.metadata_models import
+- evidence: backend/control_plane/review_repository.py :: from backend.shared_domain.metadata_models import
+
+**Verification impact**  
+- evidence: tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+- evidence: tests/test_control_plane_api.py :: test_workspace_source_run_flow
+- evidence: tests/test_review_queue_backend.py :: test_review_queue_create_list_decide
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (metadata persistence and service boundaries)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (compatibility shim preserves existing imports)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0029 Worker orchestration baseline (deterministic queued-run processor and discover-to-catalog pipeline)
+
+**Decision**  
+Implement a backend worker runner that deterministically processes queued runs and executes a discover pipeline:
+- Add `backend/workers/run_processor.py` for queued-run selection, status transitions (`queued -> running -> succeeded|failed`), and fail-closed error handling.
+- Add `backend/workers/service.py` as polling runner service and compose worker container wiring.
+- For `discover` runs, process active filesystem sources, upsert stable catalog datasets, ingest bronze artifacts, and generate profiling evidence links.
+
+**Rationale**  
+Run orchestration was the key gap between control-plane run creation and real data-catalog outcomes. This baseline closes that gap while preserving deterministic ordering and fail-closed execution.
+
+**Alternatives considered**  
+- Keep runs as metadata-only queue records (rejected: no executable pipeline path).  
+- Let workers import control-plane repository directly (rejected: boundary drift risk).
+
+**Implications**  
+- Queued runs now move through explicit statuses with worker-generated audit events.
+- Discover runs produce non-empty dataset catalog entries and output references to artifacts/evidence.
+- Compose profiles can include a worker service without exposing additional data-plane ports.
+
+**Affected files**  
+- evidence: backend/workers/run_processor.py :: process_next_queued_run
+- evidence: backend/workers/service.py :: process_queued_runs_once
+- evidence: deploy/docker-compose.yml :: worker:
+- evidence: deploy/Dockerfile.worker :: CMD ["python", "-m", "backend.workers.service"]
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_queued_run_with_status_transition
+- evidence: tests/test_pipeline_discover_catalog.py :: test_discover_run_populates_catalog_and_evidence_deterministically
+
+**Verification impact**  
+- evidence: tests/test_worker_runner.py :: test_worker_runner_marks_unsupported_run_type_failed
+- evidence: tests/test_pipeline_discover_catalog.py :: test_discover_run_populates_catalog_and_evidence_deterministically
+- evidence: tests/test_control_plane_api.py :: test_dataset_endpoints_return_expected_contracts
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (reliability, determinism, catalog correctness)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (single-threaded deterministic polling with fail-closed unsupported run/source handling)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0030 Evidence bundle immutability baseline (content-addressed evidence store + authenticated retrieval)
+
+**Decision**  
+Introduce an immutable evidence storage layer and authenticated retrieval path:
+- Add `backend/shared_domain/evidence_store.py` with content-hash-based bundle IDs, immutable write semantics, and `evidence://<workspace>/<evidence_id>` URIs.
+- Wire worker discover profiling outputs to stored evidence bundles.
+- Add control-plane endpoint `GET /api/v1/workspaces/{workspace_id}/evidence/{evidence_id}` with role-gated access and audit event emission.
+
+**Rationale**  
+Evidence-backed governance requires retrievable and tamper-evident bundles, not ad-hoc file paths. This baseline provides stable retrieval contracts with immutable storage behavior.
+
+**Alternatives considered**  
+- Continue raw file-path references only (rejected: weak retrieval contract and weaker immutability guarantees).  
+- Store mutable evidence records in-place (rejected: breaks auditability).
+
+**Implications**  
+- Worker outputs now include evidence URIs and content hashes.
+- Control-plane consumers can retrieve evidence by stable ID with standard error contracts.
+- Attempts to overwrite existing evidence IDs with different payloads fail closed.
+
+**Affected files**  
+- evidence: backend/shared_domain/evidence_store.py :: store_evidence_bundle
+- evidence: backend/shared_domain/evidence_store.py :: load_evidence_bundle
+- evidence: backend/control_plane/app.py :: /api/v1/workspaces/{workspace_id}/evidence/{evidence_id}
+- evidence: backend/workers/run_processor.py :: content_hash
+- evidence: tests/test_evidence_store.py :: test_evidence_store_enforces_immutability_for_existing_bundle_id
+- evidence: tests/test_control_plane_api.py :: test_evidence_endpoint_returns_stored_bundle
+
+**Verification impact**  
+- evidence: tests/test_evidence_store.py :: test_evidence_store_roundtrip_and_stable_uri
+- evidence: tests/test_pipeline_discover_catalog.py :: resolve_evidence_uri
+- evidence: tests/test_control_plane_auth.py :: test_control_plane_allows_admin_and_steward_roles_for_mutating_flows
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (governance evidence and auditability)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (immutable writes and authenticated read path)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0031 PII governance automation baseline (high-risk detection to blocking review tasks)
+
+**Decision**  
+Wire high-risk PII detections into the discover pipeline so they automatically produce blocking review tasks:
+- Extend worker discover processing to evaluate CSV column samples via `backend/workers/pii.py`.
+- For high-risk tags (`email`, `phone`, `iban`) above a conservative confidence threshold, create immutable PII evidence bundles.
+- Create/open `pii_tag_proposal` records and `security_critical` blocking review tasks idempotently.
+
+**Rationale**  
+PII detection existed as a standalone utility, but governance enforcement needed automatic conversion into review queue work to keep publish/query flows safe-by-default.
+
+**Alternatives considered**  
+- Keep PII detection as non-persistent heuristic output (rejected: no governance action path).  
+- Auto-approve high-confidence tags (rejected: violates human-in-the-loop baseline).
+
+**Implications**  
+- Discover runs now emit `pii_blocking_tasks_created` and can open security-critical review backlog.
+- Repeat discover runs avoid duplicate open tasks for the same evidence/proposal subject.
+- Review queue reflects security risk earlier in the ingest lifecycle.
+
+**Affected files**  
+- evidence: backend/workers/run_processor.py :: _create_pii_review_tasks_from_csv
+- evidence: backend/workers/run_processor.py :: pii_blocking_tasks_created
+- evidence: backend/workers/pii.py :: detect_pii_proposals
+- evidence: tests/test_pipeline_pii_review.py :: test_discover_pipeline_creates_blocking_pii_review_tasks
+
+**Verification impact**  
+- evidence: tests/test_pipeline_pii_review.py :: test_discover_pipeline_creates_blocking_pii_review_tasks
+- evidence: tests/test_review_queue_backend.py :: test_review_queue_create_list_decide
+- evidence: tests/test_control_plane_api.py :: test_demo_bootstrap_creates_workspace_and_review_task
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (security-critical review gating)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (thresholded high-risk tags only; blocking tasks require human decisions)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0032 Contract gate hardening baseline (server-side contract reports + fail-closed publish + quality tasks)
+
+**Decision**  
+Harden publish gating so contract status is derived from server-side reports and contract failures create actionable quality tasks:
+- Add `backend/shared_domain/contract_reports.py` for persisted build contract reports under storage root.
+- Update publish endpoint to load contract status from server-side report files (ignore client contract booleans).
+- Fail closed (`contract_failure`) when contract report is missing or failing.
+- On contract failure, create/deduplicate `contract_failure_proposal` + `quality_critical` blocking review task with immutable evidence.
+
+**Rationale**  
+Client-provided `contracts_passed` made publish gating trust-based and bypassable. Server-side reports with fail-closed behavior align publish controls with governance requirements.
+
+**Alternatives considered**  
+- Keep client-supplied `contracts_passed` payload (rejected: privilege abuse and inconsistent semantics).  
+- Block publish without creating review tasks (rejected: weaker operator actionability).
+
+**Implications**  
+- Publish requests now require server-generated contract artifacts for pass conditions.
+- Missing contract reports no longer silently pass; they block publish and create actionable review items.
+- Existing blocking-task gate still applies after contract gate.
+
+**Affected files**  
+- evidence: backend/shared_domain/contract_reports.py :: load_build_contract_report
+- evidence: backend/shared_domain/contract_reports.py :: write_build_contract_report
+- evidence: backend/control_plane/app.py :: contracts_report_present
+- evidence: backend/control_plane/app.py :: ensure_contract_failure_review_task
+- evidence: tests/test_contracts_block_publish.py :: test_publish_fails_closed_without_contract_report_and_creates_quality_task
+- evidence: tests/test_build_gating.py :: test_gold_publish_blocked_when_blocking_review_task_open
+
+**Verification impact**  
+- evidence: tests/test_contracts_block_publish.py :: test_publish_uses_server_side_contract_report_and_allows_pass_case
+- evidence: tests/test_contracts_block_publish.py :: test_publish_fails_closed_without_contract_report_and_creates_quality_task
+- evidence: tests/test_review_queue_backend.py :: test_review_queue_create_list_decide
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (publish safety and governance gates)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (missing report blocks publish and creates blocking quality task)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0033 Gold publish pointer baseline (server-side pointer writes + auditable rollback)
+
+**Decision**  
+Replace publish/rollback stubs with server-side gold pointer management:
+- Add `backend/shared_domain/gold_pointer.py` for latest pointer and history persistence.
+- Publish endpoint writes pointer only when all gates pass and returns pointer before/after metadata.
+- Rollback endpoint resolves target builds from server-side history and updates pointer deterministically.
+- Rollback failures return stable `NOT_FOUND` contract responses.
+
+**Rationale**  
+Gold promotion required real pointer semantics to support safe release/rollback operations and audit traceability.
+
+**Alternatives considered**  
+- Keep publish/rollback as stubs (rejected: no operational recovery path).  
+- Allow rollback without history tracking (rejected: weak auditability and ambiguous state recovery).
+
+**Implications**  
+- Gold `latest.json` is now authoritative server-side state, not response-only metadata.
+- Operators can rollback to a prior published build id using the control-plane endpoint.
+- Publish remains blocked when gates fail, leaving the previous pointer untouched.
+
+**Affected files**  
+- evidence: backend/shared_domain/gold_pointer.py :: publish_gold_pointer
+- evidence: backend/shared_domain/gold_pointer.py :: rollback_gold_pointer
+- evidence: backend/control_plane/app.py :: latest_pointer_before
+- evidence: backend/control_plane/app.py :: latest_pointer_after
+- evidence: tests/test_gold_publish_rollback.py :: test_gold_publish_updates_pointer_and_rollback_restores_previous_build
+
+**Verification impact**  
+- evidence: tests/test_gold_publish_rollback.py :: test_gold_rollback_returns_not_found_for_unknown_target
+- evidence: tests/test_build_gating.py :: test_gold_publish_blocked_when_blocking_review_task_open
+- evidence: tests/test_audit_events.py :: test_create_operations_emit_audit_events
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (rollback and publish safety)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (history-backed rollback and fail-closed not-found behavior)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0034 Gateway DuckDB read-path baseline (published gold views only + external scan denial)
+
+**Decision**  
+Upgrade gateway SQL execution to use in-memory DuckDB with published-gold view wiring:
+- Gateway executor now uses DuckDB and auto-registers `gold.fact_metrics` (and model alias view) from the currently published gold pointer for the workspace.
+- SQL safety denylist now blocks direct file scan functions (`read_csv*`, `read_parquet`, `read_json*`, `glob`, etc.) and other unsafe tokens.
+- Gateway query execution now passes `workspace_id` + `storage_root` into executor so reads are bound to server-side published artifacts.
+
+**Rationale**  
+The bootstrap SQLite stub could not query real gold artifacts. DuckDB gives immediate local-read capability while keeping a strong read-only security envelope.
+
+**Alternatives considered**  
+- Keep SQLite stub and postpone real artifact queries (rejected: blocks end-to-end governed query value).  
+- Expose direct file-read SQL functions for flexibility (rejected: weakens non-bypass and least-privilege posture).
+
+**Implications**  
+- Published gold metrics become queryable through gateway without exposing data-plane ports.
+- Unsafe SQL patterns that could read arbitrary files are denied before execution.
+- Existing deny-by-default and ABAC/masking behavior remains enforced around DuckDB results.
+
+**Affected files**  
+- evidence: backend/gateway/executor.py :: execute_sql
+- evidence: backend/gateway/executor.py :: _prepare_published_gold_views
+- evidence: backend/gateway/executor.py :: UNSAFE_SQL_KEYWORDS
+- evidence: backend/gateway/app.py :: storage_root=settings.storage_root
+- evidence: tests/test_gateway_duckdb_readonly.py :: test_gateway_reads_published_gold_metrics_from_duckdb
+
+**Verification impact**  
+- evidence: tests/test_gateway_duckdb_readonly.py :: test_gateway_denies_external_file_scan_functions_in_sql
+- evidence: tests/test_gateway_sql_safety.py :: test_gateway_denies_non_read_sql
+- evidence: tests/test_gateway_query_execution.py :: test_gateway_executes_sql_and_returns_provenance
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (query security and governed data access)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (published-pointer-only registration + denylisted external scan functions)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0035 Drift governance baseline (schema-drift proposals from discover runs + publish blocking loop)
+
+**Decision**  
+Integrate schema drift detection directly into discover-run processing and route drift events into governance workflow:
+- Discover pipeline now compares previous vs current schema columns per dataset.
+- On drift detection (excluding initial baseline snapshots), worker writes immutable drift evidence and creates/deduplicates `drift_proposal` review items.
+- Drift review tasks are blocking `quality_critical`, so publish remains blocked until resolved.
+
+**Rationale**  
+Drift detection existed as a utility but was not connected to run orchestration or gating. This closes the loop between data change and governance enforcement.
+
+**Alternatives considered**  
+- Keep drift output as logs-only signal (rejected: no enforced remediation path).  
+- Treat first-run baseline as drift (rejected: noisy false positives).
+
+**Implications**  
+- Discover reruns with schema changes now increase actionable review backlog.
+- Publish endpoint naturally blocks via unresolved blocking task gate even when contracts pass.
+- Operators get explicit drift evidence URIs tied to review tasks.
+
+**Affected files**  
+- evidence: backend/workers/run_processor.py :: _create_drift_review_task_if_needed
+- evidence: backend/workers/run_processor.py :: drift_blocking_tasks_created
+- evidence: backend/workers/drift.py :: detect_schema_drift
+- evidence: tests/test_drift_blocks_publish.py :: test_schema_drift_creates_blocking_task_and_blocks_publish
+
+**Verification impact**  
+- evidence: tests/test_drift_blocks_publish.py :: test_schema_drift_creates_blocking_task_and_blocks_publish
+- evidence: tests/test_pipeline_discover_catalog.py :: test_discover_run_populates_catalog_and_evidence_deterministically
+- evidence: tests/test_build_gating.py :: test_gold_publish_blocked_when_blocking_review_task_open
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (reliability + governance publish safety)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (baseline snapshots excluded; only real schema change opens blocking tasks)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0036 Plugin runtime baseline (entry-point connector loading + worker fallback wiring)
+
+**Decision**  
+Add runtime plugin loading for connectors via Python entry points and wire it into discover-run processing:
+- Add `backend/shared_domain/plugin_loader.py` for entry-point discovery, duplicate-name protection, and callable validation.
+- Worker discover loop now supports non-filesystem `source_type` via loaded connector plugins.
+- Plugin discovery rows are normalized into the same `DiscoveredFile` shape used by built-in connectors.
+
+**Rationale**  
+Connector extensibility was documented but not executable at runtime. Entry-point loading provides an OSS-friendly extension path without modifying core code for every new connector.
+
+**Alternatives considered**  
+- Keep plugin docs only with no runtime loader (rejected: contributor path blocked).  
+- Hardcode connector registry in core code (rejected: poorer ecosystem scalability).
+
+**Implications**  
+- New connector types can be added by installing packages exposing `schemapilot.connectors` entry points.
+- Misconfigured/non-callable plugin definitions fail closed during loading.
+- Worker pipelines can process plugin-backed source types while preserving existing filesystem behavior.
+
+**Affected files**  
+- evidence: backend/shared_domain/plugin_loader.py :: load_connector_plugins
+- evidence: backend/workers/run_processor.py :: _discover_files_via_plugin
+- evidence: tests/test_plugin_loader.py :: test_plugin_loader_rejects_duplicate_entry_point_names
+- evidence: tests/test_worker_runner.py :: test_worker_runner_uses_connector_plugin_for_non_filesystem_source
+
+**Verification impact**  
+- evidence: tests/test_plugin_loader.py :: test_connector_plugin_loader_requires_callable_plugins
+- evidence: tests/test_worker_runner.py :: test_worker_runner_uses_connector_plugin_for_non_filesystem_source
+- evidence: tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (connector discovery and external I/O)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (unsupported source types still fail closed without plugin)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0037 KPI extraction baseline (runtime-derived weekly KPI snapshot generation)
+
+**Decision**  
+Add an automated KPI extraction tool that derives weekly operational KPIs from metadata/audit state:
+- Add `tools/kpi_extract.py` to compute runtime KPIs (TTFSA proxy, run success rate, policy denials, deterministic rebuild rate, publish count, blocking review backlog).
+- Persist extracted snapshots under `runtime/kpi/extracted/<week>.json` and update `runtime/kpi/latest_extracted.json`.
+- Keep unavailable metrics explicit via `notes` entries instead of silent defaults.
+
+**Rationale**  
+Manual KPI entry alone is brittle for tracking regressions. Runtime extraction gives consistent, reproducible telemetry for weekly review.
+
+**Alternatives considered**  
+- Keep only manual `kpi_tracker.py` entry workflow (rejected: weak observability and drift detection).  
+- Hard fail when a KPI source is missing (rejected: too brittle for early-stage installs).
+
+**Implications**  
+- Operators can generate KPI snapshots from actual system state without manual counting.
+- KPI outputs now separate measured values from unavailable metrics with explicit notes.
+- Determinism health for rebuilds can be tracked from run input/output references.
+
+**Affected files**  
+- evidence: tools/kpi_extract.py :: extract_kpis
+- evidence: tools/kpi_extract.py :: write_kpi_extract
+- evidence: tests/test_kpi_extract.py :: test_kpi_extract_derives_runtime_metrics_from_metadata
+
+**Verification impact**  
+- evidence: tests/test_kpi_extract.py :: test_kpi_extract_derives_runtime_metrics_from_metadata
+- evidence: tests/test_kpi_tracker.py :: test_kpi_tracker_writes_weekly_and_latest_reports
+- evidence: tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: NO  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (explicit null + notes for unavailable KPIs)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0038 Completion baseline for deploy/community/UI thin slice (compose smoke validated, OSS templates added, UI kept intentionally lightweight)
+
+**Decision**  
+Close the remaining task-board items using a conservative adoption-first finish:
+- Mark runnable compose verification complete using an actual local smoke cycle (`up --build`, health checks, auth fail-closed check, `down`).
+- Add OSS contributor fundamentals (`CONTRIBUTING.md`, issue templates, PR template) to reduce maintainer friction.
+- Keep the UI card intentionally thin while adding focused behavioral coverage instead of expanding UI surface area.
+
+**Rationale**  
+The project objective is backend governance reliability and installability. This closure pattern completes execution commitments without diluting effort into non-critical UI complexity.
+
+**Alternatives considered**  
+- Keep PR-005 open until repeated clean-room compose runs across machines (rejected: defers closure despite successful runnable evidence).  
+- Expand UI scope significantly before closing PR-018 (rejected: conflicts with current priority and user direction).
+
+**Implications**  
+- Deploy path now has concrete smoke evidence beyond static config validation.
+- Contributor onboarding path is explicit and standardized in-repo.
+- UI remains minimal by design, with tests guarding existing core interactions.
+
+**Affected files**  
+- evidence: deploy/docker-compose.yml :: profiles: ["starter", "team", "enterprise"]
+- evidence: CONTRIBUTING.md :: Required checks before opening a PR
+- evidence: .github/ISSUE_TEMPLATE/bug_report.md :: ## Reproduction steps
+- evidence: .github/pull_request_template.md :: ## Evidence updates
+- evidence: ui/src/App.test.tsx :: submits review decisions and recommendation requests
+- evidence: TASKLIST.md :: [x] PR-005 `runnable-compose-profile-team`
+
+**Verification impact**  
+- evidence: tests/test_deploy_no_bypass_ports.py :: test_compose_does_not_publish_direct_query_engine_or_index_ports
+- evidence: tests/test_port_conventions.py :: test_port_conventions_are_consistent
+- evidence: ui/src/App.test.tsx :: submits review decisions and recommendation requests for selected workspace
+- evidence: runtime checks :: compose `starter` profile health/auth smoke
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (deployment and contributor workflow)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (thin UI retained; hardening defaults unchanged)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

@@ -156,4 +156,103 @@ describe("App", () => {
       expect(screen.getByText("Gateway auth: Bearer local-analyst-token")).toBeTruthy();
     });
   });
+
+  it("submits review decisions and recommendation requests for selected workspace", async () => {
+    const calls: Array<{ url: string; method: string; init?: RequestInit }> = [];
+    const reviewTasks = [
+      {
+        task_id: "task-1",
+        priority: "security_critical",
+        status: "open",
+        subject_ref: "dataset:customers",
+        evidence_bundle_uri: "evidence://w1/pii-1",
+        confidence: 0.92,
+        proposal_type: "pii_tag_proposal"
+      }
+    ];
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<FetchResponse> => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        calls.push({ url, method, init });
+        if (url === "/api/v1/health") {
+          return Promise.resolve(response({ status: "ok" }));
+        }
+        if (url === "/api/v1/workspaces") {
+          return Promise.resolve(
+            response([
+              {
+                workspace_id: "w1",
+                name: "Primary",
+                profile: "starter",
+                security_baseline: "standard"
+              }
+            ])
+          );
+        }
+        if (url === "/api/v1/policy-packs") {
+          return Promise.resolve(response([]));
+        }
+        if (url === "/api/v1/workspaces/w1/review_tasks") {
+          return Promise.resolve(response(reviewTasks));
+        }
+        if (url === "/api/v1/workspaces/w1/review_tasks/summary") {
+          return Promise.resolve(
+            response({
+              workspace_id: "w1",
+              total_tasks: 1,
+              blocking_open_tasks: 1,
+              by_status: { open: 1 },
+              by_priority: { security_critical: 1 }
+            })
+          );
+        }
+        if (url === "/api/v1/workspaces/w1/review_tasks/task-1/decision" && method === "POST") {
+          return Promise.resolve(response({ task_id: "task-1", status: "approved" }));
+        }
+        if (url === "/api/v1/workspaces/w1/recommendations" && method === "POST") {
+          return Promise.resolve(
+            response({
+              report_id: "rec-1",
+              confidence: 0.75,
+              approval_required: false,
+              approval_reasons: [],
+              missing_evidence: [],
+              ranked_templates: [{ template_id: "t1", score: 0.75 }]
+            })
+          );
+        }
+        return Promise.resolve(response({}, false));
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Total: 1, Blocking open: 1/)).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => {
+      expect(
+        calls.some(
+          (call) =>
+            call.url === "/api/v1/workspaces/w1/review_tasks/task-1/decision" &&
+            call.method === "POST" &&
+            typeof call.init?.headers === "object" &&
+            "Authorization" in (call.init.headers as Record<string, string>)
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate Recommendation" }));
+    await waitFor(() => {
+      expect(
+        calls.some(
+          (call) => call.url === "/api/v1/workspaces/w1/recommendations" && call.method === "POST"
+        )
+      ).toBe(true);
+      expect(screen.getByText("Confidence: 0.75")).toBeTruthy();
+    });
+  });
 });

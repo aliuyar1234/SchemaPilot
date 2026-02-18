@@ -6,6 +6,7 @@ from sqlalchemy import select
 from backend.control_plane import db_models
 from backend.control_plane.app import create_app
 from backend.shared_domain.config import Settings
+from backend.shared_domain.contract_reports import write_build_contract_report
 from backend.shared_domain.db import get_session_factory
 
 
@@ -20,6 +21,10 @@ def _safe_settings() -> Settings:
     )
 
 
+def _admin_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer local-platform-admin-token"}
+
+
 def test_create_operations_emit_audit_events() -> None:
     app = create_app(settings_factory=_safe_settings)
     client = TestClient(app)
@@ -27,6 +32,7 @@ def test_create_operations_emit_audit_events() -> None:
     workspace_response = client.post(
         "/api/v1/workspaces",
         json={"name": "Audit WS", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
     )
     workspace_id = workspace_response.json()["workspace_id"]
     source_response = client.post(
@@ -36,11 +42,13 @@ def test_create_operations_emit_audit_events() -> None:
             "scope": {"root_path": "/tmp"},
             "display_name": "Exports",
         },
+        headers=_admin_headers(),
     )
     source_id = source_response.json()["source_id"]
     client.patch(
         f"/api/v1/workspaces/{workspace_id}/sources/{source_id}",
         json={"status": "paused"},
+        headers=_admin_headers(),
     )
     proposal_response = client.post(
         f"/api/v1/workspaces/{workspace_id}/proposals",
@@ -51,17 +59,30 @@ def test_create_operations_emit_audit_events() -> None:
             "priority": "quality_critical",
             "blocking": True,
         },
+        headers=_admin_headers(),
     )
     task_id = proposal_response.json()["task"]["task_id"]
     client.post(
         f"/api/v1/workspaces/{workspace_id}/review_tasks/{task_id}/decision",
         json={"decision": "approve", "actor_id": "user:alice"},
+        headers=_admin_headers(),
+    )
+    write_build_contract_report(
+        workspace_id=workspace_id,
+        build_id="build-1",
+        contracts_passed=True,
+        failures=[],
+        storage_root=_safe_settings().storage_root,
     )
     client.post(
         f"/api/v1/workspaces/{workspace_id}/builds/build-1/publish",
-        json={"contracts_passed": True},
+        json={},
+        headers=_admin_headers(),
     )
-    client.post(f"/api/v1/workspaces/{workspace_id}/builds/build-1/rollback")
+    client.post(
+        f"/api/v1/workspaces/{workspace_id}/builds/build-1/rollback",
+        headers=_admin_headers(),
+    )
 
     session = get_session_factory(_safe_settings().database_url)()
     try:

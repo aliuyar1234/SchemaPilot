@@ -5,10 +5,15 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.control_plane.db_models import CatalogDataset, CatalogSource, RunRecord, Workspace
 from backend.shared_domain.audit_models import AuditEvent
 from backend.shared_domain.errors import NotFoundError
 from backend.shared_domain.ids import new_ulid, new_uuid
+from backend.shared_domain.metadata_models import (
+    CatalogDataset,
+    CatalogSource,
+    RunRecord,
+    Workspace,
+)
 
 
 def create_workspace(
@@ -137,7 +142,9 @@ def update_source(
 
 def list_datasets(session: Session, workspace_id: str) -> list[dict[str, object]]:
     rows = session.execute(
-        select(CatalogDataset).where(CatalogDataset.workspace_id == workspace_id)
+        select(CatalogDataset)
+        .where(CatalogDataset.workspace_id == workspace_id)
+        .order_by(CatalogDataset.dataset_id)
     ).scalars()
     return [
         {
@@ -192,6 +199,8 @@ def create_run(session: Session, *, workspace_id: str, run_type: str) -> dict[st
         "workspace_id": run.workspace_id,
         "run_type": run.run_type,
         "status": run.status,
+        "input_refs": run.input_refs_json,
+        "output_refs": run.output_refs_json,
     }
 
 
@@ -204,6 +213,8 @@ def get_run(session: Session, *, workspace_id: str, run_id: str) -> dict[str, ob
         "workspace_id": run.workspace_id,
         "run_type": run.run_type,
         "status": run.status,
+        "input_refs": run.input_refs_json,
+        "output_refs": run.output_refs_json,
     }
 
 

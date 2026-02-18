@@ -17,11 +17,16 @@ def _settings() -> Settings:
     )
 
 
+def _admin_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer local-platform-admin-token"}
+
+
 def test_review_queue_create_list_decide() -> None:
     client = TestClient(create_app(settings_factory=_settings))
     workspace = client.post(
         "/api/v1/workspaces",
         json={"name": "review", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
     ).json()
     workspace_id = workspace["workspace_id"]
 
@@ -34,6 +39,7 @@ def test_review_queue_create_list_decide() -> None:
             "priority": "security_critical",
             "blocking": True,
         },
+        headers=_admin_headers(),
     ).json()
     task_id = created["task"]["task_id"]
 
@@ -46,6 +52,7 @@ def test_review_queue_create_list_decide() -> None:
     decision_response = client.post(
         f"/api/v1/workspaces/{workspace_id}/review_tasks/{task_id}/decision",
         json={"decision": "approve", "actor_id": "user:steward"},
+        headers=_admin_headers(),
     )
     assert decision_response.status_code == 200
     assert decision_response.json()["decision"] == "approve"

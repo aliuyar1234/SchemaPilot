@@ -58,6 +58,14 @@ const WIZARD_STEPS = [
   "Review security-critical tasks",
   "Run first governed query"
 ];
+const CONTROL_PLANE_TOKEN = "local-platform-admin-token";
+
+function controlPlaneHeaders(): HeadersInit {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${CONTROL_PLANE_TOKEN}`
+  };
+}
 
 export function App(): JSX.Element {
   const [health, setHealth] = useState<HealthState>("loading");
@@ -162,7 +170,7 @@ export function App(): JSX.Element {
     }
     const response = await fetch("/api/v1/workspaces", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: controlPlaneHeaders(),
       body: JSON.stringify({
         name: newWorkspaceName.trim(),
         profile: "starter",
@@ -181,7 +189,7 @@ export function App(): JSX.Element {
   const createDemoWorkspace = async () => {
     const response = await fetch("/api/v1/onboarding/demo_bootstrap", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: controlPlaneHeaders(),
       body: JSON.stringify({ workspace_name: "Demo Workspace" })
     });
     if (!response.ok) {
@@ -199,7 +207,7 @@ export function App(): JSX.Element {
     }
     await fetch(`/api/v1/workspaces/${selectedWorkspaceId}/review_tasks/${taskId}/decision`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: controlPlaneHeaders(),
       body: JSON.stringify({
         decision,
         actor_id: "user:ui",
@@ -216,7 +224,7 @@ export function App(): JSX.Element {
     }
     const response = await fetch(`/api/v1/workspaces/${selectedWorkspaceId}/recommendations`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: controlPlaneHeaders(),
       body: JSON.stringify({
         intent: {
           strict_security: true,

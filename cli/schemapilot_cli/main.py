@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ import typer
 
 app = typer.Typer(help="SchemaPilot CLI")
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_CP_AUTH_TOKEN = os.getenv("SCHEMAPILOT_CP_TOKEN", "local-platform-admin-token")
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> None:
@@ -41,6 +43,8 @@ def _request_json(
     if parsed.query:
         path = f"{path}?{parsed.query}"
     headers = {"Accept": "application/json"}
+    if DEFAULT_CP_AUTH_TOKEN.strip():
+        headers["Authorization"] = f"Bearer {DEFAULT_CP_AUTH_TOKEN.strip()}"
     if payload is not None:
         headers["Content-Type"] = "application/json"
     try:

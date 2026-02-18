@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from backend.control_plane.app import create_app
 from backend.shared_domain.config import Settings
+from backend.shared_domain.evidence_store import parse_evidence_uri, store_evidence_bundle
 
 
 def _safe_settings() -> Settings:
@@ -17,12 +18,17 @@ def _safe_settings() -> Settings:
     )
 
 
+def _admin_headers() -> dict[str, str]:
+    return {"Authorization": "Bearer local-platform-admin-token"}
+
+
 def test_workspace_source_run_flow() -> None:
     client = TestClient(create_app(settings_factory=_safe_settings))
 
     workspace_response = client.post(
         "/api/v1/workspaces",
         json={"name": "Default Workspace", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
     )
     assert workspace_response.status_code == 200
     workspace = workspace_response.json()
@@ -35,6 +41,7 @@ def test_workspace_source_run_flow() -> None:
             "scope": {"root_path": "/tmp/data"},
             "display_name": "Exports",
         },
+        headers=_admin_headers(),
     )
     assert source_response.status_code == 200
     assert source_response.json()["workspace_id"] == workspace_id
@@ -42,6 +49,7 @@ def test_workspace_source_run_flow() -> None:
     run_response = client.post(
         f"/api/v1/workspaces/{workspace_id}/runs",
         json={"run_type": "discover"},
+        headers=_admin_headers(),
     )
     assert run_response.status_code == 200
     run_id = run_response.json()["run_id"]
@@ -66,6 +74,7 @@ def test_create_run_on_missing_workspace_returns_not_found() -> None:
     response = client.post(
         "/api/v1/workspaces/missing-workspace/runs",
         json={"run_type": "discover"},
+        headers=_admin_headers(),
     )
     assert response.status_code == 404
     body = response.json()
@@ -78,6 +87,7 @@ def test_demo_bootstrap_creates_workspace_and_review_task() -> None:
     response = client.post(
         "/api/v1/onboarding/demo_bootstrap",
         json={"workspace_name": "Demo Boot"},
+        headers=_admin_headers(),
     )
     assert response.status_code == 200
     body = response.json()
@@ -100,6 +110,7 @@ def test_dataset_endpoints_return_expected_contracts() -> None:
     workspace_response = client.post(
         "/api/v1/workspaces",
         json={"name": "Dataset Workspace", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
     )
     workspace_id = workspace_response.json()["workspace_id"]
 
@@ -113,3 +124,30 @@ def test_dataset_endpoints_return_expected_contracts() -> None:
     assert body["error"]["code"] == "NOT_FOUND"
     assert body["error"]["message"] == "Dataset not found."
     assert body["error"]["details"]["workspace_id"] == workspace_id
+
+
+def test_evidence_endpoint_returns_stored_bundle() -> None:
+    settings = _safe_settings()
+    client = TestClient(create_app(settings_factory=lambda: settings))
+    workspace_response = client.post(
+        "/api/v1/workspaces",
+        json={"name": "Evidence Workspace", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
+    )
+    workspace_id = workspace_response.json()["workspace_id"]
+
+    stored = store_evidence_bundle(
+        workspace_id=workspace_id,
+        storage_root=settings.storage_root,
+        bundle_type="profile",
+        payload={"dataset_id": "d1", "profile": {"row_count_sampled": 1}},
+    )
+    _, evidence_id = parse_evidence_uri(stored.evidence_bundle_uri)
+    response = client.get(
+        f"/api/v1/workspaces/{workspace_id}/evidence/{evidence_id}",
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_id"] == workspace_id
+    assert body["evidence_id"] == evidence_id

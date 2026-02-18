@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
+from time import perf_counter
+
+import duckdb
+
+from backend.shared_domain.gold_pointer import load_latest_gold_pointer
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,40 @@ class QueryResult:
 
 
 FILTER_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+UNSAFE_SQL_KEYWORDS = {
+    "insert",
+    "update",
+    "delete",
+    "drop",
+    "alter",
+    "attach",
+    "detach",
+    "copy",
+    "export",
+    "pragma",
+    "vacuum",
+    "create",
+    "replace",
+    "truncate",
+    "read_csv",
+    "read_csv_auto",
+    "read_parquet",
+    "read_json",
+    "read_json_auto",
+    "glob",
+    "install",
+    "load",
+    "httpfs",
+}
+
+
+class UnsafeSqlError(ValueError):
+    """Raised when SQL violates gateway read-only safety rules."""
+
+
+class QueryTimeoutError(ValueError):
+    """Raised when SQL execution exceeds configured timeout budget."""
 
 
 def _validate_filter_column(column: str) -> str:
@@ -26,22 +65,70 @@ def _validate_filter_column(column: str) -> str:
     return normalized
 
 
+def _normalized_max_rows(max_rows: int) -> int:
+    if max_rows <= 0:
+        return 1
+    return min(max_rows, 5000)
+
+
+def _validate_read_only_query(query: str) -> str:
+    normalized = query.strip()
+    if not normalized:
+        normalized = "select 1 as one"
+    lowered = normalized.lower()
+    if ";" in normalized:
+        raise UnsafeSqlError("multiple_sql_statements_denied")
+    if not (lowered.startswith("select") or lowered.startswith("with ")):
+        raise UnsafeSqlError("only_select_or_cte_queries_allowed")
+    for token in TOKEN_RE.findall(lowered):
+        if token in UNSAFE_SQL_KEYWORDS:
+            raise UnsafeSqlError(f"unsafe_sql_keyword_denied:{token}")
+    return normalized
+
+
 def execute_sql(
-    sql: str, *, max_rows: int = 1000, row_filter: tuple[str, str] | None = None
+    sql: str,
+    *,
+    max_rows: int = 1000,
+    row_filter: tuple[str, str] | None = None,
+    timeout_ms: int = 5000,
+    workspace_id: str | None = None,
+    storage_root: str = "./runtime/storage",
 ) -> QueryResult:
-    """Execute SQL using an in-memory sqlite engine for bootstrap gateway behavior."""
-    query = sql or "select 1 as one"
-    with sqlite3.connect(":memory:") as connection:
-        cursor = connection.cursor()
-        cursor.execute(query)
+    """Execute SQL using an in-memory DuckDB engine for gateway behavior."""
+    query = _validate_read_only_query(sql or "select 1 as one")
+    capped_rows = _normalized_max_rows(max_rows)
+    budget_ms = max(1, min(timeout_ms, 60_000))
+    if budget_ms <= 1:
+        raise QueryTimeoutError("query_timeout_exceeded")
+
+    connection = duckdb.connect(database=":memory:")
+    try:
+        _prepare_published_gold_views(
+            connection,
+            workspace_id=workspace_id,
+            storage_root=storage_root,
+        )
+        started_at = perf_counter()
+        cursor = connection.execute(query)
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        if elapsed_ms > float(budget_ms):
+            raise QueryTimeoutError("query_timeout_exceeded")
+
         description = cursor.description or []
-        columns = [{"name": item[0], "type": "unknown"} for item in description]
+        columns = [
+            {
+                "name": str(item[0]),
+                "type": str(item[1]) if len(item) > 1 and item[1] is not None else "unknown",
+            }
+            for item in description
+        ]
         if row_filter is None:
-            rows = cursor.fetchmany(max_rows)
+            rows = cursor.fetchmany(capped_rows)
         else:
             filter_column, filter_value = row_filter
             normalized_column = _validate_filter_column(filter_column)
-            column_names = [item[0] for item in description]
+            column_names = [column["name"] for column in columns]
             try:
                 filter_idx = column_names.index(normalized_column)
             except ValueError:
@@ -50,6 +137,55 @@ def execute_sql(
                 all_rows = cursor.fetchall()
                 rows = [
                     row for row in all_rows if str(row[filter_idx]) == str(filter_value)
-                ][:max_rows]
+                ][:capped_rows]
+    finally:
+        connection.close()
     serialized_rows = [list(row) for row in rows]
     return QueryResult(columns=columns, rows=serialized_rows, row_count=len(serialized_rows))
+
+
+def _prepare_published_gold_views(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    workspace_id: str | None,
+    storage_root: str,
+) -> None:
+    if not workspace_id:
+        return
+    pointer = load_latest_gold_pointer(workspace_id=workspace_id, storage_root=storage_root)
+    if pointer is None:
+        return
+    model_name = str(pointer.get("model_name", "")).strip()
+    snapshot_id = str(pointer.get("snapshot_id", "")).strip()
+    if not model_name or not snapshot_id:
+        return
+    data_path = (
+        Path(storage_root)
+        / "gold"
+        / workspace_id
+        / model_name
+        / "snapshots"
+        / snapshot_id
+        / "metrics.json"
+    )
+    if not data_path.exists():
+        return
+    safe_model_name = _safe_identifier(model_name)
+    safe_data_path = data_path.as_posix().replace("'", "''")
+    connection.execute("create schema if not exists gold")
+    connection.execute(
+        f"create or replace view gold.fact_metrics as "
+        f"select * from read_json_auto('{safe_data_path}')"  # nosec B608 - path is server-side and single-quoted escaped
+    )
+    connection.execute(
+        f"create or replace view gold.{safe_model_name} as select * from gold.fact_metrics"  # nosec B608 - identifier is normalized by _safe_identifier
+    )
+
+
+def _safe_identifier(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]", "_", value)
+    if not normalized:
+        return "model"
+    if normalized[0].isdigit():
+        return f"_{normalized}"
+    return normalized

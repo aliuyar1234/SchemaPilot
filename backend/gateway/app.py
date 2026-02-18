@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.gateway.abac import apply_mask, evaluate_abac
-from backend.gateway.executor import execute_sql
+from backend.gateway.executor import QueryTimeoutError, UnsafeSqlError, execute_sql
 from backend.gateway.policy import AccessDecision, evaluate_access
 from backend.shared_domain.audit_models import AccessDecision as AccessDecisionRow
 from backend.shared_domain.audit_models import AuditEvent
@@ -169,7 +169,10 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 details={"reason": reason, "policy_decision_id": policy_decision_id},
             )
 
-        decision = evaluate_access(actor_dict)
+        actor_attributes_raw = actor_dict.get("attributes", {})
+        actor_attributes = actor_attributes_raw if isinstance(actor_attributes_raw, dict) else {}
+        allowlisted_ai = bool(actor_attributes.get("ai_allowlisted", False))
+        decision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
         if decision.result != "allow":
             _record_access_decision(
                 session_factory(),
@@ -199,6 +202,66 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
         resource_attributes = payload.get("resource_attributes", {})
         resource_attrs = resource_attributes if isinstance(resource_attributes, dict) else {}
+        if str(actor_dict.get("actor_type", "human")) == "ai":
+            dataset_id = str(resource_attrs.get("dataset_id", "")).strip()
+            if not dataset_id:
+                reason = "missing_dataset_context"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={"endpoint": "query"},
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.query",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="sql",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={"reason": reason, "policy_decision_id": policy_decision_id},
+                )
+            allowed_raw = actor_attributes.get("allowed_dataset_ids", [])
+            allowed = (
+                {str(item) for item in allowed_raw} if isinstance(allowed_raw, list) else set()
+            )
+            if dataset_id not in allowed:
+                reason = "dataset_not_allowed"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={"endpoint": "query", "dataset_id": dataset_id},
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.query",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="sql",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={"reason": reason, "policy_decision_id": policy_decision_id},
+                )
         abac_mode = str(payload.get("abac_mode", "internal"))
         abac = evaluate_abac(actor=actor_dict, resource_attributes=resource_attrs, mode=abac_mode)
         if not abac.allow:
@@ -234,17 +297,86 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             query_text = str(query_payload.get("text", ""))
         constraints = payload.get("constraints", {})
         max_rows = 1000
+        timeout_ms = 5000
         if isinstance(constraints, dict):
             max_rows_raw = constraints.get("max_rows", 1000)
             if isinstance(max_rows_raw, (int, float, str)):
                 max_rows = int(max_rows_raw)
+            timeout_raw = constraints.get("timeout_ms", 5000)
+            if isinstance(timeout_raw, (int, float, str)):
+                timeout_ms = int(timeout_raw)
 
         try:
             result_set = execute_sql(
                 query_text or "select 1 as one",
                 max_rows=max_rows,
                 row_filter=abac.row_filter,
+                timeout_ms=timeout_ms,
+                workspace_id=workspace_id,
+                storage_root=settings.storage_root,
             )
+        except UnsafeSqlError as exc:
+            reason = "sql_unsafe"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "query", "query_text": query_text},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="sql",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": reason,
+                    "policy_decision_id": policy_decision_id,
+                    "error": str(exc),
+                },
+            ) from exc
+        except QueryTimeoutError as exc:
+            reason = "query_timeout"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "query", "query_text": query_text},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="sql",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": reason,
+                    "policy_decision_id": policy_decision_id,
+                    "error": str(exc),
+                },
+            ) from exc
         except Exception as exc:  # pragma: no cover - exercised by API tests
             reason = "abac_filter_not_enforceable" if abac.row_filter is not None else "query_error"
             _record_access_decision(
@@ -295,9 +427,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             masked_rows.append(masked_row)
 
         datasets_used = []
-        dataset_id = resource_attrs.get("dataset_id")
-        if dataset_id is not None:
-            datasets_used.append(str(dataset_id))
+        dataset_ref = resource_attrs.get("dataset_id")
+        if dataset_ref is not None:
+            datasets_used.append(str(dataset_ref))
 
         _record_access_decision(
             session_factory(),

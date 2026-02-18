@@ -221,5 +221,17 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-17 — Re-verified release readiness: clean-room check PASS and release gate status `go`; evidence recorded in `evidence/t0046/`.
 - 2026-02-18 — Hardened gateway auth/ABAC/retrieval enforcement and deterministic connector/build safeguards; added contract, CLI, UI, and non-bypass regression tests.
 - 2026-02-18 — Implemented adoption roadmap increments: demo-first onboarding flow, KPI tracking command, enterprise OIDC/policy-pack/plugin docs depth, and added S3 max-keys fail-closed negative-path coverage.
+- 2026-02-18 — Started systematic TASKLIST execution: completed PR-001 through PR-004 (control-plane auth hardening, gateway SQL safety + AI dataset entitlements, and port conventions), and moved PR-005 to compose smoke-verification stage (compose config validated; daemon-run smoke pending on Docker-enabled host).
+- 2026-02-18 — Completed PR-006 shared metadata refactor with compatibility re-export, enabling shared-domain imports for future worker-run orchestration without boundary drift.
+- 2026-02-18 — Completed PR-007 and PR-008: added deterministic worker run runner/service with queued-run transitions and discover-to-catalog pipeline wiring that creates real dataset rows, bronze manifests, and profiling evidence.
+- 2026-02-18 — Completed PR-009: introduced immutable evidence bundle storage and retrieval (`evidence://` URIs), wired discover profiling outputs to evidence bundles, and exposed authenticated control-plane evidence read endpoint.
+- 2026-02-18 — Completed PR-010: wired high-risk PII detection in discover runs to automatic `pii_tag_proposal` creation and security-critical blocking review tasks with idempotent deduplication.
+- 2026-02-18 — Completed PR-011: hardened publish gating to server-side contract reports (fail-closed on missing/failing reports) and automatic quality-critical blocking review task creation for contract failures.
+- 2026-02-18 — Completed PR-012: implemented server-side gold publish pointer persistence/history and rollback endpoint semantics with not-found handling and regression tests.
+- 2026-02-18 — Completed PR-013: upgraded gateway execution to DuckDB published-gold read path, bound to server-side pointer state, with external file scan SQL functions denied by default.
+- 2026-02-18 — Completed PR-014: integrated schema drift detection into discover-run orchestration with immutable drift evidence, blocking quality-critical review tasks, and publish-block regression coverage.
+- 2026-02-18 — Completed PR-015: added runtime connector plugin loading via Python entry points and worker-side plugin discovery fallback for non-filesystem source types.
+- 2026-02-18 — Completed PR-016: added runtime KPI extraction tooling to generate weekly KPI snapshots directly from metadata/audit state with deterministic-rebuild and policy-denial metrics.
+- 2026-02-18 — Completed remaining board items: validated runnable compose smoke end-to-end (build/up/health/auth/down), added OSS contributor templates (`CONTRIBUTING`, issue/PR templates), and closed low-priority UI wizard card with additional behavioral test coverage.
 
 

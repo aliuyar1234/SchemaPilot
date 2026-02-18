@@ -1,15 +1,16 @@
-version: "3.9"
-
 services:
   control-plane:
-    image: python:3.12-slim
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
     profiles: ["starter", "team", "enterprise"]
-    command: ["sh", "-c", "echo control-plane placeholder && sleep 3600"]
     ports:
       - "8000:8000"
+    volumes:
+      - ../runtime:/app/runtime
     environment:
       SCHEMAPILOT_PROFILE: ${SCHEMAPILOT_PROFILE:-starter}
-      SCHEMAPILOT_BIND_ADDRESS: ${SCHEMAPILOT_BIND_ADDRESS:-127.0.0.1}
+      SCHEMAPILOT_BIND_ADDRESS: ${SCHEMAPILOT_BIND_ADDRESS:-0.0.0.0}
       SCHEMAPILOT_AUTH_MODE: ${SCHEMAPILOT_AUTH_MODE:-local}
       SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL: ${SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL:-true}
       SCHEMAPILOT_OIDC_CLAIMS_HEADER: ${SCHEMAPILOT_OIDC_CLAIMS_HEADER:-x-schemapilot-oidc-claims}
@@ -20,14 +21,17 @@ services:
       SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE: ${SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE:-}
 
   gateway:
-    image: python:3.12-slim
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
     profiles: ["starter", "team", "enterprise"]
-    command: ["sh", "-c", "echo gateway placeholder && sleep 3600"]
     ports:
       - "8001:8001"
+    volumes:
+      - ../runtime:/app/runtime
     environment:
       SCHEMAPILOT_PROFILE: ${SCHEMAPILOT_PROFILE:-starter}
-      SCHEMAPILOT_BIND_ADDRESS: ${SCHEMAPILOT_BIND_ADDRESS:-127.0.0.1}
+      SCHEMAPILOT_BIND_ADDRESS: ${SCHEMAPILOT_BIND_ADDRESS:-0.0.0.0}
       SCHEMAPILOT_AUTH_MODE: ${SCHEMAPILOT_AUTH_MODE:-local}
       SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL: ${SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL:-true}
       SCHEMAPILOT_OIDC_CLAIMS_HEADER: ${SCHEMAPILOT_OIDC_CLAIMS_HEADER:-x-schemapilot-oidc-claims}
@@ -36,13 +40,38 @@ services:
       SCHEMAPILOT_OIDC_ATTRIBUTES_CLAIM: ${SCHEMAPILOT_OIDC_ATTRIBUTES_CLAIM:-attributes}
       SCHEMAPILOT_OIDC_REQUIRED_ISSUER: ${SCHEMAPILOT_OIDC_REQUIRED_ISSUER:-}
       SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE: ${SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE:-}
+    depends_on:
+      - control-plane
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    profiles: ["starter", "team", "enterprise"]
+    volumes:
+      - ../runtime:/app/runtime
+    environment:
+      SCHEMAPILOT_PROFILE: ${SCHEMAPILOT_PROFILE:-starter}
+      SCHEMAPILOT_STORAGE_ROOT: ${SCHEMAPILOT_STORAGE_ROOT:-./runtime/storage}
+      SCHEMAPILOT_DATABASE_URL: ${SCHEMAPILOT_DATABASE_URL:-sqlite:///./runtime/schemapilot.db}
+      SCHEMAPILOT_WORKER_POLL_SECONDS: ${SCHEMAPILOT_WORKER_POLL_SECONDS:-2}
+      SCHEMAPILOT_WORKER_MAX_RUNS_PER_TICK: ${SCHEMAPILOT_WORKER_MAX_RUNS_PER_TICK:-1}
+    depends_on:
+      - control-plane
 
   ui:
-    image: node:20-alpine
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ui
     profiles: ["starter", "team", "enterprise"]
-    command: ["sh", "-c", "echo ui placeholder && sleep 3600"]
     ports:
       - "5173:5173"
+    environment:
+      VITE_CONTROL_PLANE_URL: http://control-plane:8000
+      VITE_GATEWAY_URL: http://gateway:8001
+    depends_on:
+      - control-plane
+      - gateway
 
   minio:
     image: minio/minio:RELEASE.2025-01-20T14-49-07Z
@@ -58,8 +87,6 @@ services:
     image: trinodb/trino:459
     profiles: ["team", "enterprise"]
     command: ["trino"]
-    ports:
-      - "8080:8080"
 
   opa:
     image: openpolicyagent/opa:1.3.0-static

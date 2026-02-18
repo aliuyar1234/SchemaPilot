@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.control_plane import db_models
@@ -42,9 +43,21 @@ from backend.control_plane.schemas import (
     SourceCreateRequest,
     WorkspaceCreateRequest,
 )
+from backend.shared_domain.auth import (
+    actor_has_any_role,
+    authenticated_actor_from_request,
+    load_local_auth_tokens,
+)
 from backend.shared_domain.config import Settings, load_settings
+from backend.shared_domain.contract_reports import load_build_contract_report
 from backend.shared_domain.db import get_engine, get_session_factory
-from backend.shared_domain.errors import SchemaPilotError
+from backend.shared_domain.errors import PolicyDeniedError, SchemaPilotError
+from backend.shared_domain.evidence_store import load_evidence_bundle, store_evidence_bundle
+from backend.shared_domain.gold_pointer import (
+    load_latest_gold_pointer,
+    publish_gold_pointer,
+    rollback_gold_pointer,
+)
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.observability import (
     increment_contract_failure,
@@ -59,6 +72,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     """Create control-plane application instance."""
     settings = settings_factory()
     settings.validate()
+    auth_tokens = load_local_auth_tokens()
     if settings.database_url.startswith("sqlite:///"):
         sqlite_path = settings.database_url.removeprefix("sqlite:///")
         db_file = Path(sqlite_path)
@@ -107,8 +121,35 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 code=exc.error_code, message=str(exc), details=exc.details, request_id=request_id
             )
         )
-        status_code = 404 if exc.error_code == "NOT_FOUND" else 400
+        if exc.error_code == "NOT_FOUND":
+            status_code = 404
+        elif exc.error_code == "POLICY_DENIED":
+            status_code = 403
+        else:
+            status_code = 400
         return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+    def require_actor(request: Request, *, roles: set[str]) -> dict[str, object]:
+        actor = authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        if actor is None:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_or_invalid_auth_token"},
+            )
+        if roles and not actor_has_any_role(actor, roles):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_required_role", "required_roles": sorted(roles)},
+            )
+        return actor
+
+    platform_admin_roles = {"platform_admin"}
+    steward_or_admin_roles = {"data_steward", "platform_admin"}
+    analyst_or_steward_or_admin_roles = {"analyst", "data_steward", "platform_admin"}
 
     def not_found_response(
         *, request: Request, message: str, details: dict[str, object]
@@ -123,6 +164,70 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             )
         )
         return JSONResponse(status_code=404, content=payload.model_dump())
+
+    def ensure_contract_failure_review_task(
+        *,
+        session: Session,
+        workspace_id: str,
+        build_id: str,
+        failures: list[dict[str, object]],
+    ) -> dict[str, object]:
+        stored = store_evidence_bundle(
+            workspace_id=workspace_id,
+            storage_root=settings.storage_root,
+            bundle_type="contract_failure",
+            payload={
+                "workspace_id": workspace_id,
+                "build_id": build_id,
+                "failures": failures,
+            },
+        )
+        proposal_row = (
+            session.execute(
+                select(db_models.ReviewProposal).where(
+                    db_models.ReviewProposal.workspace_id == workspace_id,
+                    db_models.ReviewProposal.proposal_type == "contract_failure_proposal",
+                    db_models.ReviewProposal.evidence_bundle_uri == stored.evidence_bundle_uri,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if proposal_row is None:
+            proposal = create_proposal(
+                session,
+                workspace_id=workspace_id,
+                proposal_type="contract_failure_proposal",
+                evidence_bundle_uri=stored.evidence_bundle_uri,
+                confidence=1.0,
+            )
+            proposal_id = str(proposal["proposal_id"])
+        else:
+            proposal_id = proposal_row.proposal_id
+
+        existing_task = (
+            session.execute(
+                select(db_models.ReviewTask).where(
+                    db_models.ReviewTask.workspace_id == workspace_id,
+                    db_models.ReviewTask.subject_ref == proposal_id,
+                    db_models.ReviewTask.priority == "quality_critical",
+                    db_models.ReviewTask.blocking.is_(True),
+                    db_models.ReviewTask.status.in_(("open", "in_review")),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing_task is None:
+            task = create_review_task(
+                session,
+                workspace_id=workspace_id,
+                subject_ref=proposal_id,
+                priority="quality_critical",
+                blocking=True,
+            )
+            return {"proposal_id": proposal_id, "task_id": task["task_id"]}
+        return {"proposal_id": proposal_id, "task_id": existing_task.task_id}
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, object]:
@@ -154,6 +259,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
         workspace = create_workspace(
             session,
             name=payload.name,
@@ -163,7 +269,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=str(workspace["workspace_id"]),
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="workspace.created",
             event_json=workspace,
             correlation_id=request.state.request_id,
@@ -190,6 +296,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         source = create_source(
             session,
             workspace_id=workspace_id,
@@ -200,7 +307,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="source.created",
             event_json=source,
             correlation_id=request.state.request_id,
@@ -221,6 +328,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         source = update_source(
             session,
             workspace_id=workspace_id,
@@ -236,7 +344,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="source.updated",
             event_json=source,
             correlation_id=request.state.request_id,
@@ -265,6 +373,29 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             details={"workspace_id": workspace_id, "dataset_id": dataset_id},
         )  # type: ignore[return-value]
 
+    @app.get("/api/v1/workspaces/{workspace_id}/evidence/{evidence_id}")
+    async def api_get_evidence_bundle(
+        workspace_id: str,
+        evidence_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        bundle = load_evidence_bundle(
+            workspace_id=workspace_id,
+            evidence_id=evidence_id,
+            storage_root=settings.storage_root,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="evidence.read",
+            event_json={"workspace_id": workspace_id, "evidence_id": evidence_id},
+            correlation_id=request.state.request_id,
+        )
+        return bundle
+
     @app.post("/api/v1/workspaces/{workspace_id}/runs")
     async def api_create_run(
         workspace_id: str,
@@ -272,11 +403,12 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         run = create_run(session, workspace_id=workspace_id, run_type=payload.run_type)
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="run.created",
             event_json=run,
             correlation_id=request.state.request_id,
@@ -333,6 +465,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         workspace = create_workspace(
             session,
             name=str(payload.get("workspace_name", "Demo Workspace")),
@@ -399,7 +532,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=str(workspace["workspace_id"]),
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="onboarding.demo_bootstrap",
             event_json=response_payload,
             correlation_id=request.state.request_id,
@@ -413,6 +546,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         confidence_raw = payload.get("confidence", 0.5)
         confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float, str)) else 0.5
         proposal = create_proposal(
@@ -432,7 +566,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="proposal.created",
             event_json={"proposal": proposal, "task": task},
             correlation_id=request.state.request_id,
@@ -447,11 +581,12 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
         decision = decide_review_task(
             session,
             workspace_id=workspace_id,
             task_id=task_id,
-            actor_id=str(payload.get("actor_id", "unknown")),
+            actor_id=str(actor.get("actor_id", "unknown")),
             decision=str(payload.get("decision", "defer")),
             reason=str(payload.get("decision_reason", "")),
         )
@@ -464,7 +599,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id=str(payload.get("actor_id", "unknown")),
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="review.decision",
             event_json=decision,
             correlation_id=request.state.request_id,
@@ -473,8 +608,9 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
 
     @app.post("/api/v1/workspaces/{workspace_id}/recommendations")
     async def api_create_recommendation(
-        workspace_id: str, payload: RecommendationCreateRequest
+        workspace_id: str, payload: RecommendationCreateRequest, request: Request
     ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
         report = build_recommendation_report(payload.intent)
         return {
             "report_id": new_ulid(),
@@ -507,22 +643,64 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         payload: dict[str, object],
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        contract_report = load_build_contract_report(
+            workspace_id=workspace_id,
+            build_id=build_id,
+            storage_root=settings.storage_root,
+        )
+        contract_failures: list[dict[str, object]] = []
+        contract_report_present = contract_report is not None
+        contracts_passed = False
+        if contract_report is not None:
+            contracts_passed = contract_report.contracts_passed
+            contract_failures = contract_report.failures
+        else:
+            contract_failures = [{"reason": "contract_report_missing"}]
         gate = evaluate_gold_publish_gate(
-            contracts_passed=bool(payload.get("contracts_passed", True)),
+            contracts_passed=contracts_passed,
             unresolved_blocking_tasks=unresolved_blocking_task_count(session, workspace_id),
         )
+        latest_pointer_before = load_latest_gold_pointer(
+            workspace_id=workspace_id,
+            storage_root=settings.storage_root,
+        )
+        pointer: dict[str, object] | None = None
+        if gate["allowed"]:
+            pointer = publish_gold_pointer(
+                workspace_id=workspace_id,
+                build_id=build_id,
+                snapshot_id=str(payload.get("snapshot_id", build_id)),
+                model_name=str(payload.get("model_name", "default_model")),
+                storage_root=settings.storage_root,
+            )
         result_payload: dict[str, object] = {
             "workspace_id": workspace_id,
             "build_id": build_id,
-            "status": "published_stub" if gate["allowed"] else "blocked",
+            "status": "published" if gate["allowed"] else "blocked",
             "gate_reason": gate["reason"],
+            "contracts_report_present": contract_report_present,
+            "contracts_passed": contracts_passed,
+            "latest_pointer_before": latest_pointer_before,
+            "latest_pointer_after": pointer
+            if pointer is not None
+            else load_latest_gold_pointer(
+                workspace_id=workspace_id,
+                storage_root=settings.storage_root,
+            ),
         }
         if not gate["allowed"] and gate["reason"] == "contract_failure":
             increment_contract_failure(workspace_id=workspace_id, layer="gold")
+            result_payload["contract_failure_task"] = ensure_contract_failure_review_task(
+                session=session,
+                workspace_id=workspace_id,
+                build_id=build_id,
+                failures=contract_failures,
+            )
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="build.published",
             event_json=result_payload,
             correlation_id=request.state.request_id,
@@ -536,15 +714,29 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        try:
+            rollback_result = rollback_gold_pointer(
+                workspace_id=workspace_id,
+                build_id=build_id,
+                storage_root=settings.storage_root,
+            )
+        except ValueError as exc:
+            return not_found_response(
+                request=request,
+                message="Rollback target not found.",
+                details={"workspace_id": workspace_id, "build_id": build_id, "reason": str(exc)},
+            )  # type: ignore[return-value]
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
             "build_id": build_id,
-            "status": "rolled_back_stub",
+            "status": "rolled_back",
+            "rollback": rollback_result,
         }
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id="system",
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="build.rollback",
             event_json=payload,
             correlation_id=request.state.request_id,
@@ -558,6 +750,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         request: Request,
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
         subject_selector_raw = payload.get("subject_selector", {})
         subject_selector: dict[str, object] = (
             subject_selector_raw if isinstance(subject_selector_raw, dict) else {}
@@ -594,7 +787,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         append_audit_event(
             session,
             workspace_id=workspace_id,
-            actor_id=str(payload.get("actor_id", "system")),
+            actor_id=str(actor.get("actor_id", "unknown")),
             event_type="deletion.workflow",
             event_json=result,
             correlation_id=request.state.request_id,

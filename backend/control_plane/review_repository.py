@@ -5,8 +5,8 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.control_plane.db_models import ReviewApproval, ReviewProposal, ReviewTask
 from backend.shared_domain.ids import new_ulid
+from backend.shared_domain.metadata_models import ReviewApproval, ReviewProposal, ReviewTask
 
 
 def create_proposal(
