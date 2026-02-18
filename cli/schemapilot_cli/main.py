@@ -15,15 +15,15 @@ from urllib.parse import urlparse
 
 import typer
 
-from cli.schemapilot_cli.analyze import analyze_workspace
-from cli.schemapilot_cli.diag import generate_diag_bundle
-from cli.schemapilot_cli.doctor import run_doctor_preflight
 from backend.shared_domain.demo_scenario import generate_demo_scenario
 from backend.shared_domain.gold_templates import (
     generate_gold_template_bundle,
     list_gold_template_packs,
 )
 from backend.shared_domain.ids import new_ulid
+from cli.schemapilot_cli.analyze import analyze_workspace
+from cli.schemapilot_cli.diag import generate_diag_bundle
+from cli.schemapilot_cli.doctor import run_doctor_preflight
 
 app = typer.Typer(help="SchemaPilot CLI")
 templates_app = typer.Typer(help="Gold template pack commands")
@@ -141,7 +141,9 @@ def init_interactive(
     """Interactive onboarding: workspace + source + optional discover run."""
     workspace_name = typer.prompt("Workspace name", default="Team Workspace").strip()
     source_type = typer.prompt("Source type", default="filesystem").strip().lower()
-    source_root = typer.prompt("Source root path", default="./runtime/demo/first_hour/exports").strip()
+    source_root = typer.prompt(
+        "Source root path", default="./runtime/demo/first_hour/exports"
+    ).strip()
     if not workspace_name:
         typer.echo("Workspace name is required.", err=True)
         raise typer.Exit(code=1)
@@ -285,7 +287,9 @@ def review_batch(
         raise typer.Exit(code=1)
     selected_task_ids = [item.strip() for item in task_id if item.strip()]
     if all_open:
-        tasks_response = _request_json("GET", f"{api_base_url}/api/v1/workspaces/{workspace}/review_tasks")
+        tasks_response = _request_json(
+            "GET", f"{api_base_url}/api/v1/workspaces/{workspace}/review_tasks"
+        )
         tasks = tasks_response if isinstance(tasks_response, list) else []
         selected_task_ids = [
             str(task.get("task_id", ""))
@@ -359,8 +363,10 @@ def query_console(
         path = Path(export_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if export_format.strip().lower() == "csv":
-            rows = result.get("result", {}).get("rows", [])
-            columns = result.get("result", {}).get("columns", [])
+            result_section_raw = result.get("result", {})
+            result_section = result_section_raw if isinstance(result_section_raw, dict) else {}
+            rows = result_section.get("rows", [])
+            columns = result_section.get("columns", [])
             column_names = [str(col.get("name", "")) for col in columns if isinstance(col, dict)]
             lines = [",".join(column_names)]
             if isinstance(rows, list):
@@ -477,7 +483,9 @@ def policy_audit_report(
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report_payload, indent=2, sort_keys=True), encoding="utf-8")
-    typer.echo(json.dumps({"output_path": output_path.as_posix(), "scenario_count": len(report_rows)}))
+    typer.echo(
+        json.dumps({"output_path": output_path.as_posix(), "scenario_count": len(report_rows)})
+    )
 
 
 @app.command("analyze")

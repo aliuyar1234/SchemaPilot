@@ -109,9 +109,7 @@ def test_validate_semantic_manifest_normalizes_and_hashes_deterministically() ->
         ),
     ],
 )
-def test_validate_semantic_manifest_rejects_invalid_shapes(
-    mutator, expected_error: str
-) -> None:
+def test_validate_semantic_manifest_rejects_invalid_shapes(mutator, expected_error: str) -> None:
     manifest = _valid_manifest()
     mutator(manifest)
     with pytest.raises(ValueError, match=expected_error):

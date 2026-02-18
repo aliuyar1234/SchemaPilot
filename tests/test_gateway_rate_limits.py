@@ -23,9 +23,7 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_gateway_denies_when_rate_limit_exceeded(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+def test_gateway_denies_when_rate_limit_exceeded(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("SCHEMAPILOT_GATEWAY_MAX_REQUESTS_PER_MINUTE", "1")
     monkeypatch.setenv("SCHEMAPILOT_GATEWAY_MAX_CONCURRENT_PER_ACTOR", "4")
     client = TestClient(create_gateway_app(settings_factory=lambda: _settings(tmp_path)))
@@ -46,9 +44,7 @@ def test_gateway_denies_when_rate_limit_exceeded(
     assert second.json()["error"]["details"]["reason"] == "rate_limit_exceeded"
 
 
-def test_gateway_denies_when_concurrency_limit_exceeded(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+def test_gateway_denies_when_concurrency_limit_exceeded(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("SCHEMAPILOT_GATEWAY_MAX_REQUESTS_PER_MINUTE", "10")
     monkeypatch.setenv("SCHEMAPILOT_GATEWAY_MAX_CONCURRENT_PER_ACTOR", "0")
     client = TestClient(create_gateway_app(settings_factory=lambda: _settings(tmp_path)))

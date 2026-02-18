@@ -47,4 +47,3 @@ def load_llm_provider(provider_name: str) -> LLMProvider:
         "Unsupported AI provider.",
         details={"ai_provider": provider_name},
     )
-

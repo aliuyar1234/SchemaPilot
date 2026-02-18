@@ -260,5 +260,6 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-18 — Completed `V2-0001`: added durable audit outbox delivery (queued sink dispatch with bounded retries and backlog metrics) while preserving fail-closed local audit writes for gateway/control-plane critical flows.
 - 2026-02-18 — Completed `V2-0002`, `V2-0004`, and `V2-0032`: added run-step DAG persistence/endpoint visibility, `schemapilot diag-bundle` redacted support exports, and `schemapilot analyze` workspace denials/review/run-step analytics CLI.
 - 2026-02-18 — Completed the remaining `TASKLIST_NEXT_V2` board (`V2-0006`..`V2-0031`): pack signing/migration + CI templates, connector conformance/state + reference connectors, CLI operator workflows, gateway cache/materialization/quota controls, tracing + plugin sandbox + fuzz/chaos/supply-chain gates, deletion attestation + artifact encryption, and deployment upgrade docs; re-verified with targeted V2 suites and full `python -m pytest -q` pass.
+- 2026-02-18 — Hardened UI dependency posture by migrating linting from ESLint to Biome, removing the unresolved ESLint/AJV advisory chain; verified UI `npm audit` (0 vulnerabilities) and re-ran full `CHK-TOOLING-BASELINE` successfully.
 
 

@@ -140,8 +140,7 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
         assert any(
             isinstance(decision.resources_json, dict)
             and isinstance(decision.resources_json.get("policy_pack"), dict)
-            and decision.resources_json["policy_pack"].get("pack_id")
-            == "enterprise_ai_assistant"
+            and decision.resources_json["policy_pack"].get("pack_id") == "enterprise_ai_assistant"
             for decision in decisions
         )
     finally:
@@ -149,7 +148,9 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
 
 
 def test_policy_pack_canary_requires_promotion_before_apply(tmp_path: Path) -> None:
-    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path, canary_enabled=True)))
+    client = TestClient(
+        create_app(settings_factory=lambda: _settings(tmp_path, canary_enabled=True))
+    )
     workspace_id = _create_workspace(client, name="Policy Canary")
     change_request = client.post(
         f"/api/v1/workspaces/{workspace_id}/policy-pack/change-request",

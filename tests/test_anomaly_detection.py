@@ -31,7 +31,9 @@ def test_discover_run_creates_anomaly_blocking_task(tmp_path: Path) -> None:
     exports_root = tmp_path / "exports"
     exports_root.mkdir(parents=True, exist_ok=True)
     # High null-rate column should trigger anomaly proposal/task.
-    (exports_root / "records.csv").write_text("id,email\n1,\n2,\n3,\n4,a@example.com\n", encoding="utf-8")
+    (exports_root / "records.csv").write_text(
+        "id,email\n1,\n2,\n3,\n4,a@example.com\n", encoding="utf-8"
+    )
 
     Base.metadata.create_all(bind=get_engine(database_url))
     session_factory = get_session_factory(database_url)

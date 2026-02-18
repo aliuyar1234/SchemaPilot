@@ -84,6 +84,7 @@ from backend.shared_domain.audit_outbox import (
     dispatch_audit_outbox_batch,
     enqueue_audit_outbox_event,
 )
+from backend.shared_domain.audit_sinks import load_audit_sink
 from backend.shared_domain.auth import (
     actor_has_any_role,
     authenticated_actor_from_request,
@@ -100,6 +101,7 @@ from backend.shared_domain.gold_pointer import (
     rollback_gold_pointer,
 )
 from backend.shared_domain.ids import new_ulid
+from backend.shared_domain.lineage_sql import derive_column_lineage
 from backend.shared_domain.observability import (
     increment_audit_write_failure,
     increment_contract_failure,
@@ -107,16 +109,14 @@ from backend.shared_domain.observability import (
     render_metrics,
     set_review_queue_backlog,
 )
-from backend.shared_domain.audit_sinks import load_audit_sink
 from backend.shared_domain.plugin_loader import load_connector_plugin_specs
 from backend.shared_domain.policy_packs import list_policy_pack_summaries
-from backend.shared_domain.secrets_store import load_secrets_store
 from backend.shared_domain.scheduling import (
     create_run_schedule,
     list_run_schedules,
 )
+from backend.shared_domain.secrets_store import load_secrets_store
 from backend.shared_domain.tracing import start_trace
-from backend.shared_domain.lineage_sql import derive_column_lineage
 
 
 def create_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
@@ -423,7 +423,9 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return change_request
 
-    @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_request_id}/decision")
+    @app.post(
+        "/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_request_id}/decision"
+    )
     async def api_decide_policy_pack_change(
         workspace_id: str,
         change_request_id: str,
@@ -523,9 +525,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
-        semantic_manifest = get_effective_semantic_manifest(
-            session, workspace_id=workspace_id
-        )
+        semantic_manifest = get_effective_semantic_manifest(session, workspace_id=workspace_id)
         if semantic_manifest is not None:
             return semantic_manifest
         return not_found_response(
@@ -652,9 +652,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         actor = require_actor(request, roles=steward_or_admin_roles)
         retention_days_raw = payload.get("retention_days", 30)
         retention_days = (
-            int(retention_days_raw)
-            if isinstance(retention_days_raw, (int, float, str))
-            else 30
+            int(retention_days_raw) if isinstance(retention_days_raw, (int, float, str)) else 30
         )
         enabled = bool(payload.get("enabled", False))
         purge_enabled = bool(payload.get("purge_enabled", False))
@@ -763,10 +761,13 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 )
         credentials_ref: str | None = None
         if payload.credentials:
+            credentials_payload: dict[str, object] = {
+                str(key): value for key, value in payload.credentials.items()
+            }
             credentials_ref = secrets_store.put_secret(
                 scope=f"workspace/{workspace_id}/source/{payload.source_type}",
                 key="credentials_bundle",
-                value=json_dumps_sorted(payload.credentials),
+                value=json_dumps_sorted(credentials_payload),
             )
         source = create_source(
             session,
@@ -904,7 +905,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             workspace_id=workspace_id,
             actor_id=str(actor.get("actor_id", "unknown")),
             event_type="catalog.imported",
-            event_json=result,
+            event_json={str(key): value for key, value in result.items()},
             correlation_id=request.state.request_id,
         )
         return {"workspace_id": workspace_id, **result}

@@ -66,6 +66,7 @@
 - D-0063 Audit outbox delivery baseline (`V2-0001` durable sink dispatch decoupling with fail-closed local audit writes)
 - D-0064 Operator diagnostics baseline (`V2-0002`, `V2-0004`, `V2-0032`: run-step DAG visibility + redacted support bundle + workspace analytics CLI)
 - D-0065 Completion baseline for remaining `TASKLIST_NEXT_V2` items (`V2-0006`..`V2-0031`)
+- D-0066 UI lint-chain security hardening baseline (Biome migration to remove unresolved ESLint/AJV advisories)
 
 ---
 
@@ -2801,6 +2802,49 @@ The implementation branch already contained these features but task status files
 - Critical flow impacted: YES (gateway, audit, worker execution, deployment hardening)  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES (optional modules remain explicit opt-in)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0066 UI lint-chain security hardening baseline (Biome migration to remove unresolved ESLint/AJV advisories)
+
+**Decision**  
+Migrate UI linting from the legacy ESLint chain to Biome in order to remove unresolved moderate advisories in the frontend dependency graph:
+- replace `eslint` lint command with `biome lint`,
+- remove ESLint-only dev dependencies (`eslint`, `@typescript-eslint/parser`, `eslint-plugin-react-hooks`),
+- add deterministic Biome config and keep existing UI typecheck/test gates unchanged.
+
+**Rationale**  
+After upgrading Vite/Vitest, remaining moderate advisories were isolated to the ESLint/AJV transitive chain with no direct patch path in that stack. Migrating lint tooling removed the residual vulnerable path without weakening quality gates.
+
+**Alternatives considered**  
+- Keep ESLint and accept moderate findings (rejected: avoidable security debt).  
+- Force major ESLint migration only (rejected: did not guarantee elimination of `ajv` advisory chain).
+
+**Implications**  
+- UI lint semantics now come from Biome instead of ESLint plugins.
+- `npm audit` for `ui` now reports zero vulnerabilities while preserving lint/typecheck/test checks.
+- Root tooling baseline remains green.
+
+**Affected files**  
+- evidence: ui/package.json :: "lint": "biome lint src"
+- evidence: ui/package.json :: "@biomejs/biome"
+- evidence: ui/biome.json :: "$schema"
+- evidence: ui/src/App.tsx :: import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+
+**Verification impact**  
+- evidence: npm audit --json (ui) :: "total": 0
+- evidence: npm run lint (ui) :: Checked 3 files in
+- evidence: npm run typecheck (ui) :: tsc --noEmit
+- evidence: npm run test (ui) :: Test Files  1 passed (1)
+- evidence: python tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: NO (UI tooling only)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (lint gate remains mandatory)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

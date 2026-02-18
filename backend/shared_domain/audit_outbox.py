@@ -115,7 +115,9 @@ def dispatch_audit_outbox_batch(
                     latency_ms=(perf_counter() - started) * 1000.0,
                 )
         session.commit()
-        pending = _count_pending_outbox_rows(session=session, service=service, max_attempts=max_attempts)
+        pending = _count_pending_outbox_rows(
+            session=session, service=service, max_attempts=max_attempts
+        )
         set_audit_outbox_backlog(service=service, count=pending)
         return AuditOutboxDispatchResult(
             attempted=attempted,

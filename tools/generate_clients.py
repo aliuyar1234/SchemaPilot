@@ -12,7 +12,6 @@ from backend.control_plane.app import create_app
 from backend.gateway.app import create_gateway_app
 from backend.shared_domain.config import Settings
 
-
 OUTPUT_FILE = Path("sdk/python/schemapilot_client/generated_endpoints.py")
 
 
@@ -34,9 +33,7 @@ def render_generated_endpoints(root: Path) -> str:
             specs[name] = []
             continue
         specs[name] = sorted(str(item) for item in paths.keys())
-    fingerprint = hashlib.sha256(
-        json.dumps(specs, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps(specs, sort_keys=True).encode("utf-8")).hexdigest()
     lines = [
         '"""Generated endpoint constants from OpenAPI baselines."""',
         "",

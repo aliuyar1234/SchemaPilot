@@ -93,10 +93,7 @@ def bind_semantic_query(
         entity_id = value.split(".", 1)[0]
         if entity_id not in involved_entities:
             involved_entities.append(entity_id)
-    aliases = {
-        entity_id: f"t{idx}"
-        for idx, entity_id in enumerate(involved_entities)
-    }
+    aliases = {entity_id: f"t{idx}" for idx, entity_id in enumerate(involved_entities)}
 
     select_parts: list[str] = []
     group_by_expressions: list[str] = []
@@ -109,9 +106,7 @@ def bind_semantic_query(
     metric_sql = _build_metric_expression(metric=metric, alias=aliases[metric_entity_id])
     select_parts.append(f"{metric_sql} as metric_value")
 
-    from_clause = (
-        f"from gold.{metric_entity_id} as {aliases[metric_entity_id]}"
-    )
+    from_clause = f"from gold.{metric_entity_id} as {aliases[metric_entity_id]}"
     join_clauses = [
         _build_join_clause(
             base_entity_id=metric_entity_id,

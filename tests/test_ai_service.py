@@ -179,17 +179,37 @@ def test_ai_service_ai_track_endpoints_return_success(tmp_path: Path) -> None:
             ("/api/v1/ai/doc-qa", {"workspace_id": workspace_id, "question": "latest invoice"}),
             (
                 "/api/v1/ai/query-debug",
-                {"gateway_error": {"code": "POLICY_DENIED", "details": {"reason": "dataset_not_allowed"}}},
+                {
+                    "gateway_error": {
+                        "code": "POLICY_DENIED",
+                        "details": {"reason": "dataset_not_allowed"},
+                    }
+                },
             ),
             ("/api/v1/ai/release-gate-assistant", {"gate_output": "PASS CHK-TOOLING-BASELINE"}),
-            ("/api/v1/ai/join-suggestion", {"workspace_id": workspace_id, "left": "a", "right": "b"}),
-            ("/api/v1/ai/contract-proposer", {"workspace_id": workspace_id, "dataset_id": "dataset-1"}),
-            ("/api/v1/ai/drift-explainer", {"workspace_id": workspace_id, "dataset_id": "dataset-1"}),
+            (
+                "/api/v1/ai/join-suggestion",
+                {"workspace_id": workspace_id, "left": "a", "right": "b"},
+            ),
+            (
+                "/api/v1/ai/contract-proposer",
+                {"workspace_id": workspace_id, "dataset_id": "dataset-1"},
+            ),
+            (
+                "/api/v1/ai/drift-explainer",
+                {"workspace_id": workspace_id, "dataset_id": "dataset-1"},
+            ),
             ("/api/v1/ai/pii-explainer", {"workspace_id": workspace_id, "column": "email"}),
             ("/api/v1/ai/er-suggestions", {"workspace_id": workspace_id, "entity_id": "customer"}),
             ("/api/v1/ai/semantic-generator", {"workspace_id": workspace_id}),
-            ("/api/v1/ai/quality-triage", {"workspace_id": workspace_id, "dataset_id": "dataset-1"}),
-            ("/api/v1/ai/eval-generator", {"workspace_id": workspace_id, "questions": ["q1", "q2"]}),
+            (
+                "/api/v1/ai/quality-triage",
+                {"workspace_id": workspace_id, "dataset_id": "dataset-1"},
+            ),
+            (
+                "/api/v1/ai/eval-generator",
+                {"workspace_id": workspace_id, "questions": ["q1", "q2"]},
+            ),
         ]
         for path, payload in requests:
             response = client.post(path, headers=headers, json=payload)

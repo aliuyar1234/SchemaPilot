@@ -8,7 +8,11 @@ import json
 import os
 from pathlib import Path
 
-from backend.shared_domain.artifact_crypto import ArtifactCryptoConfig, decrypt_payload, encrypt_payload
+from backend.shared_domain.artifact_crypto import (
+    ArtifactCryptoConfig,
+    decrypt_payload,
+    encrypt_payload,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,4 +61,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

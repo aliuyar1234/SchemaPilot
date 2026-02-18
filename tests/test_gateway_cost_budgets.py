@@ -9,7 +9,9 @@ from backend.shared_domain.config import Settings
 from backend.workers.documents import ingest_document
 
 
-def _settings(tmp_path: Path, *, query_max_bytes: int = 5_000_000, retrieval_max_bytes: int = 2_000_000) -> Settings:
+def _settings(
+    tmp_path: Path, *, query_max_bytes: int = 5_000_000, retrieval_max_bytes: int = 2_000_000
+) -> Settings:
     return Settings(
         profile="starter",
         bind_address="127.0.0.1",

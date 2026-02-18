@@ -87,4 +87,3 @@ def load_audit_sink(settings: Settings) -> AuditSink:
         "Unsupported audit sink type.",
         details={"audit_sink_type": sink_type},
     )
-

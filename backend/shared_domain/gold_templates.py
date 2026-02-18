@@ -75,8 +75,7 @@ GOLD_TEMPLATE_PACKS: dict[str, dict[str, object]] = {
             {
                 "model_name": "crm_pipeline_stage_counts",
                 "sql": (
-                    "select stage, count(lead_id) as lead_count "
-                    "from silver.lead group by stage"
+                    "select stage, count(lead_id) as lead_count from silver.lead group by stage"
                 ),
             }
         ],

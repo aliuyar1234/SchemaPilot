@@ -11,7 +11,6 @@ from pathlib import Path
 
 from backend.gateway.executor import UnsafeSqlError, _validate_read_only_query
 
-
 UNSAFE_TOKENS = [
     "drop table users",
     "attach 'file.db'",

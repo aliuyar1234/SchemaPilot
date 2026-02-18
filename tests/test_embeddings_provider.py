@@ -28,4 +28,3 @@ def test_disabled_embeddings_provider_fails_closed() -> None:
 def test_unknown_embeddings_provider_is_rejected() -> None:
     with pytest.raises(StartupConfigurationError):
         load_embeddings_provider(provider_name="unknown", dimensions=8)
-

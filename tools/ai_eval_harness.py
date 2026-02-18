@@ -102,8 +102,8 @@ def run_ai_eval_harness(*, output_root: Path, smoke: bool) -> dict[str, object]:
                     "citations": ["doc://invoice/1001"],
                 },
             }
-        if url.endswith("/api/v1/workspaces/%s/datasets" % workspace_id):
-            return [{"dataset_id": "dataset-1", "logical_name": "invoices"}]
+        if url.endswith(f"/api/v1/workspaces/{workspace_id}/datasets"):
+            return {"datasets": [{"dataset_id": "dataset-1", "logical_name": "invoices"}]}
         if url.endswith("/api/v1/gateway/policy/simulate"):
             return {
                 "workspace_id": workspace_id,
@@ -170,11 +170,11 @@ def run_ai_eval_harness(*, output_root: Path, smoke: bool) -> dict[str, object]:
         "workspace_id": workspace_id,
         "checks": checks,
         "ask_sql": ask_sql.json() if ask_sql.status_code == 200 else ask_sql.text,
-        "metric_answer": metric_answer.json() if metric_answer.status_code == 200 else metric_answer.text,
+        "metric_answer": metric_answer.json()
+        if metric_answer.status_code == 200
+        else metric_answer.text,
         "doc_qa": doc_qa.json() if doc_qa.status_code == 200 else doc_qa.text,
-        "policy_assistant": policy_sim.json()
-        if policy_sim.status_code == 200
-        else policy_sim.text,
+        "policy_assistant": policy_sim.json() if policy_sim.status_code == 200 else policy_sim.text,
         "eval_generator": eval_generator.json()
         if eval_generator.status_code == 200
         else eval_generator.text,

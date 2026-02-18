@@ -78,4 +78,3 @@ def test_gateway_query_cache_miss_when_disabled(tmp_path, monkeypatch) -> None:
 def create_gateway_app_with_settings(tmp_path, *, cache_enabled: bool):
     settings = _settings(tmp_path, cache_enabled=cache_enabled)
     return gateway_app.create_gateway_app(settings_factory=lambda: settings)
-

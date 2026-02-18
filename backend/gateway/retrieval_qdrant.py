@@ -101,4 +101,3 @@ def _extract_points(payload: dict[str, object]) -> list[dict[str, object]]:
         if isinstance(row, dict):
             normalized.append({str(key): value for key, value in row.items()})
     return normalized
-

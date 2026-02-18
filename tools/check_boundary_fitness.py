@@ -83,8 +83,7 @@ def check_python(repo_root: Path, rules: dict, state: CheckState) -> None:
         owner = module_owner(py_file, module_roots, repo_root)
         if owner is None:
             is_managed_path = any(
-                rel == prefix.replace("\\", "/")
-                or rel.startswith(prefix.replace("\\", "/") + "/")
+                rel == prefix.replace("\\", "/") or rel.startswith(prefix.replace("\\", "/") + "/")
                 for prefix in managed_prefixes
             )
             if is_managed_path and rel not in unmanaged_allowlist:

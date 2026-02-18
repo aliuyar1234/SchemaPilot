@@ -62,9 +62,7 @@ def test_source_connect_denied_when_plugin_not_allowlisted(tmp_path: Path, monke
     assert body["error"]["details"]["reason"] == "plugin_not_allowlisted_or_unavailable"
 
 
-def test_plugin_error_fails_closed_with_strict_ingest_evidence(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_plugin_error_fails_closed_with_strict_ingest_evidence(tmp_path: Path, monkeypatch) -> None:
     exports_root = tmp_path / "plugin_exports"
     exports_root.mkdir(parents=True, exist_ok=True)
     plugin_file = exports_root / "source.csv"

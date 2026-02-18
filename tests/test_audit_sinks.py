@@ -54,12 +54,18 @@ def _gateway_settings(
 
 def test_jsonl_audit_sink_writes_events_from_control_plane(tmp_path: Path) -> None:
     sink_path = tmp_path / "audit" / "events.jsonl"
-    settings = _control_plane_settings(tmp_path, sink_type="jsonl", sink_target=sink_path.as_posix())
+    settings = _control_plane_settings(
+        tmp_path, sink_type="jsonl", sink_target=sink_path.as_posix()
+    )
     client = TestClient(create_app(settings_factory=lambda: settings))
     response = client.post(
         "/api/v1/workspaces",
         headers={"Authorization": "Bearer local-platform-admin-token"},
-        json={"name": "Audit Sink Workspace", "profile": "starter", "security_baseline": "standard"},
+        json={
+            "name": "Audit Sink Workspace",
+            "profile": "starter",
+            "security_baseline": "standard",
+        },
     )
     assert response.status_code == 200
     assert sink_path.exists()

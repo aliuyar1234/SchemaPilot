@@ -25,7 +25,7 @@ def test_parse_date_rejects_ambiguous_without_locale_hint() -> None:
 
 def test_profile_csv_file_supports_utf8_sig_exports(tmp_path: Path) -> None:
     csv_path = tmp_path / "export.csv"
-    csv_path.write_bytes("\ufeffid,name\n1,Änne\n".encode("utf-8"))
+    csv_path.write_bytes("\ufeffid,name\n1,Änne\n".encode())
     profile = profile_csv_file(csv_path.as_posix())
     assert profile.row_count_sampled == 1
     assert normalize_text("ＡＢＣ") == "ABC"

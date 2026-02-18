@@ -19,9 +19,7 @@ def _session_factory(tmp_path: Path):
     return get_session_factory(database_url)
 
 
-def test_strict_ingest_fails_closed_and_creates_blocking_task(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_strict_ingest_fails_closed_and_creates_blocking_task(tmp_path: Path, monkeypatch) -> None:
     exports_root = tmp_path / "exports"
     exports_root.mkdir(parents=True, exist_ok=True)
     good_file = exports_root / "good.csv"
@@ -104,9 +102,7 @@ def test_strict_ingest_fails_closed_and_creates_blocking_task(
         )
 
 
-def test_non_strict_ingest_records_warning_and_continues(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_non_strict_ingest_records_warning_and_continues(tmp_path: Path, monkeypatch) -> None:
     exports_root = tmp_path / "exports_non_strict"
     exports_root.mkdir(parents=True, exist_ok=True)
     (exports_root / "good.csv").write_text("id,value\n1,ok\n", encoding="utf-8")

@@ -46,7 +46,7 @@ def generate_sql_agent_plan(
         raise ValueError("semantic_metric_not_found")
 
     requested_group_by = list(group_by or _guess_group_by(question, manifest))
-    semantic_query = {
+    semantic_query: dict[str, object] = {
         "metric_id": selected_metric,
         "group_by": requested_group_by,
         "filters": {},
@@ -155,4 +155,3 @@ def _guess_group_by(question: str, manifest: dict[str, Any] | None) -> list[str]
         if dim_id and dim_id.lower() in lowered and SAFE_IDENTIFIER.fullmatch(dim_id):
             candidates.append(dim_id)
     return sorted(set(candidates))
-

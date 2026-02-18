@@ -123,12 +123,15 @@ def test_validate_pack_registry_detects_signature_tampering(tmp_path: Path) -> N
         key_id="test",
     )
     assert sign_errors == []
-    assert validate_pack_registry(
-        tmp_path,
-        registry_path="registry.json",
-        matrix_path="packs/compatibility_matrix.json",
-        signing_key=signing_key,
-    ) == []
+    assert (
+        validate_pack_registry(
+            tmp_path,
+            registry_path="registry.json",
+            matrix_path="packs/compatibility_matrix.json",
+            signing_key=signing_key,
+        )
+        == []
+    )
 
     pack_file.write_text(
         json.dumps(

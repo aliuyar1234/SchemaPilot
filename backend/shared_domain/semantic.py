@@ -86,9 +86,7 @@ def _normalize_entities(rows: list[object]) -> list[dict[str, object]]:
     return sorted(normalized, key=lambda item: str(item["entity_id"]))
 
 
-def _normalize_metrics(
-    rows: list[object], *, entity_ids: set[str]
-) -> list[dict[str, object]]:
+def _normalize_metrics(rows: list[object], *, entity_ids: set[str]) -> list[dict[str, object]]:
     normalized: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for row in rows:
@@ -120,9 +118,7 @@ def _normalize_metrics(
     return sorted(normalized, key=lambda item: str(item["metric_id"]))
 
 
-def _normalize_joins(
-    rows: list[object], *, entity_ids: set[str]
-) -> list[dict[str, object]]:
+def _normalize_joins(rows: list[object], *, entity_ids: set[str]) -> list[dict[str, object]]:
     normalized: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for index, row in enumerate(rows):

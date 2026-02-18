@@ -27,7 +27,11 @@ def _seed_semantic_manifest(session: Session) -> str:
         "dimensions": [{"dimension_id": "region", "entity_id": "invoice"}],
         "metrics": [
             {"metric_id": "invoice_count", "entity_id": "invoice", "expression": "count(*)"},
-            {"metric_id": "invoice_amount_sum", "entity_id": "invoice", "expression": "sum(amount)"},
+            {
+                "metric_id": "invoice_amount_sum",
+                "entity_id": "invoice",
+                "expression": "sum(amount)",
+            },
         ],
         "joins": [],
     }

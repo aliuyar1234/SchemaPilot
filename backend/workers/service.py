@@ -46,7 +46,8 @@ def process_queued_runs_once(
                 service_name="schemapilot-worker",
                 operation="worker.process_next_queued_run",
                 correlation_id=f"worker-tick-{processed}",
-                enabled=os.getenv("SCHEMAPILOT_TRACING_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+                enabled=os.getenv("SCHEMAPILOT_TRACING_ENABLED", "false").lower()
+                in {"1", "true", "yes", "on"},
             )
             outcome = process_next_queued_run(
                 session,
@@ -111,9 +112,7 @@ def load_worker_service_config() -> WorkerServiceConfig:
         storage_root=os.getenv("SCHEMAPILOT_STORAGE_ROOT", "./runtime/storage"),
         poll_interval_seconds=float(os.getenv("SCHEMAPILOT_WORKER_POLL_SECONDS", "2")),
         max_runs_per_tick=int(os.getenv("SCHEMAPILOT_WORKER_MAX_RUNS_PER_TICK", "1")),
-        max_active_per_workspace=int(
-            os.getenv("SCHEMAPILOT_WORKER_MAX_ACTIVE_PER_WORKSPACE", "1")
-        ),
+        max_active_per_workspace=int(os.getenv("SCHEMAPILOT_WORKER_MAX_ACTIVE_PER_WORKSPACE", "1")),
         strict_ingest=strict_ingest,
     )
 

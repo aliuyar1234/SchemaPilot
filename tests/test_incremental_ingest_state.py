@@ -16,7 +16,9 @@ def _session_factory(tmp_path: Path):
     return get_session_factory(database_url)
 
 
-def test_run_processor_persists_and_reuses_connector_cursor_state(tmp_path: Path, monkeypatch) -> None:
+def test_run_processor_persists_and_reuses_connector_cursor_state(
+    tmp_path: Path, monkeypatch
+) -> None:
     exports = tmp_path / "exports"
     exports.mkdir(parents=True, exist_ok=True)
     first_file = exports / "custom_1.csv"

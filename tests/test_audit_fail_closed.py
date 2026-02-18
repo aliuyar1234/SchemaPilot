@@ -36,9 +36,7 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_gateway_denies_query_when_audit_write_fails(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+def test_gateway_denies_query_when_audit_write_fails(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     original_commit = SqlAlchemySession.commit
 
     def failing_commit(self: SqlAlchemySession) -> None:
@@ -58,9 +56,7 @@ def test_gateway_denies_query_when_audit_write_fails(
     assert body["error"]["details"]["reason"] == "audit_unavailable"
 
 
-def test_control_plane_denies_mutation_when_audit_write_fails(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+def test_control_plane_denies_mutation_when_audit_write_fails(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from backend.control_plane import app as control_plane_app
 
     def failing_append(*args, **kwargs):  # type: ignore[no-untyped-def]

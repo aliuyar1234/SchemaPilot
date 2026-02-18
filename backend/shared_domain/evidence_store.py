@@ -45,7 +45,7 @@ def store_evidence_bundle(
     bundle_root.mkdir(parents=True, exist_ok=True)
     bundle_path = bundle_root / f"{bundle_id}.json"
 
-    envelope = {
+    envelope: dict[str, object] = {
         "evidence_id": bundle_id,
         "workspace_id": workspace_id,
         "bundle_type": safe_bundle_type,

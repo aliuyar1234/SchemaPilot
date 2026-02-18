@@ -39,4 +39,3 @@ def test_index_documents_opensearch_raises_on_bulk_errors() -> None:
         assert str(exc) == "opensearch_bulk_errors"
     else:  # pragma: no cover - defensive
         raise AssertionError("expected OpenSearchIndexingError")
-

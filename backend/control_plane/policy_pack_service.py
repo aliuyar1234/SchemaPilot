@@ -239,9 +239,7 @@ def rollback_policy_pack(
     return {"status": "rolled_back", "effective_policy_pack": rollback_state}
 
 
-def get_policy_pack_canary(
-    session: Session, *, workspace_id: str
-) -> dict[str, object] | None:
+def get_policy_pack_canary(session: Session, *, workspace_id: str) -> dict[str, object] | None:
     """Return canary policy-pack state for a workspace."""
     row = (
         session.execute(
@@ -282,7 +280,7 @@ def promote_policy_pack_canary(
             details={"reason": "policy_pack_canary_not_found"},
         )
     active = get_effective_policy_pack(session, workspace_id=workspace_id) or {}
-    next_version = int(active.get("version", 0)) + 1
+    next_version = _coerce_int(active.get("version"), default=0) + 1
     next_state = {
         "workspace_id": workspace_id,
         "pack_id": canary["pack_id"],
@@ -329,9 +327,7 @@ def promote_policy_pack_canary(
     }
 
 
-def get_effective_policy_pack(
-    session: Session, *, workspace_id: str
-) -> dict[str, object] | None:
+def get_effective_policy_pack(session: Session, *, workspace_id: str) -> dict[str, object] | None:
     """Return effective policy-pack state for a workspace."""
     active_row = _get_active_policy_pack_row(session, workspace_id=workspace_id)
     if active_row is None:
@@ -341,7 +337,7 @@ def get_effective_policy_pack(
         "workspace_id": workspace_id,
         "pack_id": str(definition.get("pack_id", "")),
         "pack_checksum": str(definition.get("pack_checksum", "")),
-        "version": int(definition.get("version", 0)),
+        "version": _coerce_int(definition.get("version"), default=0),
         "previous_pack_id": str(definition.get("previous_pack_id", "")),
         "previous_pack_checksum": str(definition.get("previous_pack_checksum", "")),
     }
@@ -369,7 +365,7 @@ def _upsert_policy_pack_canary(
     approved_by: str,
     change_request_id: str,
 ) -> dict[str, object]:
-    payload = {
+    payload: dict[str, object] = {
         "workspace_id": workspace_id,
         "pack_id": requested_pack_id,
         "pack_checksum": requested_pack_checksum,
@@ -446,3 +442,18 @@ def _load_definition(definition_ref: str) -> dict[str, Any]:
 def _require_workspace(session: Session, *, workspace_id: str) -> None:
     if session.get(Workspace, workspace_id) is None:
         raise NotFoundError("Workspace not found.", details={"workspace_id": workspace_id})
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default

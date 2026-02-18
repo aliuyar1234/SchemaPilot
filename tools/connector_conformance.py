@@ -4,22 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from plugins.examples.google_drive_connector import discover as discover_google_drive
-from plugins.examples.hubspot_export_connector import discover as discover_hubspot
-from plugins.examples.imap_connector import discover as discover_imap
-from plugins.examples.sftp_connector import discover as discover_sftp
-from plugins.examples.zendesk_export_connector import discover as discover_zendesk
 
 ConnectorFn = Callable[[dict[str, object]], list[dict[str, object]]]
 REQUIRED_FIELDS = {"path", "dataset_family", "size_bytes", "mtime_epoch", "content_hash_sample"}
@@ -43,7 +37,9 @@ class CertificationResult:
         }
 
 
-def certify_connector(*, connector_id: str, connector: ConnectorFn, scope: dict[str, object]) -> CertificationResult:
+def certify_connector(
+    *, connector_id: str, connector: ConnectorFn, scope: dict[str, object]
+) -> CertificationResult:
     """Run deterministic connector contract checks."""
     errors: list[str] = []
     first = _safe_discover(connector, scope=scope, errors=errors, stage="first_run")
@@ -71,14 +67,8 @@ def certify_connector(*, connector_id: str, connector: ConnectorFn, scope: dict[
 
 def certify_default_connectors(*, root_path: str) -> list[CertificationResult]:
     """Certify bundled reference connectors against one export root."""
-    scope = {"root_path": root_path}
-    connectors: dict[str, ConnectorFn] = {
-        "hubspot_export": discover_hubspot,
-        "zendesk_export": discover_zendesk,
-        "sftp": discover_sftp,
-        "google_drive": discover_google_drive,
-        "imap": discover_imap,
-    }
+    scope: dict[str, object] = {"root_path": root_path}
+    connectors = _load_reference_connectors()
     results: list[CertificationResult] = []
     for connector_id in sorted(connectors):
         results.append(
@@ -120,6 +110,25 @@ def _safe_discover(
     )
 
 
+def _load_reference_connectors() -> dict[str, ConnectorFn]:
+    """Load bundled connector entry points lazily to keep import ordering compliant."""
+    connector_modules = {
+        "hubspot_export": "plugins.examples.hubspot_export_connector",
+        "zendesk_export": "plugins.examples.zendesk_export_connector",
+        "sftp": "plugins.examples.sftp_connector",
+        "google_drive": "plugins.examples.google_drive_connector",
+        "imap": "plugins.examples.imap_connector",
+    }
+    connectors: dict[str, ConnectorFn] = {}
+    for connector_id, module_name in connector_modules.items():
+        module = importlib.import_module(module_name)
+        discover = getattr(module, "discover", None)
+        if not callable(discover):
+            raise RuntimeError(f"connector module missing callable discover: {module_name}")
+        connectors[connector_id] = discover
+    return connectors
+
+
 def _create_fixture_exports(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     fixtures = {
@@ -135,7 +144,9 @@ def _create_fixture_exports(root: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default="runtime/conformance_exports", help="Connector export root.")
+    parser.add_argument(
+        "--root", default="runtime/conformance_exports", help="Connector export root."
+    )
     parser.add_argument(
         "--output",
         default="runtime/connector_conformance/report.json",

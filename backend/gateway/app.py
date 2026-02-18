@@ -23,25 +23,25 @@ from backend.gateway.retrieval_opensearch import (
 )
 from backend.gateway.retrieval_qdrant import QdrantUnavailableError, search_qdrant_documents
 from backend.gateway.semantic_binding import SemanticQueryBinding, bind_semantic_query
+from backend.shared_domain.audit_models import AccessDecision as AccessDecisionRow
+from backend.shared_domain.audit_models import AuditEvent
 from backend.shared_domain.audit_outbox import (
     dispatch_audit_outbox_batch,
     enqueue_audit_outbox_event,
 )
-from backend.shared_domain.audit_models import AccessDecision as AccessDecisionRow
-from backend.shared_domain.audit_models import AuditEvent
 from backend.shared_domain.audit_sinks import (
     AuditSink,
     AuditSinkError,
     DisabledAuditSink,
     load_audit_sink,
 )
+from backend.shared_domain.auth import authenticated_actor_from_request, load_local_auth_tokens
+from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.costing import (
     enforce_budget,
     estimate_query_cost_bytes,
     estimate_retrieval_cost_bytes,
 )
-from backend.shared_domain.auth import authenticated_actor_from_request, load_local_auth_tokens
-from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.db import get_session_factory, prepare_database
 from backend.shared_domain.embeddings_provider import load_embeddings_provider
 from backend.shared_domain.errors import (
@@ -765,9 +765,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     semantic_binding.group_by if semantic_binding is not None else []
                 ),
                 "semantic_manifest_checksum": (
-                    semantic_binding.manifest_checksum
-                    if semantic_binding is not None
-                    else None
+                    semantic_binding.manifest_checksum if semantic_binding is not None else None
                 ),
                 "policy_pack": effective_policy_pack,
                 "query_engine_metadata": (
@@ -872,9 +870,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         resource_attributes = (
             resource_attributes_raw if isinstance(resource_attributes_raw, dict) else {}
         )
+        actor_attributes = actor_preview.get("attributes")
         allowlisted_ai = bool(
-            isinstance(actor_preview.get("attributes"), dict)
-            and actor_preview.get("attributes", {}).get("ai_allowlisted", False)
+            isinstance(actor_attributes, dict) and actor_attributes.get("ai_allowlisted", False)
         )
         access = evaluate_access(actor_preview, allow_ai=allowlisted_ai)
         abac_mode = str(payload.get("abac_mode", "internal"))
@@ -1665,7 +1663,7 @@ def _record_access_decision(
             audit_event_id=event.audit_event_id,
         )
         session.add(decision)
-        payload = {
+        payload: dict[str, object] = {
             "audit_event_id": event.audit_event_id,
             "workspace_id": workspace_id,
             "actor_id": actor_id,

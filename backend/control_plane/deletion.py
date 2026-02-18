@@ -315,19 +315,19 @@ def _build_deletion_attestation(
     report_payload: dict[str, object],
     workflow_result: dict[str, object],
 ) -> dict[str, object]:
-    payload = {
+    execution_payload_raw = report_payload.get("execution", {})
+    execution_payload = (
+        execution_payload_raw if isinstance(execution_payload_raw, dict) else {}
+    )
+    payload: dict[str, object] = {
         "workspace_id": workspace_id,
         "deletion_request_id": deletion_request_id,
         "status": str(workflow_result.get("status", "")),
         "reason": str(workflow_result.get("reason", "")),
         "execution_epoch": int(time.time()),
         "report_summary": {
-            "snapshots_updated": report_payload.get("execution", {}).get("snapshots_updated", [])
-            if isinstance(report_payload.get("execution", {}), dict)
-            else [],
-            "indexes_updated": report_payload.get("execution", {}).get("indexes_updated", [])
-            if isinstance(report_payload.get("execution", {}), dict)
-            else [],
+            "snapshots_updated": execution_payload.get("snapshots_updated", []),
+            "indexes_updated": execution_payload.get("indexes_updated", []),
         },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

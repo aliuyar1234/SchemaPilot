@@ -34,9 +34,7 @@ def request_semantic_manifest_change(
 ) -> dict[str, object]:
     """Create review-gated semantic manifest change request."""
     _require_workspace(session, workspace_id=workspace_id)
-    normalized_manifest = _validated_manifest(
-        semantic_manifest, expected_workspace_id=workspace_id
-    )
+    normalized_manifest = _validated_manifest(semantic_manifest, expected_workspace_id=workspace_id)
     manifest_checksum = semantic_manifest_checksum(normalized_manifest)
     current = get_effective_semantic_manifest(session, workspace_id=workspace_id)
     if current is not None and str(current.get("manifest_checksum")) == manifest_checksum:

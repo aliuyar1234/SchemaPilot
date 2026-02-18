@@ -131,9 +131,7 @@ def main() -> int:
                 expected_checks = []
             check_map = {str(item.get("id", "")): bool(item.get("pass", False)) for item in checks}
             missing_or_failed = [
-                check_id
-                for check_id in expected_checks
-                if not check_map.get(str(check_id), False)
+                check_id for check_id in expected_checks if not check_map.get(str(check_id), False)
             ]
             if missing_or_failed:
                 result["status"] = "fail"

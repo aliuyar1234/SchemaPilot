@@ -62,4 +62,3 @@ def test_index_documents_qdrant_fails_when_embeddings_disabled() -> None:
             embeddings_provider=DisabledProvider(),
             request_fn=lambda url, payload, timeout: {"status": "ok"},
         )
-

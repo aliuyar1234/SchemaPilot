@@ -86,4 +86,3 @@ def test_search_opensearch_documents_propagates_unavailable_error() -> None:
         assert str(exc) == "opensearch_unavailable"
     else:  # pragma: no cover - defensive
         raise AssertionError("expected OpenSearchUnavailableError")
-

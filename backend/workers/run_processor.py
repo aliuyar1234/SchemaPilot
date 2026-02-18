@@ -31,8 +31,8 @@ from backend.shared_domain.metadata_models import (
     RunRecord,
     RunStepRecord,
 )
-from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
 from backend.shared_domain.observability import observe_worker_step_duration
+from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
 from backend.workers.anomaly_detection import detect_profile_anomalies
 from backend.workers.bronze import ingest_file_to_bronze
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
@@ -40,8 +40,8 @@ from backend.workers.connectors.plugin_runner import execute_connector_plugin
 from backend.workers.drift import detect_schema_drift
 from backend.workers.pii import detect_pii_proposals
 from backend.workers.profiler import profile_csv_file
-from backend.workers.semantic_drift import detect_semantic_manifest_drift
 from backend.workers.semantic_builder import build_semantic_manifest_candidate
+from backend.workers.semantic_drift import detect_semantic_manifest_drift
 
 DEFAULT_INCLUDE_GLOBS = ["**/*.csv"]
 PROFILE_SAMPLE_LIMIT = 1000
@@ -148,9 +148,7 @@ def process_next_queued_run(
     """Process the oldest queued run deterministically."""
     queued = (
         session.execute(
-            select(RunRecord)
-            .where(RunRecord.status == "queued")
-            .order_by(RunRecord.run_id)
+            select(RunRecord).where(RunRecord.status == "queued").order_by(RunRecord.run_id)
         )
         .scalars()
         .all()
@@ -358,9 +356,7 @@ def _ensure_run_steps(session: Session, *, run: RunRecord) -> dict[str, RunStepR
     return {row.step_key: row for row in rows}
 
 
-def _start_step(
-    session: Session, *, step_rows: dict[str, RunStepRecord], step_key: str
-) -> None:
+def _start_step(session: Session, *, step_rows: dict[str, RunStepRecord], step_key: str) -> None:
     row = step_rows.get(step_key)
     if row is None:
         return
@@ -484,9 +480,7 @@ def _process_semantic_bootstrap_run(
     _enforce_worker_step_timeout(step_rows=step_rows, step_key="collect_catalog")
     dataset_ids = sorted(
         session.execute(
-            select(CatalogDataset.dataset_id).where(
-                CatalogDataset.workspace_id == run.workspace_id
-            )
+            select(CatalogDataset.dataset_id).where(CatalogDataset.workspace_id == run.workspace_id)
         )
         .scalars()
         .all()
@@ -515,9 +509,9 @@ def _process_semantic_bootstrap_run(
         step_rows=step_rows,
         step_key="build_manifest_candidate",
         details={
-            "entity_count": int(candidate.get("entity_count", 0)),
-            "metric_count": int(candidate.get("metric_count", 0)),
-            "join_count": int(candidate.get("join_count", 0)),
+            "entity_count": _coerce_int(candidate.get("entity_count"), default=0),
+            "metric_count": _coerce_int(candidate.get("metric_count"), default=0),
+            "join_count": _coerce_int(candidate.get("join_count"), default=0),
         },
         evidence_bundle_uri=str(candidate.get("evidence_bundle_uri", "")) or None,
     )
@@ -616,9 +610,7 @@ def _process_discover_run(
             if source.source_type == "filesystem":
                 root_path = str(scope.get("root_path", "")).strip()
                 if not root_path:
-                    raise ValueError(
-                        f"Filesystem source {source.source_id} is missing root_path."
-                    )
+                    raise ValueError(f"Filesystem source {source.source_id} is missing root_path.")
                 include_globs = _string_list(
                     scope.get("include_globs"),
                     default=DEFAULT_INCLUDE_GLOBS,
@@ -946,7 +938,9 @@ def _process_materialized_refresh_run(
     _start_step(session, step_rows=step_rows, step_key="collect_inputs")
     _enforce_worker_step_timeout(step_rows=step_rows, step_key="collect_inputs")
     datasets = (
-        session.execute(select(CatalogDataset).where(CatalogDataset.workspace_id == run.workspace_id))
+        session.execute(
+            select(CatalogDataset).where(CatalogDataset.workspace_id == run.workspace_id)
+        )
         .scalars()
         .all()
     )
@@ -960,13 +954,7 @@ def _process_materialized_refresh_run(
 
     _start_step(session, step_rows=step_rows, step_key="refresh_materializations")
     _enforce_worker_step_timeout(step_rows=step_rows, step_key="refresh_materializations")
-    snapshot_dir = (
-        Path(storage_root)
-        / "materialized"
-        / run.workspace_id
-        / "snapshots"
-        / new_ulid()
-    )
+    snapshot_dir = Path(storage_root) / "materialized" / run.workspace_id / "snapshots" / new_ulid()
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     snapshot_payload = {
         "workspace_id": run.workspace_id,
@@ -977,7 +965,9 @@ def _process_materialized_refresh_run(
         "refreshed_epoch": int(time.time()),
     }
     snapshot_path = snapshot_dir / "refresh.json"
-    snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, sort_keys=True), encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps(snapshot_payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
     _succeed_step(
         session,
         step_rows=step_rows,
@@ -1009,9 +999,7 @@ def _discover_files_via_plugin(
 ) -> list[DiscoveredFile]:
     raw = execute_connector_plugin(plugin_spec=plugin_spec, scope=scope)
     if not isinstance(raw, list):
-        raise ValueError(
-            f"Connector plugin '{source_type}' must return a list of discovery rows."
-        )
+        raise ValueError(f"Connector plugin '{source_type}' must return a list of discovery rows.")
     discovered: list[DiscoveredFile] = []
     for row in raw:
         if not isinstance(row, dict):
@@ -1051,11 +1039,7 @@ def _create_pii_review_tasks_from_csv(
         detection = detect_pii_proposals(column_name, samples_by_column[column_name])
         tag = str(detection.get("tag", "none"))
         confidence_raw = detection.get("confidence", 0.0)
-        confidence = (
-            float(confidence_raw)
-            if isinstance(confidence_raw, (int, float, str))
-            else 0.0
-        )
+        confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float, str)) else 0.0
         if tag not in PII_HIGH_RISK_TAGS or confidence < PII_REVIEW_CONFIDENCE_THRESHOLD:
             continue
         stored = store_evidence_bundle(
@@ -1498,6 +1482,21 @@ def _env_int(name: str, default: int) -> int:
         return int(raw.strip())
     except ValueError:
         return default
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
 
 
 def _json_dict(value: object) -> dict[str, object]:

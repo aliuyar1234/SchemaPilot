@@ -147,9 +147,10 @@ def migrate_registry_packs(
             if not isinstance(payload, dict):
                 errors.append(f"{section}: payload must be an object for {pack_id}")
                 continue
-            source_schema_version = str(
-                entry.get("schema_version", payload.get("schema_version", "v1"))
-            ).strip() or "v1"
+            source_schema_version = (
+                str(entry.get("schema_version", payload.get("schema_version", "v1"))).strip()
+                or "v1"
+            )
             if not _version_supported(
                 matrix,
                 section=section,

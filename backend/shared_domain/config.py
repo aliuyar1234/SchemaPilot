@@ -306,9 +306,7 @@ class Settings:
         if self.worker_max_active_per_workspace <= 0:
             raise StartupConfigurationError(
                 "Worker per-workspace active limit must be positive.",
-                details={
-                    "worker_max_active_per_workspace": self.worker_max_active_per_workspace
-                },
+                details={"worker_max_active_per_workspace": self.worker_max_active_per_workspace},
             )
         if self.gateway_query_cache_ttl_seconds <= 0:
             raise StartupConfigurationError(
@@ -318,9 +316,7 @@ class Settings:
         if self.gateway_query_cache_max_entries <= 0:
             raise StartupConfigurationError(
                 "Gateway query cache max entries must be positive.",
-                details={
-                    "gateway_query_cache_max_entries": self.gateway_query_cache_max_entries
-                },
+                details={"gateway_query_cache_max_entries": self.gateway_query_cache_max_entries},
             )
         if self.worker_step_timeout_seconds <= 0:
             raise StartupConfigurationError(
@@ -341,7 +337,9 @@ class Settings:
             raise StartupConfigurationError(
                 "Artifact rotation keep count must be non-negative.",
                 details={
-                    "artifact_rotation_keep_previous_keys": self.artifact_rotation_keep_previous_keys
+                    "artifact_rotation_keep_previous_keys": (
+                        self.artifact_rotation_keep_previous_keys
+                    )
                 },
             )
 
@@ -489,8 +487,8 @@ def _coerce_config_override(field_name: str, value: object) -> object:
         )
     if field_name in CSV_TUPLE_FIELDS:
         if isinstance(value, (list, tuple)):
-            parsed = tuple(str(item).strip() for item in value if str(item).strip())
-            return parsed
+            parsed_tuple = tuple(str(item).strip() for item in value if str(item).strip())
+            return parsed_tuple
         if isinstance(value, str):
             return _parse_csv(value, default=())
         raise StartupConfigurationError(
@@ -521,7 +519,9 @@ def load_settings(config_path: str | None = None) -> Settings:
         "oidc_actor_id_claim": os.getenv("SCHEMAPILOT_OIDC_ACTOR_ID_CLAIM", "sub"),
         "oidc_roles_claim": os.getenv("SCHEMAPILOT_OIDC_ROLES_CLAIM", "roles"),
         "oidc_attributes_claim": os.getenv("SCHEMAPILOT_OIDC_ATTRIBUTES_CLAIM", "attributes"),
-        "oidc_trusted_proxy": _parse_bool(os.getenv("SCHEMAPILOT_OIDC_TRUSTED_PROXY"), default=False),
+        "oidc_trusted_proxy": _parse_bool(
+            os.getenv("SCHEMAPILOT_OIDC_TRUSTED_PROXY"), default=False
+        ),
         "oidc_required_issuer": os.getenv("SCHEMAPILOT_OIDC_REQUIRED_ISSUER"),
         "oidc_required_audience": os.getenv("SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE"),
         "oidc_jwks_url": os.getenv("SCHEMAPILOT_OIDC_JWKS_URL"),
@@ -567,7 +567,9 @@ def load_settings(config_path: str | None = None) -> Settings:
         "retrieval_max_bytes": _parse_int(
             os.getenv("SCHEMAPILOT_RETRIEVAL_MAX_BYTES"), default=2_000_000
         ),
-        "ai_service_enabled": _parse_bool(os.getenv("SCHEMAPILOT_AI_SERVICE_ENABLED"), default=False),
+        "ai_service_enabled": _parse_bool(
+            os.getenv("SCHEMAPILOT_AI_SERVICE_ENABLED"), default=False
+        ),
         "ai_provider": os.getenv("SCHEMAPILOT_AI_PROVIDER", "disabled").strip().lower(),
         "ai_gateway_url": os.getenv("SCHEMAPILOT_AI_GATEWAY_URL", "http://127.0.0.1:8001"),
         "ai_control_plane_url": os.getenv(
@@ -640,8 +642,6 @@ def load_settings(config_path: str | None = None) -> Settings:
         )
     for key, value in overrides.items():
         settings_data[key] = _coerce_config_override(key, value)
-    settings = Settings(
-        **settings_data
-    )
+    settings = Settings(**settings_data)
     settings.validate()
     return settings

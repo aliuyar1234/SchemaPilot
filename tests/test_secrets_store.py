@@ -32,7 +32,9 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
 
 def test_local_encrypted_secrets_store_roundtrip(tmp_path: Path) -> None:
     store = LocalEncryptedSecretsStore(root=tmp_path / "secrets", master_key="master")
-    reference = store.put_secret(scope="workspace/w1/source/filesystem", key="bundle", value="secret")
+    reference = store.put_secret(
+        scope="workspace/w1/source/filesystem", key="bundle", value="secret"
+    )
     assert reference.startswith("secret://local/")
     value = store.get_secret(reference)
     assert value == "secret"

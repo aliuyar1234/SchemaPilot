@@ -143,4 +143,3 @@ def _request_upsert(url: str, payload: dict[str, object], timeout_ms: int) -> di
     if not isinstance(parsed, dict):
         raise QdrantIndexingError("qdrant_invalid_response")
     return {str(key): value for key, value in parsed.items()}
-

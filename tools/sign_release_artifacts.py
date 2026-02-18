@@ -16,7 +16,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifacts",
         nargs="*",
-        default=["MANIFEST.sha256", "runtime/release_gate/report.json", "runtime/supply_chain/sbom.json"],
+        default=[
+            "MANIFEST.sha256",
+            "runtime/release_gate/report.json",
+            "runtime/supply_chain/sbom.json",
+        ],
     )
     parser.add_argument(
         "--key",

@@ -10,7 +10,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 DEFAULT_REGISTRY_PATH = "packs/registry.json"
 DEFAULT_MATRIX_PATH = "packs/compatibility_matrix.json"
@@ -19,6 +19,13 @@ DEFAULT_KEY_ID = "local-dev-v1"
 SIGNATURE_ALGORITHM = "hmac-sha256"
 SIGNED_SECTIONS = ("policy_packs", "semantic_packs", "template_packs")
 VERSION_PATTERN = re.compile(r"^v[0-9]+$")
+
+
+class EntryFields(TypedDict):
+    errors: list[str]
+    pack_id: str
+    version: str
+    path: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -181,8 +188,7 @@ def load_compatibility_matrix(
                 errors.append(f"sections.{section}.current_schema_version must match v<integer>")
             if not isinstance(supported, list) or not supported:
                 errors.append(
-                    f"sections.{section}.supported_schema_versions "
-                    "must be a non-empty list"
+                    f"sections.{section}.supported_schema_versions must be a non-empty list"
                 )
                 continue
             normalized_supported = [str(item).strip() for item in supported]
@@ -320,7 +326,7 @@ def _validate_registry_entry(
     return errors
 
 
-def _extract_entry_fields(entry: dict[str, Any]) -> dict[str, object]:
+def _extract_entry_fields(entry: dict[str, Any]) -> EntryFields:
     errors: list[str] = []
     pack_id = str(entry.get("pack_id", "")).strip()
     version = str(entry.get("version", "")).strip()

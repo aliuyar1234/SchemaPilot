@@ -79,7 +79,9 @@ def run_drills(*, root: Path, output_path: Path) -> dict[str, object]:
         duration_ms = round((perf_counter() - started) * 1000.0, 3)
         log_path = output_dir / f"{drill_id}.log"
         log_path.write_text(
-            (completed.stdout or "") + ("\n" if completed.stdout else "") + (completed.stderr or ""),
+            (completed.stdout or "")
+            + ("\n" if completed.stdout else "")
+            + (completed.stderr or ""),
             encoding="utf-8",
         )
         results.append(
@@ -91,7 +93,7 @@ def run_drills(*, root: Path, output_path: Path) -> dict[str, object]:
                 output_path=log_path.relative_to(root).as_posix(),
             )
         )
-    payload = {
+    payload: dict[str, object] = {
         "status": "pass" if all(item.status == "pass" for item in results) else "fail",
         "drills": [asdict(item) for item in results],
     }
@@ -110,4 +112,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

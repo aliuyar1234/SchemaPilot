@@ -178,8 +178,7 @@ def _verified_oidc_jwt_claims(token: str, *, settings: Settings) -> dict[str, ob
     if not candidates:
         return None
     if not any(
-        _verify_jwt_signature(signing_input, signature, alg=alg, jwk=key)
-        for key in candidates
+        _verify_jwt_signature(signing_input, signature, alg=alg, jwk=key) for key in candidates
     ):
         return None
 

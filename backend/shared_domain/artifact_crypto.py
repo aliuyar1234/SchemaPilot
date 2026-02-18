@@ -28,7 +28,9 @@ def load_artifact_crypto_config() -> ArtifactCryptoConfig:
     return ArtifactCryptoConfig(enabled=enabled, key_id=key_id, key_material=key_material)
 
 
-def encrypt_payload(*, payload: dict[str, object], config: ArtifactCryptoConfig) -> dict[str, object]:
+def encrypt_payload(
+    *, payload: dict[str, object], config: ArtifactCryptoConfig
+) -> dict[str, object]:
     """Encrypt payload envelope when artifact encryption is enabled."""
     if not config.enabled:
         return {"encrypted": False, "payload": payload}
@@ -41,7 +43,9 @@ def encrypt_payload(*, payload: dict[str, object], config: ArtifactCryptoConfig)
     }
 
 
-def decrypt_payload(*, envelope: dict[str, object], config: ArtifactCryptoConfig) -> dict[str, object]:
+def decrypt_payload(
+    *, envelope: dict[str, object], config: ArtifactCryptoConfig
+) -> dict[str, object]:
     """Decrypt payload envelope if encrypted."""
     encrypted = bool(envelope.get("encrypted", False))
     if not encrypted:
@@ -73,4 +77,3 @@ def _decrypt(*, ciphertext: str, key_material: str) -> str:
     key = _derive_key(key_material)
     payload = bytes(byte ^ key[idx % len(key)] for idx, byte in enumerate(decoded))
     return payload.decode("utf-8")
-

@@ -26,8 +26,8 @@ def test_optional_k8s_skeleton_exists() -> None:
 
 def test_dashboard_definition_references_observability_metrics() -> None:
     root = Path(__file__).resolve().parents[1]
-    dashboard = (
-        root / "deploy" / "dashboards" / "schemapilot_overview.json"
-    ).read_text(encoding="utf-8")
+    dashboard = (root / "deploy" / "dashboards" / "schemapilot_overview.json").read_text(
+        encoding="utf-8"
+    )
     assert "schemapilot_query_latency_ms" in dashboard
     assert "schemapilot_policy_denials_total" in dashboard

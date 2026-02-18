@@ -51,4 +51,3 @@ def request_json(
     if not isinstance(parsed, dict):
         raise ServiceClientError("upstream_invalid_json")
     return {str(k): v for k, v in parsed.items()}
-

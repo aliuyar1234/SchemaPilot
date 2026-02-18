@@ -12,7 +12,9 @@ def load_connector_state(
     *, storage_root: str, workspace_id: str, source_id: str
 ) -> dict[str, object]:
     """Load connector cursor/state for one workspace source."""
-    state_path = _state_path(storage_root=storage_root, workspace_id=workspace_id, source_id=source_id)
+    state_path = _state_path(
+        storage_root=storage_root, workspace_id=workspace_id, source_id=source_id
+    )
     if not state_path.exists():
         return {}
     try:
@@ -30,7 +32,9 @@ def save_connector_state(
     """Persist connector cursor/state in deterministic JSON form."""
     payload = {str(key): value for key, value in state.items()}
     payload.setdefault("updated_epoch", int(time.time()))
-    state_path = _state_path(storage_root=storage_root, workspace_id=workspace_id, source_id=source_id)
+    state_path = _state_path(
+        storage_root=storage_root, workspace_id=workspace_id, source_id=source_id
+    )
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return state_path.as_posix()
@@ -43,7 +47,11 @@ def next_cursor_from_discovery_rows(
     candidates: list[str] = []
     for row in rows:
         path = str(row.get("path", "")).strip()
-        mtime = float(row.get("mtime_epoch", 0.0)) if isinstance(row.get("mtime_epoch"), (int, float)) else 0.0
+        mtime = (
+            float(row.get("mtime_epoch", 0.0))
+            if isinstance(row.get("mtime_epoch"), (int, float))
+            else 0.0
+        )
         candidates.append(f"{mtime:020.3f}:{path}")
     if previous_cursor:
         candidates.append(previous_cursor)
@@ -53,11 +61,4 @@ def next_cursor_from_discovery_rows(
 
 
 def _state_path(*, storage_root: str, workspace_id: str, source_id: str) -> Path:
-    return (
-        Path(storage_root)
-        / "connector_state"
-        / workspace_id
-        / source_id
-        / "state.json"
-    )
-
+    return Path(storage_root) / "connector_state" / workspace_id / source_id / "state.json"

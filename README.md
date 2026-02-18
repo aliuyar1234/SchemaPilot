@@ -1,4 +1,11 @@
-﻿# SchemaPilot
+# SchemaPilot
+
+[![CI](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/ci.yml)
+[![Security](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/security.yml/badge.svg)](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/security.yml)
+[![Release](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/release.yml/badge.svg)](https://github.com/aliuyar1234/SchemaPilot/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/aliuyar1234/SchemaPilot?sort=semver)](https://github.com/aliuyar1234/SchemaPilot/releases)
+[![License](https://img.shields.io/github/license/aliuyar1234/SchemaPilot)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
 
 SchemaPilot is a governance-first platform for turning messy company data into an AI-ready, queryable foundation with strong security, deterministic pipelines, and operator-grade controls.
 
@@ -155,3 +162,4 @@ Contributions are welcome. Start with:
 ## License
 
 Apache-2.0. See `LICENSE`.
+

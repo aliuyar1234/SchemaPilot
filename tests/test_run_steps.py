@@ -75,9 +75,7 @@ def test_run_endpoint_includes_step_breakdown_after_success(tmp_path: Path) -> N
     ]
     assert all(step["status"] == "succeeded" for step in run_steps)
 
-    listed_steps = client.get(
-        f"/api/v1/workspaces/{workspace_id}/runs/{run_id}/steps"
-    ).json()
+    listed_steps = client.get(f"/api/v1/workspaces/{workspace_id}/runs/{run_id}/steps").json()
     assert listed_steps == run_steps
 
 
@@ -119,9 +117,7 @@ def test_run_step_failure_records_evidence_for_strict_completeness(tmp_path: Pat
     run_state = client.get(f"/api/v1/workspaces/{workspace_id}/runs/{run_id}").json()
     assert run_state["status"] == "failed"
     failed_step = next(
-        step
-        for step in run_state["run_steps"]
-        if step["step_key"] == "ingest_profile_governance"
+        step for step in run_state["run_steps"] if step["step_key"] == "ingest_profile_governance"
     )
     assert failed_step["status"] == "failed"
     assert failed_step["error_code"] == "strict_ingest_completeness_failed"

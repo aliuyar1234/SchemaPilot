@@ -18,11 +18,6 @@ def test_secrets_rotation_drill_passes() -> None:
     assert result.returncode == 0
     assert "PASS secrets rotation drill" in result.stdout
     report = json.loads(
-        (
-            root
-            / "runtime"
-            / "secrets_rotation_drill"
-            / "report.json"
-        ).read_text(encoding="utf-8")
+        (root / "runtime" / "secrets_rotation_drill" / "report.json").read_text(encoding="utf-8")
     )
     assert report["status"] == "pass"

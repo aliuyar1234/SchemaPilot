@@ -338,6 +338,4 @@ def test_worker_runner_fails_semantic_bootstrap_without_catalog(tmp_path: Path) 
         assert run_state["status"] == "failed"
         output_refs = run_state["output_refs"]
         assert isinstance(output_refs, dict)
-        assert "semantic_bootstrap_requires_catalog_datasets" in str(
-            output_refs.get("error", "")
-        )
+        assert "semantic_bootstrap_requires_catalog_datasets" in str(output_refs.get("error", ""))

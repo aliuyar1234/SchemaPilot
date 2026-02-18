@@ -15,9 +15,7 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 def test_gateway_reads_published_gold_metrics_from_duckdb(tmp_path) -> None:
     storage_root = tmp_path / "storage"
-    metrics_path = (
-        storage_root / "gold" / "w1" / "orders" / "snapshots" / "snap-1" / "metrics.json"
-    )
+    metrics_path = storage_root / "gold" / "w1" / "orders" / "snapshots" / "snap-1" / "metrics.json"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.write_text(
         json.dumps([{"metric": "sum_amount", "value": 2100.5}], indent=2),

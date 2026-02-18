@@ -25,7 +25,7 @@ def start_trace(
     if not enabled:
         return TraceContext(trace_id=correlation_id, enabled=False, provider="disabled")
     try:
-        from opentelemetry import trace  # type: ignore[import-untyped]
+        from opentelemetry import trace
     except Exception:
         return TraceContext(trace_id=correlation_id, enabled=False, provider="unavailable")
     tracer = trace.get_tracer(service_name)
@@ -38,4 +38,3 @@ def start_trace(
     finally:
         span.end()
     return TraceContext(trace_id=trace_id, enabled=True, provider="opentelemetry")
-

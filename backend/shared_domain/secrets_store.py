@@ -81,7 +81,7 @@ class VaultSecretsStore:
 
     def put_secret(self, *, scope: str, key: str, value: str) -> str:
         path = f"schemapilot/{scope}/{key}/{new_ulid()}"
-        payload = {"data": {"value": value}}
+        payload: dict[str, object] = {"data": {"value": value}}
         self._request_json(
             method="POST",
             path=f"/v1/secret/data/{path}",
@@ -181,4 +181,3 @@ def _decrypt(*, ciphertext: str, master_key: str) -> str:
         return plain.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SecretsStoreError("secret_payload_invalid") from exc
-

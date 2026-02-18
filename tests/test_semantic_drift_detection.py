@@ -17,7 +17,9 @@ def test_detect_semantic_manifest_drift_flags_missing_columns() -> None:
     manifest = {
         "entities": [{"entity_id": "invoice", "dataset_id": "dataset-1"}],
         "dimensions": [{"dimension_id": "region", "entity_id": "invoice"}],
-        "metrics": [{"metric_id": "invoice_amount_sum", "entity_id": "invoice", "expression": "sum(amount)"}],
+        "metrics": [
+            {"metric_id": "invoice_amount_sum", "entity_id": "invoice", "expression": "sum(amount)"}
+        ],
     }
     drift = detect_semantic_manifest_drift(
         semantic_manifest=manifest,
@@ -63,7 +65,13 @@ def test_discover_run_creates_semantic_drift_blocking_task(tmp_path: Path) -> No
                             "manifest_version": "1.0.0",
                             "entities": [{"entity_id": "invoice", "dataset_id": "dataset-1"}],
                             "dimensions": [{"dimension_id": "region", "entity_id": "invoice"}],
-                            "metrics": [{"metric_id": "invoice_amount_sum", "entity_id": "invoice", "expression": "sum(amount)"}],
+                            "metrics": [
+                                {
+                                    "metric_id": "invoice_amount_sum",
+                                    "entity_id": "invoice",
+                                    "expression": "sum(amount)",
+                                }
+                            ],
                             "joins": [],
                         }
                     },
@@ -91,5 +99,9 @@ def test_discover_run_creates_semantic_drift_blocking_task(tmp_path: Path) -> No
     with session_factory() as session:
         run_state = get_run(session, workspace_id=workspace_id, run_id=run_id)
         assert run_state is not None
-        tasks = session.execute(select(ReviewTask).where(ReviewTask.workspace_id == workspace_id)).scalars().all()
+        tasks = (
+            session.execute(select(ReviewTask).where(ReviewTask.workspace_id == workspace_id))
+            .scalars()
+            .all()
+        )
         assert any(task.priority == "quality_critical" and task.blocking for task in tasks)

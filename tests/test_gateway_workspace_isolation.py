@@ -93,9 +93,7 @@ def _insert_semantic_manifest(*, database_url: str, workspace_id: str, dataset_i
         session.close()
 
 
-def test_gateway_query_denies_ai_dataset_from_other_workspace(
-    tmp_path: Path, monkeypatch
-) -> None:  # type: ignore[no-untyped-def]
+def test_gateway_query_denies_ai_dataset_from_other_workspace(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv(
         "SCHEMAPILOT_LOCAL_AUTH_TOKENS",
         json.dumps(

@@ -19,4 +19,3 @@ def estimate_retrieval_cost_bytes(*, query_text: str, result_count: int) -> int:
 def enforce_budget(*, estimated_bytes: int, budget_bytes: int) -> bool:
     """Return whether estimated bytes stay within configured budget."""
     return estimated_bytes <= max(budget_bytes, 0)
-

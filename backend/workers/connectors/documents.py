@@ -20,11 +20,7 @@ def discover_document_files(
         include_globs=include_globs or DEFAULT_INCLUDE_GLOBS,
         exclude_globs=exclude_globs or [],
     )
-    return [
-        item
-        for item in discovered
-        if _normalized_extension(item.path) in DOCUMENT_EXTENSIONS
-    ]
+    return [item for item in discovered if _normalized_extension(item.path) in DOCUMENT_EXTENSIONS]
 
 
 def _normalized_extension(path: str) -> str:

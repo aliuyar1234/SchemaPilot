@@ -64,4 +64,3 @@ def load_embeddings_provider(*, provider_name: str, dimensions: int) -> Embeddin
             "supported_embeddings_providers": sorted(SUPPORTED_EMBEDDINGS_PROVIDERS),
         },
     )
-

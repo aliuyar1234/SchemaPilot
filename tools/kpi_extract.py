@@ -63,8 +63,7 @@ def extract_kpis(session: Session) -> dict[str, object]:
     notes: list[str] = []
     if ttfsa_minutes is None:
         notes.append(
-            "time_to_first_safe_answer_minutes unavailable "
-            "(missing workspace/query events)"
+            "time_to_first_safe_answer_minutes unavailable (missing workspace/query events)"
         )
     if deterministic_rate is None:
         notes.append("deterministic_rebuild_pass_rate unavailable (insufficient repeated runs)")

@@ -81,4 +81,3 @@ def test_search_qdrant_documents_propagates_unavailable_error() -> None:
         assert str(exc) == "qdrant_unavailable"
     else:  # pragma: no cover - defensive
         raise AssertionError("expected QdrantUnavailableError")
-

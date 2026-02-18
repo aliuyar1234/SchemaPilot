@@ -62,9 +62,7 @@ class RunRecord(Base):
     run_type: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     input_refs_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
-    output_refs_json: Mapped[dict[str, object]] = mapped_column(
-        JSON, nullable=False, default=dict
-    )
+    output_refs_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class RunStepRecord(Base):

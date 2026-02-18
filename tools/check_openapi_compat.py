@@ -56,9 +56,7 @@ def compare_openapi_compatibility(
         if path not in current_paths:
             errors.append(f"{service_name}: missing path {path}")
             continue
-        canonical_methods = (
-            canonical_methods_raw if isinstance(canonical_methods_raw, dict) else {}
-        )
+        canonical_methods = canonical_methods_raw if isinstance(canonical_methods_raw, dict) else {}
         current_methods_raw = current_paths.get(path, {})
         current_methods = current_methods_raw if isinstance(current_methods_raw, dict) else {}
         for method, canonical_operation_raw in canonical_methods.items():

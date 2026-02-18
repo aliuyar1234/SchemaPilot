@@ -9,7 +9,13 @@ from typer.testing import CliRunner
 from backend.shared_domain.audit_models import AccessDecision, AuditEvent, AuditOutboxEvent
 from backend.shared_domain.db import get_engine, get_session_factory
 from backend.shared_domain.ids import new_ulid
-from backend.shared_domain.metadata_models import Base, ReviewTask, RunRecord, RunStepRecord, Workspace
+from backend.shared_domain.metadata_models import (
+    Base,
+    ReviewTask,
+    RunRecord,
+    RunStepRecord,
+    Workspace,
+)
 from cli.schemapilot_cli.main import app
 
 runner = CliRunner()

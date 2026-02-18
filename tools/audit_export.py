@@ -22,9 +22,7 @@ def export_audit_jsonl(*, database_url: str, output_path: Path) -> dict[str, int
     rows: list[dict[str, object]] = []
     with session_factory() as session:
         events = (
-            session.execute(select(AuditEvent).order_by(AuditEvent.audit_event_id))
-            .scalars()
-            .all()
+            session.execute(select(AuditEvent).order_by(AuditEvent.audit_event_id)).scalars().all()
         )
         decisions = (
             session.execute(select(AccessDecision).order_by(AccessDecision.decision_id))

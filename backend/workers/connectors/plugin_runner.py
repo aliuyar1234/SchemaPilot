@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib.metadata import EntryPoint
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec
 
@@ -171,24 +171,25 @@ def _network_guard() -> Iterator[None]:
     if enabled:
         yield
         return
-    original_socket = socket.socket
-    original_create_connection = socket.create_connection
+    socket_module = cast(Any, socket)
+    original_socket = socket_module.socket
+    original_create_connection = socket_module.create_connection
 
-    def _deny_socket(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _deny_socket(*args: object, **kwargs: object) -> None:
         _ = (args, kwargs)
         raise OSError("plugin_network_disabled")
 
-    def _deny_create_connection(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _deny_create_connection(*args: object, **kwargs: object) -> None:
         _ = (args, kwargs)
         raise OSError("plugin_network_disabled")
 
-    socket.socket = _deny_socket  # type: ignore[assignment]
-    socket.create_connection = _deny_create_connection  # type: ignore[assignment]
+    socket_module.socket = _deny_socket
+    socket_module.create_connection = _deny_create_connection
     try:
         yield
     finally:
-        socket.socket = original_socket  # type: ignore[assignment]
-        socket.create_connection = original_create_connection  # type: ignore[assignment]
+        socket_module.socket = original_socket
+        socket_module.create_connection = original_create_connection
 
 
 if __name__ == "__main__":

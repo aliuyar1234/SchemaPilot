@@ -7,7 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.shared_domain.audit_models import AuditOutboxEvent
-from backend.shared_domain.audit_outbox import dispatch_audit_outbox_batch, enqueue_audit_outbox_event
+from backend.shared_domain.audit_outbox import (
+    dispatch_audit_outbox_batch,
+    enqueue_audit_outbox_event,
+)
 from backend.shared_domain.audit_sinks import AuditSinkError, JsonlAuditSink
 from backend.shared_domain.db import Base, get_engine, get_session_factory
 

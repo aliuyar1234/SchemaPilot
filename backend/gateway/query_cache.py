@@ -58,4 +58,3 @@ class InMemoryQueryCache:
             doomed = [key for key in self._entries if key.startswith(prefix)]
             for key in doomed:
                 self._entries.pop(key, None)
-

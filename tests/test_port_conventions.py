@@ -17,4 +17,3 @@ def test_compose_exposes_control_plane_and_gateway_ports() -> None:
     compose = Path("deploy/docker-compose.yml").read_text(encoding="utf-8")
     assert "8000:8000" in compose
     assert "8001:8001" in compose
-

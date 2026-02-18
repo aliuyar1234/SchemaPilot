@@ -8,7 +8,7 @@ import json
 import os
 import platform
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -33,7 +33,7 @@ def _git_commit(root: Path) -> str:
 
 def build_provenance(*, root: Path) -> dict[str, object]:
     return {
-        "build_epoch_utc": datetime.now(timezone.utc).isoformat(),
+        "build_epoch_utc": datetime.now(UTC).isoformat(),
         "git_commit": _git_commit(root),
         "python_version": platform.python_version(),
         "platform": platform.platform(),

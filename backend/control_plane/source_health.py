@@ -108,15 +108,19 @@ def evaluate_source_slas(
         if not bool(sla.get("enabled", False)):
             continue
         dataset_id = str(sla.get("dataset_id", "")).strip()
-        freshness_seconds = int(sla.get("freshness_seconds", 0))
+        freshness_seconds = _coerce_int(sla.get("freshness_seconds"), default=0)
         dataset = session.get(CatalogDataset, dataset_id)
         if dataset is None:
             continue
-        summary = dataset.sensitivity_summary_json if isinstance(dataset.sensitivity_summary_json, dict) else {}
+        summary = (
+            dataset.sensitivity_summary_json
+            if isinstance(dataset.sensitivity_summary_json, dict)
+            else {}
+        )
         profile = summary.get("profile", {})
         if not isinstance(profile, dict):
             profile = {}
-        last_profile_epoch = int(profile.get("last_profile_epoch", 0))
+        last_profile_epoch = _coerce_int(profile.get("last_profile_epoch"), default=0)
         age_seconds = max(now - last_profile_epoch, 0)
         if last_profile_epoch == 0 or age_seconds > freshness_seconds:
             violation = {
@@ -139,7 +143,9 @@ def evaluate_source_slas(
                 evidence_bundle_uri=stored.evidence_bundle_uri,
                 confidence=1.0,
             )
-            if _has_open_quality_task(session, workspace_id=workspace_id, proposal_id=str(proposal["proposal_id"])):
+            if _has_open_quality_task(
+                session, workspace_id=workspace_id, proposal_id=str(proposal["proposal_id"])
+            ):
                 continue
             task = create_review_task(
                 session,
@@ -166,6 +172,21 @@ def _load_payload(definition_ref: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         return {}
     return {str(k): v for k, v in payload.items()}
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
 
 
 def _has_open_quality_task(session: Session, *, workspace_id: str, proposal_id: str) -> bool:

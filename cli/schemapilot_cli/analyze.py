@@ -19,23 +19,17 @@ def analyze_workspace(*, database_url: str, workspace_id: str) -> dict[str, obje
     session: Session = session_factory()
     try:
         tasks = (
-            session.execute(
-                select(ReviewTask).where(ReviewTask.workspace_id == workspace_id)
-            )
+            session.execute(select(ReviewTask).where(ReviewTask.workspace_id == workspace_id))
             .scalars()
             .all()
         )
         runs = (
-            session.execute(
-                select(RunRecord).where(RunRecord.workspace_id == workspace_id)
-            )
+            session.execute(select(RunRecord).where(RunRecord.workspace_id == workspace_id))
             .scalars()
             .all()
         )
         run_steps = (
-            session.execute(
-                select(RunStepRecord).where(RunStepRecord.workspace_id == workspace_id)
-            )
+            session.execute(select(RunStepRecord).where(RunStepRecord.workspace_id == workspace_id))
             .scalars()
             .all()
         )
@@ -48,9 +42,7 @@ def analyze_workspace(*, database_url: str, workspace_id: str) -> dict[str, obje
         )
         event_ids = sorted({decision.audit_event_id for decision in decisions})
         events = (
-            session.execute(
-                select(AuditEvent).where(AuditEvent.audit_event_id.in_(event_ids))
-            )
+            session.execute(select(AuditEvent).where(AuditEvent.audit_event_id.in_(event_ids)))
             .scalars()
             .all()
             if event_ids
@@ -83,9 +75,7 @@ def analyze_workspace(*, database_url: str, workspace_id: str) -> dict[str, obje
     by_priority = Counter(str(task.priority) for task in tasks)
     by_status = Counter(str(task.status) for task in tasks)
     blocking_open = sum(
-        1
-        for task in tasks
-        if bool(task.blocking) and str(task.status) in {"open", "in_review"}
+        1 for task in tasks if bool(task.blocking) and str(task.status) in {"open", "in_review"}
     )
     runs_by_status = Counter(str(run.status) for run in runs)
     runs_by_type = Counter(str(run.run_type) for run in runs)
@@ -117,7 +107,9 @@ def analyze_workspace(*, database_url: str, workspace_id: str) -> dict[str, obje
             "by_status": dict(
                 sorted((status, int(count)) for status, count in runs_by_status.items())
             ),
-            "by_type": dict(sorted((run_type, int(count)) for run_type, count in runs_by_type.items())),
+            "by_type": dict(
+                sorted((run_type, int(count)) for run_type, count in runs_by_type.items())
+            ),
         },
         "run_steps": {
             "total": int(len(run_steps)),

@@ -48,7 +48,9 @@ def test_source_sla_evaluation_creates_violation_tasks(tmp_path: Path) -> None:
                 logical_name="dataset-sla",
                 physical_locator="dataset://sla",
                 schema_version=1,
-                sensitivity_summary_json={"profile": {"schema_columns": ["id"], "last_profile_epoch": 0}},
+                sensitivity_summary_json={
+                    "profile": {"schema_columns": ["id"], "last_profile_epoch": 0}
+                },
             )
         )
         session.commit()

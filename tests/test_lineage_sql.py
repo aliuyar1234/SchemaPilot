@@ -5,8 +5,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from backend.control_plane.app import create_app
-from backend.shared_domain.lineage_sql import derive_column_lineage
 from backend.shared_domain.config import Settings
+from backend.shared_domain.lineage_sql import derive_column_lineage
 
 
 def _settings(tmp_path: Path) -> Settings:

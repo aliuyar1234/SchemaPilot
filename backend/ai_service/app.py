@@ -212,7 +212,9 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         workspace_id = str(payload.get("workspace_id", "")).strip()
         concept = str(payload.get("concept", "")).strip().lower()
         if not workspace_id:
-            raise PolicyDeniedError("Access denied by policy", details={"reason": "missing_workspace"})
+            raise PolicyDeniedError(
+                "Access denied by policy", details={"reason": "missing_workspace"}
+            )
         try:
             datasets_response = request_json(
                 method="GET",
@@ -224,7 +226,12 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 "Access denied by policy",
                 details={"reason": "control_plane_unavailable", "error": str(exc)},
             ) from exc
-        datasets = datasets_response if isinstance(datasets_response, list) else []  # type: ignore[assignment]
+        datasets_raw = (
+            datasets_response
+            if isinstance(datasets_response, list)
+            else datasets_response.get("datasets", [])
+        )
+        datasets: list[object] = datasets_raw if isinstance(datasets_raw, list) else []
         matches: list[dict[str, object]] = []
         for item in datasets:
             if not isinstance(item, dict):
@@ -247,7 +254,9 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         actor_preview = payload.get("actor", {})
         resource_attributes = payload.get("resource_attributes", {})
         if not workspace_id:
-            raise PolicyDeniedError("Access denied by policy", details={"reason": "missing_workspace"})
+            raise PolicyDeniedError(
+                "Access denied by policy", details={"reason": "missing_workspace"}
+            )
         try:
             simulation = request_json(
                 method="POST",
@@ -301,11 +310,15 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 "Access denied by policy",
                 details={"reason": "ai_provider_disabled", "error": str(exc)},
             ) from exc
+        provenance_raw = retrieval.get("provenance", {})
+        provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
+        citations_raw = provenance.get("citations", [])
+        citations = citations_raw if isinstance(citations_raw, list) else []
         return {
             "workspace_id": workspace_id,
             "question": question,
             "answer": completion,
-            "citations": retrieval.get("provenance", {}).get("citations", []),
+            "citations": citations,
             "result_count": snippet_count,
         }
 
@@ -316,7 +329,11 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         if not isinstance(error_payload, dict):
             error_payload = {}
         code = str(error_payload.get("code", "unknown"))
-        reason = str(error_payload.get("details", {}).get("reason", "unknown")) if isinstance(error_payload.get("details"), dict) else "unknown"
+        reason = (
+            str(error_payload.get("details", {}).get("reason", "unknown"))
+            if isinstance(error_payload.get("details"), dict)
+            else "unknown"
+        )
         return {
             "diagnosis": f"Gateway denied request with code={code}, reason={reason}.",
             "next_steps": [
@@ -327,7 +344,9 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         }
 
     @app.post("/api/v1/ai/release-gate-assistant")
-    async def release_gate_assistant(payload: dict[str, object], request: Request) -> dict[str, object]:
+    async def release_gate_assistant(
+        payload: dict[str, object], request: Request
+    ) -> dict[str, object]:
         _ = require_ai_enabled(request)
         gate_output = str(payload.get("gate_output", "")).strip()
         summary = "Release gate passed." if "PASS" in gate_output else "Release gate failed."
@@ -344,12 +363,20 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
     @app.post("/api/v1/ai/join-suggestion")
     async def join_suggestion(payload: dict[str, object], request: Request) -> dict[str, object]:
         _ = require_ai_enabled(request)
-        return {"status": "proposal_created", "proposal_type": "relationship_proposal", "input": payload}
+        return {
+            "status": "proposal_created",
+            "proposal_type": "relationship_proposal",
+            "input": payload,
+        }
 
     @app.post("/api/v1/ai/contract-proposer")
     async def contract_proposer(payload: dict[str, object], request: Request) -> dict[str, object]:
         _ = require_ai_enabled(request)
-        return {"status": "proposal_created", "proposal_type": "quality_contract_proposal", "input": payload}
+        return {
+            "status": "proposal_created",
+            "proposal_type": "quality_contract_proposal",
+            "input": payload,
+        }
 
     @app.post("/api/v1/ai/drift-explainer")
     async def drift_explainer(payload: dict[str, object], request: Request) -> dict[str, object]:
@@ -364,12 +391,20 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
     @app.post("/api/v1/ai/er-suggestions")
     async def er_suggestions(payload: dict[str, object], request: Request) -> dict[str, object]:
         _ = require_ai_enabled(request)
-        return {"status": "proposal_created", "proposal_type": "er_merge_proposal", "input": payload}
+        return {
+            "status": "proposal_created",
+            "proposal_type": "er_merge_proposal",
+            "input": payload,
+        }
 
     @app.post("/api/v1/ai/semantic-generator")
     async def semantic_generator(payload: dict[str, object], request: Request) -> dict[str, object]:
         _ = require_ai_enabled(request)
-        return {"status": "proposal_created", "proposal_type": "semantic_manifest_proposal", "input": payload}
+        return {
+            "status": "proposal_created",
+            "proposal_type": "semantic_manifest_proposal",
+            "input": payload,
+        }
 
     @app.post("/api/v1/ai/quality-triage")
     async def quality_triage(payload: dict[str, object], request: Request) -> dict[str, object]:

@@ -26,7 +26,9 @@ def test_compact_json_files_merges_rows_deterministically(tmp_path: Path) -> Non
 def test_compact_json_files_fails_for_missing_input(tmp_path: Path) -> None:
     output = tmp_path / "compact.json"
     try:
-        compact_json_files(input_files=[(tmp_path / "missing.json").as_posix()], output_file=output.as_posix())
+        compact_json_files(
+            input_files=[(tmp_path / "missing.json").as_posix()], output_file=output.as_posix()
+        )
     except ValueError as exc:
         assert "missing_compaction_input" in str(exc)
     else:  # pragma: no cover
