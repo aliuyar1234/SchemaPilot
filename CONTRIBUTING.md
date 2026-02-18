@@ -4,7 +4,7 @@ SchemaPilot is built around a fail-closed, evidence-first governance model. Than
 
 ## Before you start
 
-1. Read `README.md` and `ARCHITECTURE.md`.
+1. Read `README.md` and `docs/ARCHITECTURE.md`.
 2. Open or reference an issue describing the change.
 3. Keep architecture boundaries intact (`tools/check_boundary_fitness.py`).
 

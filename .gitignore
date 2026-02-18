@@ -60,3 +60,5 @@ spec/
 templates/
 evidence/
 docs/GPT_PRO*.md
+/CHANGELOG.md
+/ENTERPRISE_RELEASE_CHECKLIST.md

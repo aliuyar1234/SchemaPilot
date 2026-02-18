@@ -96,7 +96,7 @@ flowchart LR
     ENG --> GOLD
 ```
 
-For a deeper breakdown, request flows, security boundaries, and deployment views, see `ARCHITECTURE.md`.
+For a deeper breakdown, request flows, security boundaries, and deployment views, see `docs/ARCHITECTURE.md`.
 
 ## Repository Structure
 
@@ -144,7 +144,7 @@ python tools/release_gate.py
 
 ## Where to find X
 
-- Detailed architecture: `ARCHITECTURE.md`
+- Detailed architecture: `docs/ARCHITECTURE.md`
 - Operator runbook index: `docs/runbook/README.md`
 - Quickstart: `docs/quickstart/FIRST_HOUR.md`
 - Security model: `docs/security/SECURITY_MODEL.md`

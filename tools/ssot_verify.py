@@ -14,9 +14,8 @@ MD_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 CORE_FILES = {
     "README.md",
-    "CHANGELOG.md",
     "CONTRIBUTING.md",
-    "ARCHITECTURE.md",
+    "docs/ARCHITECTURE.md",
     "LICENSE",
     "MANIFEST.sha256",
 }
