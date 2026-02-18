@@ -1,2 +1,0 @@
-﻿PASS MessyBench harness
-runtime/messybench/results.json

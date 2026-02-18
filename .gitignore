@@ -44,3 +44,19 @@ temp/
 
 .DS_Store
 Thumbs.db
+
+# Internal planning / governance docs (kept out of public repo surface)
+AGENTS.md
+CONSTITUTION.md
+DECISIONS.md
+ASSUMPTIONS.md
+PROGRESS.md
+AUDIT_REPORT.md
+TASKLIST.md
+TASKLIST_NEXT.md
+TASKLIST_NEXT_V2.md
+checks/
+spec/
+templates/
+evidence/
+docs/GPT_PRO*.md

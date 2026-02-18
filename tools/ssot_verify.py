@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SSOT integrity checks relevant to this repository."""
+"""Run documentation/link integrity checks relevant to this repository."""
 
 from __future__ import annotations
 
@@ -9,30 +9,19 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-EVIDENCE_RE = re.compile(r"evidence:\s*([A-Za-z0-9_./-]+)\s*::\s*([^\n]+)")
 MD_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 
 CORE_FILES = {
     "README.md",
-    "AGENTS.md",
-    "CONSTITUTION.md",
-    "DECISIONS.md",
-    "ASSUMPTIONS.md",
-    "PROGRESS.md",
     "CHANGELOG.md",
-    "AUDIT_REPORT.md",
+    "CONTRIBUTING.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
     "MANIFEST.sha256",
-    "checks/CHECKS_INDEX.md",
-    "templates/SESSION_PROTOCOL.md",
-    "templates/PR_REVIEW_CHECKLIST.md",
-    "spec/00_PROJECT_FINGERPRINT.md",
-    "spec/01_SCOPE.md",
-    "spec/10_PHASES_AND_TASKS.md",
-    "spec/11_QUALITY_GATES.md",
 }
 
-SSOT_DIRS = {"spec", "checks", "templates"}
+DOCS_DIRS = {"docs"}
 
 
 @dataclass
@@ -58,7 +47,7 @@ def check_core_files(root: Path) -> CheckResult:
 
 def check_no_adhoc(root: Path) -> CheckResult:
     messages: list[str] = []
-    for directory in sorted(SSOT_DIRS):
+    for directory in sorted(DOCS_DIRS):
         target = root / directory
         if not target.exists():
             continue
@@ -74,21 +63,6 @@ def check_ref_integrity(root: Path) -> CheckResult:
     messages: list[str] = []
     for md_file in read_markdown_files(root):
         body = md_file.read_text(encoding="utf-8", errors="replace")
-        for match in EVIDENCE_RE.finditer(body):
-            rel_path = match.group(1).strip()
-            phrase = match.group(2).strip().rstrip("|").strip()
-            target = root / rel_path
-            if not target.exists():
-                messages.append(
-                    f"{md_file.relative_to(root).as_posix()}: missing evidence file {rel_path}"
-                )
-                continue
-            target_body = target.read_text(encoding="utf-8", errors="replace")
-            if phrase not in target_body:
-                file_name = md_file.relative_to(root).as_posix()
-                message = f"{file_name}: phrase not found in {rel_path} :: {phrase}"
-                messages.append(message)
-
         for match in MD_LINK_RE.finditer(body):
             link = match.group(1)
             if "://" in link or link.startswith("#"):

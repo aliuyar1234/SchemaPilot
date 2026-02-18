@@ -2,10 +2,9 @@
 
 Describe what changed and why.
 
-## Linked task(s)
+## Linked issue(s)
 
-- `TASKLIST.md` item:
-- `spec/10_PHASES_AND_TASKS.md` task(s):
+- Issue:
 
 ## Risk and impact
 
@@ -25,12 +24,10 @@ python -m pytest -q
 
 If applicable, include focused test commands for changed modules.
 
-## Evidence updates
+## Checklist
 
-- [ ] `PROGRESS.md` updated
-- [ ] `DECISIONS.md` updated (if decisions changed)
-- [ ] `ASSUMPTIONS.md` updated (if assumptions changed)
-- [ ] `MANIFEST.sha256` regenerated
+- [ ] Tests added/updated for changed behavior
+- [ ] `MANIFEST.sha256` regenerated (if tracked files changed)
 
 ## Notes for reviewers
 

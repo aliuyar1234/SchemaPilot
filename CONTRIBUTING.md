@@ -4,8 +4,8 @@ SchemaPilot is built around a fail-closed, evidence-first governance model. Than
 
 ## Before you start
 
-1. Read `README.md`, `AGENTS.md`, and `CONSTITUTION.md`.
-2. Confirm your change maps to an existing task in `spec/10_PHASES_AND_TASKS.md` or `TASKLIST.md`.
+1. Read `README.md` and `ARCHITECTURE.md`.
+2. Open or reference an issue describing the change.
 3. Keep architecture boundaries intact (`tools/check_boundary_fitness.py`).
 
 ## Local setup
@@ -34,8 +34,6 @@ python tools/verify_manifest.py
 1. Keep changes small and focused.
 2. Add tests for new behavior, especially negative-path and fail-closed behavior.
 3. Do not weaken security defaults or bypass gateway enforcement.
-4. Update `PROGRESS.md` and `DECISIONS.md` when task status or implementation decisions change.
-5. For new assumptions, update `ASSUMPTIONS.md`.
 
 ## Connectors and plugin contributions
 

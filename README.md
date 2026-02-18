@@ -156,8 +156,7 @@ python tools/release_gate.py
 Contributions are welcome. Start with:
 
 - `CONTRIBUTING.md`
-- `AGENTS.md` for repository operating protocol and SSOT workflow
-- `templates/PR_REVIEW_CHECKLIST.md` for acceptance criteria
+- open issues/discussions for feature proposals and bug reports
 
 ## License
 

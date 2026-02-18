@@ -1,39 +1,37 @@
-# Operator Runbook Index
+# Operator Runbook
 
-Canonical operator runbook content lives in `spec/12_RUNBOOK.md`.
+This runbook captures the core operator workflows for local/team deployments.
 
-Use this file as a stable docs entrypoint and quick map:
+## Daily operations
 
-- Local demo onboarding path: `spec/12_RUNBOOK.md` (`Demo Path: Local Folders to First Governed Query`)
-- Safe exposure and OIDC configuration: `spec/12_RUNBOOK.md` (`Safe exposure (non-local)`)
-- JWT/JWKS auth mode and trusted-proxy mode: `spec/12_RUNBOOK.md` (`OIDC-first enterprise integration`)
-- Strict ingest defaults and no-partial-ingest behavior: `spec/12_RUNBOOK.md` (`Strict ingest completeness defaults`)
-- Retention/deletion safety controls: `spec/12_RUNBOOK.md` (`Retention/deletion safety defaults`)
-- Plugin allowlist + isolation controls: `spec/12_RUNBOOK.md` (`Plugin security defaults`)
-- OpenAPI/e2e regression checks: `spec/12_RUNBOOK.md` (`Contract and regression gates`)
-- Weekly KPI workflow and artifacts: `spec/12_RUNBOOK.md` (`Weekly KPI report command`)
-- Troubleshooting matrix: `spec/12_RUNBOOK.md` (`Troubleshooting`)
+- Run a preflight check before changes: `schemapilot doctor`
+- Inspect governance and run health: `schemapilot analyze --workspace-id <workspace_id>`
+- Generate a redacted support bundle for incidents:
+  - `schemapilot diag-bundle --workspace-id <workspace_id>`
 
-Supplemental docs:
+## Onboarding path
 
-- First-hour quickstart: `docs/quickstart/FIRST_HOUR.md`
-- Security model overview: `docs/security/SECURITY_MODEL.md`
-- Connector plugin guide: `docs/connectors/CONNECTOR_GUIDE.md`
+- Follow the first-hour guide: `docs/quickstart/FIRST_HOUR.md`
+- Run interactive onboarding: `schemapilot init-interactive`
+- Validate with a governed query:
+  - `schemapilot query --workspace-id <workspace_id> --sql "select 1 as one" --dataset-id <dataset_id>`
 
-Weekly KPI example:
+## Security and governance checks
 
-```bash
-python tools/kpi_tracker.py \
-  --week 2026-W08 \
-  --ttfsa-minutes 24 \
-  --install-success-rate 0.92 \
-  --security-regressions 0 \
-  --deterministic-pass-rate 1.0 \
-  --active-contributors 5 \
-  --issue-response-hours 12
-```
+- Security model reference: `docs/security/SECURITY_MODEL.md`
+- Connector/plugin rules: `docs/connectors/CONNECTOR_GUIDE.md`
+- Full baseline checks:
+  - `python tools/check_tooling_baseline.py`
 
-Expected outputs:
+## Release and maintenance
 
-- `runtime/kpi/weekly/<week>.json`
-- `runtime/kpi/latest.json`
+- Release gate: `python tools/release_gate.py --output runtime/release_gate/report.json`
+- Backup/restore drill: `python tools/backup_restore_drill.py`
+- Rotation drill: `python tools/secrets_rotation_drill.py`
+
+## Troubleshooting quick list
+
+- If auth fails: verify token/oidc config and bind settings.
+- If queries are denied: inspect policy, workspace, and dataset entitlements.
+- If publish is blocked: inspect review queue, contracts, and drift tasks.
+- If ingest fails: review strict completeness evidence and connector logs.

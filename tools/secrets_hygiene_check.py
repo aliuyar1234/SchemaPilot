@@ -19,7 +19,6 @@ IGNORED_PARTS = {
 ALLOWLIST_PATHS = {
     "backend/shared_domain/secrets.py",
     "tools/secrets_hygiene_check.py",
-    "checks/CHECKS_INDEX.md",
     "tests/test_observability.py",
 }
 
