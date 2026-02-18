@@ -11,6 +11,8 @@ SchemaPilot is a governance-first platform for turning messy company data into a
 
 It is built for real environments where data lives in folders, exports, documents, and inconsistent source systems, and where trust, auditability, and safe defaults matter.
 
+If you want AI on company data without bypass risks, SchemaPilot is built for that exact problem.
+
 ## Why SchemaPilot
 
 - Governance first: gateway-enforced RBAC/ABAC, masking, provenance, and fail-closed audit.
@@ -47,10 +49,12 @@ docker compose -f deploy/docker-compose.yml --profile team up -d control-plane g
 schemapilot first-hour --workspace-name "Demo Workspace"
 ```
 
+This prints a JSON payload with `workspace_id`, suggested `next_steps`, and starter semantic pack outputs.
+
 ### 4) Run a governed query
 
 ```bash
-schemapilot query --workspace-id <workspace_id> --sql "select 1 as one" --dataset-id dataset-1
+schemapilot query --workspace <workspace_id> --sql "select 1 as one" --dataset-id dataset-1
 ```
 
 More onboarding details: `docs/quickstart/FIRST_HOUR.md`.
@@ -121,9 +125,9 @@ For a deeper breakdown, request flows, security boundaries, and deployment views
 ## CLI Workflows
 
 - Preflight: `schemapilot doctor`
-- Interactive onboarding: `schemapilot init-interactive`
-- Run health analytics: `schemapilot analyze --workspace-id <id>`
-- Support package: `schemapilot diag-bundle --workspace-id <id>`
+- Interactive onboarding: `schemapilot init --interactive --template-pack invoices --wait-for-run`
+- Run health analytics: `schemapilot analyze --workspace <id>`
+- Support package: `schemapilot diag-bundle --workspace <id>`
 - Policy dry-run: `schemapilot policy-simulate ...`
 - Policy audit report: `schemapilot policy-audit-report ...`
 
