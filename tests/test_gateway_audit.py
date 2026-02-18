@@ -20,15 +20,20 @@ def _safe_settings() -> Settings:
     )
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_gateway_query_writes_audit_and_access_decision() -> None:
     client = TestClient(create_gateway_app(settings_factory=_safe_settings))
     response = client.post(
         "/api/v1/gateway/query",
         json={
             "workspace_id": "workspace-a",
-            "actor": {"actor_id": "user:alice", "actor_type": "human", "roles": ["analyst"]},
             "query": {"language": "sql", "text": "select 1"},
+            "resource_attributes": {"dataset_id": "dataset-1"},
         },
+        headers=_auth_headers("local-analyst-token"),
     )
     assert response.status_code == 200
 
@@ -39,5 +44,6 @@ def test_gateway_query_writes_audit_and_access_decision() -> None:
         assert len(events) >= 1
         assert len(decisions) >= 1
         assert any(event.event_type == "gateway.query" for event in events)
+        assert any("dataset-1" in str(decision.resources_json) for decision in decisions)
     finally:
         session.close()

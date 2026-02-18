@@ -18,8 +18,10 @@ from backend.control_plane.repository import (
     create_run,
     create_source,
     create_workspace,
+    get_dataset,
     get_run,
     get_workspace,
+    list_datasets,
     list_sources,
     list_workspaces,
     update_source,
@@ -28,6 +30,7 @@ from backend.control_plane.review_repository import (
     create_proposal,
     create_review_task,
     decide_review_task,
+    get_review_queue_summary,
     list_review_tasks,
     unresolved_blocking_task_count,
 )
@@ -49,6 +52,7 @@ from backend.shared_domain.observability import (
     render_metrics,
     set_review_queue_backlog,
 )
+from backend.shared_domain.policy_packs import list_policy_pack_summaries
 
 
 def create_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
@@ -103,7 +107,22 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 code=exc.error_code, message=str(exc), details=exc.details, request_id=request_id
             )
         )
-        return JSONResponse(status_code=400, content=payload.model_dump())
+        status_code = 404 if exc.error_code == "NOT_FOUND" else 400
+        return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+    def not_found_response(
+        *, request: Request, message: str, details: dict[str, object]
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", new_ulid())
+        payload = ErrorResponse(
+            error=ErrorInner(
+                code="NOT_FOUND",
+                message=message,
+                details=details,
+                request_id=request_id,
+            )
+        )
+        return JSONResponse(status_code=404, content=payload.model_dump())
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, object]:
@@ -118,6 +137,10 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     async def metrics() -> Response:
         payload, media_type = render_metrics()
         return Response(content=payload, media_type=media_type)
+
+    @app.get("/api/v1/policy-packs")
+    async def api_list_policy_packs() -> list[dict[str, str]]:
+        return list_policy_pack_summaries()
 
     @app.get("/api/v1/workspaces")
     async def api_list_workspaces(
@@ -149,11 +172,15 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
 
     @app.get("/api/v1/workspaces/{workspace_id}")
     async def api_get_workspace(
-        workspace_id: str, session: Session = Depends(get_session)
+        workspace_id: str, request: Request, session: Session = Depends(get_session)
     ) -> dict[str, object]:
         workspace = get_workspace(session, workspace_id)
         if workspace is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+            return not_found_response(
+                request=request,
+                message="Workspace not found.",
+                details={"workspace_id": workspace_id},
+            )  # type: ignore[return-value]
         return workspace
 
     @app.post("/api/v1/workspaces/{workspace_id}/sources")
@@ -201,7 +228,11 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             patch=payload,
         )
         if source is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+            return not_found_response(
+                request=request,
+                message="Source not found.",
+                details={"workspace_id": workspace_id, "source_id": source_id},
+            )  # type: ignore[return-value]
         append_audit_event(
             session,
             workspace_id=workspace_id,
@@ -213,16 +244,26 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         return source
 
     @app.get("/api/v1/workspaces/{workspace_id}/datasets")
-    async def api_list_datasets(workspace_id: str) -> list[dict[str, object]]:
-        # Implemented in PHASE_2; retained as stable contract stub.
-        _ = workspace_id
-        return []
+    async def api_list_datasets(
+        workspace_id: str, session: Session = Depends(get_session)
+    ) -> list[dict[str, object]]:
+        return list_datasets(session, workspace_id)
 
     @app.get("/api/v1/workspaces/{workspace_id}/datasets/{dataset_id}")
-    async def api_get_dataset(workspace_id: str, dataset_id: str) -> dict[str, object]:
-        _ = workspace_id
-        _ = dataset_id
-        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+    async def api_get_dataset(
+        workspace_id: str,
+        dataset_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        dataset = get_dataset(session, workspace_id=workspace_id, dataset_id=dataset_id)
+        if dataset is not None:
+            return dataset
+        return not_found_response(
+            request=request,
+            message="Dataset not found.",
+            details={"workspace_id": workspace_id, "dataset_id": dataset_id},
+        )  # type: ignore[return-value]
 
     @app.post("/api/v1/workspaces/{workspace_id}/runs")
     async def api_create_run(
@@ -244,11 +285,18 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
 
     @app.get("/api/v1/workspaces/{workspace_id}/runs/{run_id}")
     async def api_get_run(
-        workspace_id: str, run_id: str, session: Session = Depends(get_session)
+        workspace_id: str,
+        run_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
     ) -> dict[str, object]:
         run = get_run(session, workspace_id=workspace_id, run_id=run_id)
         if run is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+            return not_found_response(
+                request=request,
+                message="Run not found.",
+                details={"workspace_id": workspace_id, "run_id": run_id},
+            )  # type: ignore[return-value]
         return run
 
     @app.get("/api/v1/workspaces/{workspace_id}/review_tasks")
@@ -263,6 +311,100 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         for priority, count in backlog.items():
             set_review_queue_backlog(workspace_id=workspace_id, priority=priority, count=count)
         return tasks
+
+    @app.get("/api/v1/workspaces/{workspace_id}/review_tasks/summary")
+    async def api_review_queue_summary(
+        workspace_id: str, session: Session = Depends(get_session)
+    ) -> dict[str, object]:
+        summary = get_review_queue_summary(session, workspace_id)
+        by_priority_raw = summary.get("by_priority", {})
+        if isinstance(by_priority_raw, dict):
+            for priority, count in by_priority_raw.items():
+                set_review_queue_backlog(
+                    workspace_id=workspace_id,
+                    priority=str(priority),
+                    count=int(count),
+                )
+        return summary
+
+    @app.post("/api/v1/onboarding/demo_bootstrap")
+    async def api_demo_bootstrap(
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        workspace = create_workspace(
+            session,
+            name=str(payload.get("workspace_name", "Demo Workspace")),
+            profile=str(payload.get("profile", "starter")),
+            security_baseline=str(payload.get("security_baseline", "standard")),
+        )
+        demo_root = Path(settings.storage_root).parent / "demo_data"
+        demo_root.mkdir(parents=True, exist_ok=True)
+        demo_csv = demo_root / "invoices_demo.csv"
+        if not demo_csv.exists():
+            demo_csv.write_text(
+                "invoice_id,customer,region,amount,email\n"
+                "1001,ACME,eu,1200.5,alice@acme.example\n"
+                "1002,Beta,us,900.0,bob@beta.example\n",
+                encoding="utf-8",
+            )
+        source = create_source(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            source_type="filesystem",
+            scope={"root_path": demo_root.as_posix(), "include_globs": ["**/*.csv"]},
+            display_name="Demo Files",
+        )
+        run = create_run(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            run_type="discover",
+        )
+        proposal = create_proposal(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            proposal_type="pii_tag_proposal",
+            evidence_bundle_uri="evidence://demo/onboarding/pii",
+            confidence=0.68,
+        )
+        review_task = create_review_task(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            subject_ref=str(proposal["proposal_id"]),
+            priority="security_critical",
+            blocking=True,
+        )
+        response_payload: dict[str, object] = {
+            "workspace": workspace,
+            "source": source,
+            "run": run,
+            "review_task": review_task,
+            "demo_data_path": demo_root.as_posix(),
+            "first_query_example": {
+                "endpoint": "/api/v1/gateway/query",
+                "authorization": "Bearer local-analyst-token",
+                "payload": {
+                    "workspace_id": str(workspace["workspace_id"]),
+                    "query": {"language": "sql", "text": "select 1 as one"},
+                    "resource_attributes": {"dataset_id": "dataset-1"},
+                },
+            },
+            "next_steps": [
+                "Review and approve the demo review task.",
+                "Run a governed query through the gateway.",
+                "Generate a recommendation report for your workspace.",
+            ],
+        }
+        append_audit_event(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            actor_id="system",
+            event_type="onboarding.demo_bootstrap",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
 
     @app.post("/api/v1/workspaces/{workspace_id}/proposals")
     async def api_create_proposal(
@@ -314,7 +456,11 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             reason=str(payload.get("decision_reason", "")),
         )
         if decision is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+            return not_found_response(
+                request=request,
+                message="Review task not found.",
+                details={"workspace_id": workspace_id, "task_id": task_id},
+            )  # type: ignore[return-value]
         append_audit_event(
             session,
             workspace_id=workspace_id,
@@ -343,9 +489,15 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         }
 
     @app.get("/api/v1/workspaces/{workspace_id}/recommendations/{report_id}")
-    async def api_get_recommendation(workspace_id: str, report_id: str) -> dict[str, object]:
+    async def api_get_recommendation(
+        workspace_id: str, report_id: str, request: Request
+    ) -> dict[str, object]:
         _ = report_id
-        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND"}})  # type: ignore[return-value]
+        return not_found_response(
+            request=request,
+            message="Recommendation report not found.",
+            details={"workspace_id": workspace_id, "report_id": report_id},
+        )  # type: ignore[return-value]
 
     @app.post("/api/v1/workspaces/{workspace_id}/builds/{build_id}/publish")
     async def api_publish_build(

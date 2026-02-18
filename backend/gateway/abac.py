@@ -14,7 +14,7 @@ class AbacDecision:
 
     allow: bool
     reason: str
-    row_filter: str | None
+    row_filter: tuple[str, str] | None
     masks: dict[str, str]
 
 
@@ -38,10 +38,13 @@ def evaluate_internal_abac(
     roles = roles_raw if isinstance(roles_raw, list) else []
     if "analyst" in roles:
         masks = {"email": "partial_reveal"}
+    row_filter: tuple[str, str] | None = None
+    if actor_region:
+        row_filter = ("region", actor_region)
     return AbacDecision(
         allow=True,
         reason="internal_abac_allow",
-        row_filter=f"region = '{actor_region}'" if actor_region else None,
+        row_filter=row_filter,
         masks=masks,
     )
 

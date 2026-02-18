@@ -205,6 +205,8 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
   - evidence: tools/release_gate.py :: RG-010
   - evidence: .github/workflows/release.yml :: Run release gate
   - evidence: ENTERPRISE_RELEASE_CHECKLIST.md :: Automated Gate Command
+  - evidence: evidence/t0046/cleanroom_check.txt :: PASS clean-room install check
+  - evidence: evidence/t0046/release_gate_status.txt :: status: go
   - evidence: evidence/t0044/check_tooling_baseline_pre_manifest.txt :: All checks passed!
 ## Session history (SSOT pack only)
 - 2026-02-17 â€” Initial SSOT pack generated; manifest created; self-audit recorded.
@@ -216,5 +218,8 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-17 â€” Completed PHASE_5 decision engine template/gating/scoring/confidence/report tasks.
 - 2026-02-17 — Completed PHASE_6 governance/retrieval hardening and PHASE_7 observability/perf/packaging/release-readiness tasks.
 - 2026-02-17 — Hardened enterprise-like release validation with clean-room install, project-scoped dependency audit, and automated release-gate reporting.
+- 2026-02-17 — Re-verified release readiness: clean-room check PASS and release gate status `go`; evidence recorded in `evidence/t0046/`.
+- 2026-02-18 — Hardened gateway auth/ABAC/retrieval enforcement and deterministic connector/build safeguards; added contract, CLI, UI, and non-bypass regression tests.
+- 2026-02-18 — Implemented adoption roadmap increments: demo-first onboarding flow, KPI tracking command, enterprise OIDC/policy-pack/plugin docs depth, and added S3 max-keys fail-closed negative-path coverage.
 
 

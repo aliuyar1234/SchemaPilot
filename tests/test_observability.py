@@ -32,6 +32,10 @@ def _control_settings() -> Settings:
     )
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_gateway_metrics_endpoint_exposes_required_signals() -> None:
     client = TestClient(create_gateway_app(settings_factory=_gateway_settings))
 
@@ -39,17 +43,17 @@ def test_gateway_metrics_endpoint_exposes_required_signals() -> None:
         "/api/v1/gateway/query",
         json={
             "workspace_id": "w-obs",
-            "actor": {"actor_id": "agent:a", "actor_type": "ai", "roles": ["ai_agent"]},
             "query": {"language": "sql", "text": "select 1"},
         },
+        headers=_auth_headers("local-ai-token"),
     )
     client.post(
         "/api/v1/gateway/query",
         json={
             "workspace_id": "w-obs",
-            "actor": {"actor_id": "user:alice", "actor_type": "human", "roles": ["analyst"]},
             "query": {"language": "sql", "text": "select 1"},
         },
+        headers=_auth_headers("local-analyst-token"),
     )
     response = client.get("/api/v1/metrics")
     assert response.status_code == 200

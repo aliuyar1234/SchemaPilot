@@ -105,6 +105,33 @@
   - evidence: DECISIONS.md :: D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
   - evidence: PROGRESS.md :: PHASE_7_OBSERVABILITY_TESTS_RELEASE
 
+## v1.0.10
+- Refreshed release-status evidence after validation rerun:
+  - re-ran clean-room install check and release gate
+  - recorded tracked evidence artifacts for final readiness snapshot
+  - evidence: evidence/t0046/cleanroom_check.txt :: PASS clean-room install check
+  - evidence: evidence/t0046/release_gate_status.txt :: status: go
+  - evidence: PROGRESS.md :: PHASE_7_OBSERVABILITY_TESTS_RELEASE
+
+## v1.0.11
+- Security and determinism hardening update:
+  - adopted authenticated gateway actor context and enforced ABAC filter application in query/retrieval paths
+  - switched retrieval corpus loading to server-side artifacts and tightened dataset entitlement checks
+  - tightened fail-closed connector/build behavior (S3 truncation handling, deterministic DB snapshots, silver natural-key validation)
+  - strengthened non-bypass and error-contract verification coverage, plus CLI/UI regression tests
+  - evidence: DECISIONS.md :: D-0025 Security and determinism hardening baseline (authenticated gateway context, enforced ABAC filtering, server-side retrieval corpus, and fail-closed ingest/build checks)
+  - evidence: PROGRESS.md :: Session history (SSOT pack only)
+
+## v1.0.12
+- Adoption roadmap hardening update:
+  - expanded operator/deploy documentation for OIDC claim mapping, policy-pack authoring, and plugin packaging entrypoints
+  - added runbook index entrypoint under `docs/runbook/README.md`
+  - expanded troubleshooting coverage for connector partial-ingest and `CHK-MANIFEST-VERIFY` drift recovery
+  - added S3 `max_keys` fail-closed negative-path test coverage
+  - evidence: DECISIONS.md :: D-0026 Adoption roadmap hardening baseline (demo-first onboarding, operator docs depth, and enterprise extension guidance)
+  - evidence: spec/12_RUNBOOK.md :: Symptom: CHK-MANIFEST-VERIFY fails
+  - evidence: tests/test_s3_connector.py :: test_s3_connector_fails_closed_when_max_keys_reached_without_truncation_metadata
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

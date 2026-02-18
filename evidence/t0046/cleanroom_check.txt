@@ -1,0 +1,2 @@
+﻿command: python tools/cleanroom_install_check.py
+PASS clean-room install check (40211.009 ms)

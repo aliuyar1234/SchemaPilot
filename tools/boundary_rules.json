@@ -13,6 +13,14 @@
     "shared_domain": "backend/shared_domain",
     "cli": "cli/schemapilot_cli"
   },
+  "managed_python_prefixes": [
+    "backend",
+    "cli"
+  ],
+  "unmanaged_python_path_allowlist": [
+    "backend/__init__.py",
+    "cli/__init__.py"
+  ],
   "allowed_module_imports": {
     "control_plane": ["shared_domain"],
     "gateway": ["shared_domain"],
@@ -33,4 +41,3 @@
     "cli\\"
   ]
 }
-

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import os
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from time import perf_counter
 
 from fastapi import FastAPI, Request, Response
@@ -25,7 +28,47 @@ from backend.shared_domain.observability import (
     observe_query_latency,
     render_metrics,
 )
-from backend.shared_domain.retrieval import retrieve_documents
+from backend.shared_domain.policy_packs import find_policy_pack_template
+from backend.shared_domain.retrieval import load_retrieval_corpus, retrieve_documents
+
+DEFAULT_LOCAL_AUTH_TOKENS: dict[str, dict[str, object]] = {
+    "local-analyst-token": {
+        "actor_id": "user:local_analyst",
+        "actor_type": "human",
+        "roles": ["analyst"],
+        "attributes": {},
+    },
+    "local-region-analyst-token": {
+        "actor_id": "user:regional_analyst",
+        "actor_type": "human",
+        "roles": ["analyst"],
+        "attributes": {"region": "eu"},
+    },
+    "local-data-steward-token": {
+        "actor_id": "user:local_steward",
+        "actor_type": "human",
+        "roles": ["data_steward"],
+        "attributes": {},
+    },
+    "local-platform-admin-token": {
+        "actor_id": "user:local_admin",
+        "actor_type": "human",
+        "roles": ["platform_admin"],
+        "attributes": {},
+    },
+    "local-ai-token": {
+        "actor_id": "agent:local_ai",
+        "actor_type": "ai",
+        "roles": ["ai_agent"],
+        "attributes": {"ai_allowlisted": False, "allowed_dataset_ids": []},
+    },
+    "local-ai-reader-token": {
+        "actor_id": "agent:local_ai_reader",
+        "actor_type": "ai",
+        "roles": ["ai_agent"],
+        "attributes": {"ai_allowlisted": True, "allowed_dataset_ids": ["dataset-1"]},
+    },
+}
 
 
 def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
@@ -34,6 +77,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
     settings.validate()
     session_factory = get_session_factory(settings.database_url)
     Base.metadata.create_all(bind=get_engine(settings.database_url))
+    auth_tokens = _load_local_auth_tokens()
     app = FastAPI(title="SchemaPilot Gateway", version="0.1.0")
 
     @app.middleware("http")
@@ -89,22 +133,58 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
     async def query(payload: dict[str, object], request: Request) -> dict[str, object]:
         started_at = perf_counter()
         workspace_id = str(payload.get("workspace_id", "unknown"))
-        actor = payload.get("actor", {})
-        actor_dict = actor if isinstance(actor, dict) else {}
-        decision = evaluate_access(actor_dict)
-        policy_decision_id = new_ulid()
-        _record_access_decision(
-            session_factory(),
-            workspace_id=workspace_id,
-            actor_id=str(actor_dict.get("actor_id", "unknown")),
-            result=decision.result,
-            reason=decision.reason,
-            request_context=payload,
-            policy_decision_id=policy_decision_id,
-            event_type="gateway.query",
-            correlation_id=request.state.request_id,
+        request_context = _request_context(payload)
+        actor_dict = _authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
         )
+        policy_decision_id = new_ulid()
+
+        if actor_dict is None:
+            reason = "missing_or_invalid_auth_token"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id="unknown",
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "query"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="sql",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+
+        decision = evaluate_access(actor_dict)
         if decision.result != "allow":
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result=decision.result,
+                reason=decision.reason,
+                request_context=request_context,
+                resources={"endpoint": "query"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
             increment_policy_denial(workspace_id=workspace_id, reason=decision.reason)
             observe_query_latency(
                 workspace_id=workspace_id,
@@ -116,11 +196,26 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "Access denied by policy",
                 details={"reason": decision.reason, "policy_decision_id": policy_decision_id},
             )
+
         resource_attributes = payload.get("resource_attributes", {})
         resource_attrs = resource_attributes if isinstance(resource_attributes, dict) else {}
         abac_mode = str(payload.get("abac_mode", "internal"))
         abac = evaluate_abac(actor=actor_dict, resource_attributes=resource_attrs, mode=abac_mode)
         if not abac.allow:
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=abac.reason,
+                request_context=request_context,
+                resources={"endpoint": "query"},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
             increment_policy_denial(workspace_id=workspace_id, reason=abac.reason)
             observe_query_latency(
                 workspace_id=workspace_id,
@@ -132,6 +227,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "Access denied by ABAC",
                 details={"reason": abac.reason, "policy_decision_id": policy_decision_id},
             )
+
         query_payload = payload.get("query", {})
         query_text = ""
         if isinstance(query_payload, dict):
@@ -142,7 +238,47 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             max_rows_raw = constraints.get("max_rows", 1000)
             if isinstance(max_rows_raw, (int, float, str)):
                 max_rows = int(max_rows_raw)
-        result_set = execute_sql(query_text or "select 1 as one", max_rows=max_rows)
+
+        try:
+            result_set = execute_sql(
+                query_text or "select 1 as one",
+                max_rows=max_rows,
+                row_filter=abac.row_filter,
+            )
+        except Exception as exc:  # pragma: no cover - exercised by API tests
+            reason = "abac_filter_not_enforceable" if abac.row_filter is not None else "query_error"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "query", "query_text": query_text},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="sql",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            if abac.row_filter is not None:
+                raise PolicyDeniedError(
+                    "Access denied by ABAC",
+                    details={
+                        "reason": reason,
+                        "policy_decision_id": policy_decision_id,
+                        "error": str(exc),
+                    },
+                ) from exc
+            raise
+
         increment_cost_bytes_scanned(
             workspace_id=workspace_id,
             engine="sql",
@@ -157,6 +293,30 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 mask_mode = abac.masks.get(column_name)
                 masked_row.append(apply_mask(value, mask_mode) if mask_mode else value)
             masked_rows.append(masked_row)
+
+        datasets_used = []
+        dataset_id = resource_attrs.get("dataset_id")
+        if dataset_id is not None:
+            datasets_used.append(str(dataset_id))
+
+        _record_access_decision(
+            session_factory(),
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+            result="allow",
+            reason="allow",
+            request_context=request_context,
+            resources={
+                "endpoint": "query",
+                "query_text": query_text,
+                "dataset_ids": datasets_used,
+            },
+            applied_filters=_serialize_row_filter(abac.row_filter),
+            applied_masks=abac.masks,
+            policy_decision_id=policy_decision_id,
+            event_type="gateway.query",
+            correlation_id=request.state.request_id,
+        )
         observe_query_latency(
             workspace_id=workspace_id,
             engine="sql",
@@ -171,9 +331,12 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "row_count": len(masked_rows),
             },
             "provenance": {
-                "datasets_used": [],
+                "datasets_used": datasets_used,
                 "policy_decision_id": policy_decision_id,
                 "build_id": new_ulid(),
+                "decision_reason": "allow",
+                "applied_filters": _serialize_row_filter(abac.row_filter),
+                "applied_masks": abac.masks,
             },
             "audit_event_id": new_ulid(),
             "request_id": request.state.request_id,
@@ -183,35 +346,62 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
     async def retrieve(payload: dict[str, object], request: Request) -> dict[str, object]:
         started_at = perf_counter()
         workspace_id = str(payload.get("workspace_id", "unknown"))
-        actor = payload.get("actor", {})
-        actor_dict = actor if isinstance(actor, dict) else {}
+        request_context = _request_context(payload)
+        actor_dict = _authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        policy_decision_id = new_ulid()
+
+        if actor_dict is None:
+            reason = "missing_or_invalid_auth_token"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id="unknown",
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "retrieve"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.retrieve",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="retrieve",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+
         attributes = actor_dict.get("attributes", {})
         attributes_dict = attributes if isinstance(attributes, dict) else {}
         actor_type = str(actor_dict.get("actor_type", "")).lower()
-        allowlisted_ai = actor_type == "ai" and bool(attributes_dict.get("allowlisted", False))
-        decision: AccessDecision
-        if allowlisted_ai:
-            decision = AccessDecision(
-                result="allow",
-                reason="ai_allowlisted",
-                applied_filters=[],
-                applied_masks=[],
-            )
-        else:
-            decision = evaluate_access(actor_dict)
-        policy_decision_id = new_ulid()
-        _record_access_decision(
-            session_factory(),
-            workspace_id=workspace_id,
-            actor_id=str(actor_dict.get("actor_id", "unknown")),
-            result=decision.result,
-            reason=decision.reason,
-            request_context=payload,
-            policy_decision_id=policy_decision_id,
-            event_type="gateway.retrieve",
-            correlation_id=request.state.request_id,
-        )
+        allowlisted_ai = actor_type == "ai" and bool(attributes_dict.get("ai_allowlisted", False))
+        decision: AccessDecision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
         if decision.result != "allow":
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=decision.reason,
+                request_context=request_context,
+                resources={"endpoint": "retrieve"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.retrieve",
+                correlation_id=request.state.request_id,
+            )
             increment_policy_denial(workspace_id=workspace_id, reason=decision.reason)
             observe_query_latency(
                 workspace_id=workspace_id,
@@ -223,23 +413,55 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "Access denied by policy",
                 details={"reason": decision.reason, "policy_decision_id": policy_decision_id},
             )
-        corpus_raw = payload.get("corpus", [])
-        corpus = corpus_raw if isinstance(corpus_raw, list) else []
+
         allowed_dataset_ids_raw = attributes_dict.get("allowed_dataset_ids", [])
         allowed_dataset_ids = (
             {str(item) for item in allowed_dataset_ids_raw}
             if isinstance(allowed_dataset_ids_raw, list)
             else set()
         )
+        if not allowed_dataset_ids:
+            reason = "missing_dataset_entitlements"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "retrieve"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.retrieve",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="retrieve",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+
+        corpus = load_retrieval_corpus(
+            storage_root=settings.storage_root,
+            workspace_id=workspace_id,
+        )
+        query_text = str(payload.get("query_text", ""))
         results = retrieve_documents(
-            query_text=str(payload.get("query_text", "")),
-            corpus=[item for item in corpus if isinstance(item, dict)],
+            query_text=query_text,
+            corpus=corpus,
             allowed_dataset_ids=allowed_dataset_ids,
         )
         increment_cost_bytes_scanned(
             workspace_id=workspace_id,
             engine="retrieve",
-            bytes_scanned=max(len(str(payload.get("query_text", "")).encode("utf-8")), 1),
+            bytes_scanned=max(len(query_text.encode("utf-8")), 1),
         )
         observe_query_latency(
             workspace_id=workspace_id,
@@ -249,18 +471,166 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         )
         citations = [str(item.get("citation", "")) for item in results if item.get("citation")]
         dataset_ids = sorted({str(item.get("dataset_id", "")) for item in results})
+        _record_access_decision(
+            session_factory(),
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+            result="allow",
+            reason="allow",
+            request_context=request_context,
+            resources={
+                "endpoint": "retrieve",
+                "query_text": query_text,
+                "allowed_dataset_ids": sorted(allowed_dataset_ids),
+                "datasets_used": dataset_ids,
+            },
+            applied_filters={},
+            applied_masks={},
+            policy_decision_id=policy_decision_id,
+            event_type="gateway.retrieve",
+            correlation_id=request.state.request_id,
+        )
         return {
             "results": results,
             "provenance": {
                 "policy_decision_id": policy_decision_id,
                 "datasets_used": dataset_ids,
                 "citations": citations,
+                "decision_reason": "allow",
+                "allowed_dataset_ids": sorted(allowed_dataset_ids),
             },
             "audit_event_id": new_ulid(),
             "request_id": request.state.request_id,
         }
 
     return app
+
+
+def _load_local_auth_tokens() -> dict[str, dict[str, object]]:
+    raw = os.getenv("SCHEMAPILOT_LOCAL_AUTH_TOKENS")
+    if raw is None:
+        return deepcopy(DEFAULT_LOCAL_AUTH_TOKENS)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    tokens: dict[str, dict[str, object]] = {}
+    for token, actor in parsed.items():
+        if not isinstance(token, str) or not isinstance(actor, dict):
+            continue
+        roles_raw = actor.get("roles", [])
+        roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+        attributes_raw = actor.get("attributes", {})
+        attributes = attributes_raw if isinstance(attributes_raw, dict) else {}
+        tokens[token] = {
+            "actor_id": str(actor.get("actor_id", "unknown")),
+            "actor_type": str(actor.get("actor_type", "human")),
+            "roles": roles,
+            "attributes": attributes,
+        }
+    _apply_policy_pack_overrides(tokens)
+    return tokens
+
+
+def _apply_policy_pack_overrides(tokens: dict[str, dict[str, object]]) -> None:
+    raw = os.getenv("SCHEMAPILOT_LOCAL_AUTH_PACKS")
+    if raw is None:
+        return
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(parsed, dict):
+        return
+    for token, pack_id in parsed.items():
+        if not isinstance(token, str) or not isinstance(pack_id, str):
+            continue
+        template = find_policy_pack_template(pack_id)
+        if template is None:
+            continue
+        current = tokens.get(token, {"actor_id": f"user:{token}"})
+        roles_raw = template.get("roles", [])
+        roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+        attributes_raw = template.get("attributes", {})
+        attributes = attributes_raw if isinstance(attributes_raw, dict) else {}
+        current["actor_type"] = str(template.get("actor_type", current.get("actor_type", "human")))
+        current["roles"] = roles
+        current["attributes"] = attributes
+        tokens[token] = current
+
+
+def _authenticated_actor_from_request(
+    request: Request,
+    *,
+    settings: Settings,
+    auth_tokens: dict[str, dict[str, object]],
+) -> dict[str, object] | None:
+    auth_mode = settings.auth_mode.lower()
+    if auth_mode == "oidc":
+        return _authenticated_actor_from_oidc_claims(request, settings=settings)
+    authorization = request.headers.get("authorization", "").strip()
+    if not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    actor = auth_tokens.get(token)
+    if actor is None:
+        return None
+    return deepcopy(actor)
+
+
+def _authenticated_actor_from_oidc_claims(
+    request: Request, *, settings: Settings
+) -> dict[str, object] | None:
+    claims_header = request.headers.get(settings.oidc_claims_header, "")
+    if not claims_header:
+        return None
+    try:
+        claims = json.loads(claims_header)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    if settings.oidc_required_issuer:
+        issuer = str(claims.get("iss", ""))
+        if issuer != settings.oidc_required_issuer:
+            return None
+    if settings.oidc_required_audience:
+        audience_claim = claims.get("aud")
+        allowed = False
+        if isinstance(audience_claim, str):
+            allowed = audience_claim == settings.oidc_required_audience
+        elif isinstance(audience_claim, list):
+            allowed = settings.oidc_required_audience in {str(item) for item in audience_claim}
+        if not allowed:
+            return None
+    actor_id = str(claims.get(settings.oidc_actor_id_claim, "")).strip()
+    if not actor_id:
+        return None
+    roles_raw = claims.get(settings.oidc_roles_claim, [])
+    roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+    if not roles:
+        role_text = str(roles_raw) if roles_raw else ""
+        roles = [role_text] if role_text else []
+    attributes_raw = claims.get(settings.oidc_attributes_claim, {})
+    attributes = attributes_raw if isinstance(attributes_raw, dict) else {}
+    return {
+        "actor_id": actor_id,
+        "actor_type": str(claims.get("actor_type", "human")),
+        "roles": roles,
+        "attributes": attributes,
+    }
+
+
+def _request_context(payload: dict[str, object]) -> dict[str, object]:
+    return {k: v for k, v in payload.items() if k not in {"actor", "corpus"}}
+
+
+def _serialize_row_filter(row_filter: tuple[str, str] | None) -> dict[str, object]:
+    if row_filter is None:
+        return {}
+    return {"row_filter": {"column": row_filter[0], "value": row_filter[1]}}
 
 
 def _record_access_decision(
@@ -271,6 +641,9 @@ def _record_access_decision(
     result: str,
     reason: str,
     request_context: dict[str, object],
+    resources: dict[str, object],
+    applied_filters: Mapping[str, object],
+    applied_masks: Mapping[str, object],
     policy_decision_id: str,
     event_type: str,
     correlation_id: str,
@@ -290,10 +663,10 @@ def _record_access_decision(
         workspace_id=workspace_id,
         actor_id=actor_id,
         request_context_json=request_context,
-        resources_json={},
+        resources_json=resources,
         result=result,
-        applied_filters_json={},
-        applied_masks_json={},
+        applied_filters_json=dict(applied_filters),
+        applied_masks_json=dict(applied_masks),
         audit_event_id=event.audit_event_id,
     )
     session.add(decision)

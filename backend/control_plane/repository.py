@@ -5,8 +5,9 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.control_plane.db_models import CatalogSource, RunRecord, Workspace
+from backend.control_plane.db_models import CatalogDataset, CatalogSource, RunRecord, Workspace
 from backend.shared_domain.audit_models import AuditEvent
+from backend.shared_domain.errors import NotFoundError
 from backend.shared_domain.ids import new_ulid, new_uuid
 
 
@@ -62,6 +63,12 @@ def create_source(
     scope: dict[str, object],
     display_name: str,
 ) -> dict[str, object]:
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise NotFoundError(
+            "Workspace not found.",
+            details={"workspace_id": workspace_id},
+        )
     source = CatalogSource(
         source_id=new_uuid(),
         workspace_id=workspace_id,
@@ -128,7 +135,48 @@ def update_source(
     }
 
 
+def list_datasets(session: Session, workspace_id: str) -> list[dict[str, object]]:
+    rows = session.execute(
+        select(CatalogDataset).where(CatalogDataset.workspace_id == workspace_id)
+    ).scalars()
+    return [
+        {
+            "dataset_id": row.dataset_id,
+            "workspace_id": row.workspace_id,
+            "source_id": row.source_id,
+            "logical_name": row.logical_name,
+            "physical_locator": row.physical_locator,
+            "schema_version": row.schema_version,
+            "sensitivity_summary": row.sensitivity_summary_json,
+        }
+        for row in rows
+    ]
+
+
+def get_dataset(
+    session: Session, *, workspace_id: str, dataset_id: str
+) -> dict[str, object] | None:
+    row = session.get(CatalogDataset, dataset_id)
+    if row is None or row.workspace_id != workspace_id:
+        return None
+    return {
+        "dataset_id": row.dataset_id,
+        "workspace_id": row.workspace_id,
+        "source_id": row.source_id,
+        "logical_name": row.logical_name,
+        "physical_locator": row.physical_locator,
+        "schema_version": row.schema_version,
+        "sensitivity_summary": row.sensitivity_summary_json,
+    }
+
+
 def create_run(session: Session, *, workspace_id: str, run_type: str) -> dict[str, object]:
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise NotFoundError(
+            "Workspace not found.",
+            details={"workspace_id": workspace_id},
+        )
     run = RunRecord(
         run_id=new_ulid(),
         workspace_id=workspace_id,

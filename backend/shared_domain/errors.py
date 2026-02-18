@@ -37,6 +37,12 @@ class PolicyDeniedError(SchemaPilotError):
     error_code = "POLICY_DENIED"
 
 
+class NotFoundError(SchemaPilotError):
+    """Raised when a requested resource does not exist."""
+
+    error_code = "NOT_FOUND"
+
+
 class DisabledIntegrationError(SchemaPilotError):
     """Raised when an optional integration is disabled."""
 

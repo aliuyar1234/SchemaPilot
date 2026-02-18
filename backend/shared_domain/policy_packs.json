@@ -1,0 +1,48 @@
+[
+  {
+    "id": "starter_local_team",
+    "name": "Starter Local Team",
+    "description": "Small local team baseline with analyst and steward roles.",
+    "template_actor": {
+      "actor_type": "human",
+      "roles": [
+        "analyst"
+      ],
+      "attributes": {
+        "region": "eu"
+      }
+    }
+  },
+  {
+    "id": "enterprise_finance_strict",
+    "name": "Enterprise Finance Strict",
+    "description": "Finance-oriented strict baseline with steward/admin separation.",
+    "template_actor": {
+      "actor_type": "human",
+      "roles": [
+        "data_steward"
+      ],
+      "attributes": {
+        "region": "eu",
+        "department": "finance"
+      }
+    }
+  },
+  {
+    "id": "enterprise_ai_assistant",
+    "name": "Enterprise AI Assistant",
+    "description": "Allowlisted AI assistant profile with bounded retrieval entitlements.",
+    "template_actor": {
+      "actor_type": "ai",
+      "roles": [
+        "ai_agent"
+      ],
+      "attributes": {
+        "ai_allowlisted": true,
+        "allowed_dataset_ids": [
+          "dataset-1"
+        ]
+      }
+    }
+  }
+]

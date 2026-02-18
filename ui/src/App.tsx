@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type HealthState = "loading" | "ok" | "error";
 
@@ -19,6 +19,13 @@ type ReviewTask = {
   proposal_type: string | null;
 };
 
+type ReviewSummary = {
+  total_tasks: number;
+  blocking_open_tasks: number;
+  by_status: Record<string, number>;
+  by_priority: Record<string, number>;
+};
+
 type Recommendation = {
   report_id: string;
   confidence: number;
@@ -28,11 +35,28 @@ type Recommendation = {
   ranked_templates: { template_id: string; score: number }[];
 };
 
+type PolicyPackSummary = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+type DemoBootstrapResponse = {
+  workspace: Workspace;
+  demo_data_path: string;
+  first_query_example: {
+    endpoint: string;
+    authorization: string;
+    payload: Record<string, unknown>;
+  };
+  next_steps: string[];
+};
+
 const WIZARD_STEPS = [
-  "Connect sources",
-  "Set profiling budget",
-  "Choose security baseline",
-  "Review recommendations"
+  "Create demo workspace",
+  "Connect real sources",
+  "Review security-critical tasks",
+  "Run first governed query"
 ];
 
 export function App(): JSX.Element {
@@ -41,49 +65,18 @@ export function App(): JSX.Element {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [newWorkspaceName, setNewWorkspaceName] = useState<string>("");
   const [reviewTasks, setReviewTasks] = useState<ReviewTask[]>([]);
+  const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
   const [decisionReason, setDecisionReason] = useState<string>("");
   const [recommendation, setRecommendation] = useState<Recommendation | null>(null);
+  const [policyPacks, setPolicyPacks] = useState<PolicyPackSummary[]>([]);
+  const [demoBootstrap, setDemoBootstrap] = useState<DemoBootstrapResponse | null>(null);
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.workspace_id === selectedWorkspaceId),
     [selectedWorkspaceId, workspaces]
   );
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        const healthResponse = await fetch("/api/v1/health");
-        setHealth(healthResponse.ok ? "ok" : "error");
-        await refreshWorkspaces();
-      } catch {
-        setHealth("error");
-      }
-    };
-    void bootstrap();
-  }, []);
-
-  useEffect(() => {
-    if (!selectedWorkspaceId) {
-      setReviewTasks([]);
-      return;
-    }
-    const loadReviewTasks = async () => {
-      try {
-        const response = await fetch(`/api/v1/workspaces/${selectedWorkspaceId}/review_tasks`);
-        if (!response.ok) {
-          setReviewTasks([]);
-          return;
-        }
-        const data: ReviewTask[] = await response.json();
-        setReviewTasks(data);
-      } catch {
-        setReviewTasks([]);
-      }
-    };
-    void loadReviewTasks();
-  }, [selectedWorkspaceId]);
-
-  const refreshWorkspaces = async () => {
+  const refreshWorkspaces = useCallback(async () => {
     const response = await fetch("/api/v1/workspaces");
     if (!response.ok) {
       setWorkspaces([]);
@@ -94,7 +87,73 @@ export function App(): JSX.Element {
     if (!selectedWorkspaceId && data.length > 0) {
       setSelectedWorkspaceId(data[0].workspace_id);
     }
-  };
+  }, [selectedWorkspaceId]);
+
+  const refreshPolicyPacks = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/policy-packs");
+      if (!response.ok) {
+        setPolicyPacks([]);
+        return;
+      }
+      const data: PolicyPackSummary[] = await response.json();
+      setPolicyPacks(data);
+    } catch {
+      setPolicyPacks([]);
+    }
+  }, []);
+
+  const loadReviewTasks = useCallback(async (workspaceId: string) => {
+    try {
+      const response = await fetch(`/api/v1/workspaces/${workspaceId}/review_tasks`);
+      if (!response.ok) {
+        setReviewTasks([]);
+        return;
+      }
+      const data: ReviewTask[] = await response.json();
+      setReviewTasks(data);
+    } catch {
+      setReviewTasks([]);
+    }
+  }, []);
+
+  const loadReviewSummary = useCallback(async (workspaceId: string) => {
+    try {
+      const response = await fetch(`/api/v1/workspaces/${workspaceId}/review_tasks/summary`);
+      if (!response.ok) {
+        setReviewSummary(null);
+        return;
+      }
+      const data: ReviewSummary = await response.json();
+      setReviewSummary(data);
+    } catch {
+      setReviewSummary(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      try {
+        const healthResponse = await fetch("/api/v1/health");
+        setHealth(healthResponse.ok ? "ok" : "error");
+        await refreshWorkspaces();
+        await refreshPolicyPacks();
+      } catch {
+        setHealth("error");
+      }
+    };
+    void bootstrap();
+  }, [refreshPolicyPacks, refreshWorkspaces]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId) {
+      setReviewTasks([]);
+      setReviewSummary(null);
+      return;
+    }
+    void loadReviewTasks(selectedWorkspaceId);
+    void loadReviewSummary(selectedWorkspaceId);
+  }, [loadReviewSummary, loadReviewTasks, selectedWorkspaceId]);
 
   const createWorkspace = async (event: FormEvent) => {
     event.preventDefault();
@@ -119,6 +178,21 @@ export function App(): JSX.Element {
     setNewWorkspaceName("");
   };
 
+  const createDemoWorkspace = async () => {
+    const response = await fetch("/api/v1/onboarding/demo_bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_name: "Demo Workspace" })
+    });
+    if (!response.ok) {
+      return;
+    }
+    const data: DemoBootstrapResponse = await response.json();
+    setDemoBootstrap(data);
+    await refreshWorkspaces();
+    setSelectedWorkspaceId(data.workspace.workspace_id);
+  };
+
   const decideTask = async (taskId: string, decision: "approve" | "reject" | "defer") => {
     if (!selectedWorkspaceId) {
       return;
@@ -132,11 +206,8 @@ export function App(): JSX.Element {
         decision_reason: decisionReason
       })
     });
-    const response = await fetch(`/api/v1/workspaces/${selectedWorkspaceId}/review_tasks`);
-    if (response.ok) {
-      const data: ReviewTask[] = await response.json();
-      setReviewTasks(data);
-    }
+    await loadReviewTasks(selectedWorkspaceId);
+    await loadReviewSummary(selectedWorkspaceId);
   };
 
   const generateRecommendation = async () => {
@@ -166,6 +237,27 @@ export function App(): JSX.Element {
     <main style={{ margin: "2rem auto", maxWidth: "960px", fontFamily: "sans-serif" }}>
       <h1>SchemaPilot</h1>
       <p>API health: {health}</p>
+
+      <section>
+        <h2>Demo Onboarding</h2>
+        <button type="button" onClick={createDemoWorkspace}>
+          Create Demo Workspace
+        </button>
+        {demoBootstrap ? (
+          <div>
+            <div>Demo data path: {demoBootstrap.demo_data_path}</div>
+            <div>Gateway auth: {demoBootstrap.first_query_example.authorization}</div>
+            <div>Next steps:</div>
+            <ol>
+              {demoBootstrap.next_steps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
+        ) : (
+          <p>No demo workspace bootstrapped yet.</p>
+        )}
+      </section>
 
       <section>
         <h2>Workspace</h2>
@@ -198,6 +290,21 @@ export function App(): JSX.Element {
       </section>
 
       <section>
+        <h2>Policy Packs</h2>
+        {policyPacks.length > 0 ? (
+          <ul>
+            {policyPacks.map((pack) => (
+              <li key={pack.id}>
+                <strong>{pack.name}</strong> ({pack.id}) - {pack.description}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No policy packs discovered.</p>
+        )}
+      </section>
+
+      <section>
         <h2>Wizard Stepper</h2>
         <ol>
           {WIZARD_STEPS.map((step) => (
@@ -208,6 +315,13 @@ export function App(): JSX.Element {
 
       <section>
         <h2>Review Queue</h2>
+        {reviewSummary ? (
+          <p>
+            Total: {reviewSummary.total_tasks}, Blocking open: {reviewSummary.blocking_open_tasks}
+          </p>
+        ) : (
+          <p>Review summary unavailable.</p>
+        )}
         <input
           placeholder="Decision reason (for reject/defer)"
           value={decisionReason}

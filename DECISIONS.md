@@ -25,6 +25,8 @@
 - D-0022 Packaging baseline (compose progressive profiles + optional k8s skeleton)
 - D-0023 Release readiness baseline (`schemapilot check` includes governance/perf/backup/rotation drills)
 - D-0024 Enterprise-like release simulation baseline (clean-room install + project-scoped dependency audit + automated release gate)
+- D-0025 Security and determinism hardening baseline (authenticated gateway context, enforced ABAC filtering, server-side retrieval corpus, and fail-closed ingest/build checks)
+- D-0026 Adoption roadmap hardening baseline (demo-first onboarding, operator docs depth, and enterprise extension guidance)
 
 ---
 
@@ -930,6 +932,108 @@ Add an enterprise-like validation layer that is deterministic in local and CI co
 - Critical flow impacted: YES (security, non-bypass, deletion, backup/restore, release acceptance)  
 - Unsafe/high-risk: YES  
 - Conservative baseline available: YES (fail-closed enterprise simulation with no compliance claims)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0025 Security and determinism hardening baseline (authenticated gateway context, enforced ABAC filtering, server-side retrieval corpus, and fail-closed ingest/build checks)
+
+**Decision**  
+Harden critical runtime paths with fail-closed defaults:
+- Gateway policy decisions use authenticated token context instead of request-body actor claims.
+- ABAC row filters are enforced during query execution and retrieval entitlements are resolved from authenticated actor attributes.
+- Retrieval corpus is loaded server-side from metadata-bound document artifacts; request-body corpus payloads are ignored.
+- Connector/build determinism checks fail-closed for truncated S3 discovery, non-deterministic DB snapshots, and missing silver natural keys.
+- Control-plane `NOT_FOUND` responses are normalized to the shared error contract.
+
+**Rationale**  
+Closes privilege-escalation and silent-data-loss risks while preserving deterministic, auditable behavior in critical flows.
+
+**Alternatives considered**  
+- Keep actor context in request payload (rejected: self-asserted privilege escalation risk).  
+- Keep client-supplied retrieval corpus (rejected: untrusted retrieval surface).  
+- Keep permissive S3/silver fallback behavior (rejected: silent partial results and ID collapse risk).
+
+**Implications**  
+- Gateway callers must provide valid bearer tokens representing actor identity and entitlements.
+- Retrieval results are now bounded to server-side corpus and server-side dataset entitlements.
+- Determinism/fail-closed behavior is stricter in connector and silver build flows.
+
+**Affected files**  
+- evidence: backend/gateway/app.py :: missing_or_invalid_auth_token
+- evidence: backend/gateway/executor.py :: row_filter
+- evidence: backend/shared_domain/retrieval.py :: load_retrieval_corpus
+- evidence: backend/workers/connectors/s3.py :: fail-closed to avoid silent partial discovery.
+- evidence: backend/workers/connectors/database.py :: order_by
+- evidence: backend/workers/silver.py :: Missing natural key component
+- evidence: backend/control_plane/app.py :: code="NOT_FOUND"
+
+**Verification impact**  
+- evidence: tests/test_gateway_policy.py :: test_gateway_requires_authenticated_token_context
+- evidence: tests/test_gateway_policy.py :: test_gateway_enforces_abac_row_filter_and_masking
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_for_allowlisted_ai_identity
+- evidence: tests/test_database_connector.py :: rows_again = extract_snapshot
+- evidence: tests/test_s3_connector.py :: test_s3_connector_fails_closed_when_listing_truncated
+- evidence: tests/test_silver_build.py :: test_silver_build_fails_when_natural_key_component_missing
+- evidence: tests/test_control_plane_api.py :: test_control_plane_not_found_responses_follow_error_contract
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (deny/stop on missing auth, missing entitlements, and ambiguous data states)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0026 Adoption roadmap hardening baseline (demo-first onboarding, operator docs depth, and enterprise extension guidance)
+
+**Decision**  
+Expand product adoption surfaces with implementation-backed, fail-closed guidance:
+- Keep onboarding demo-first via API/CLI/UI flow with explicit first-query guidance.
+- Expand operator runbook troubleshooting for connector partial-ingest and manifest drift handling.
+- Document OIDC claim mapping configuration and policy-pack template authoring.
+- Publish plugin SDK packaging and entrypoint registration guidance for connectors/checks.
+- Track weekly KPIs using a deterministic JSON artifact workflow.
+
+**Rationale**  
+Broader adoption requires low-friction onboarding, clearer operator recovery playbooks, and explicit extension guidance without weakening security defaults.
+
+**Alternatives considered**  
+- Keep onboarding and extension docs minimal (rejected: slows adoption and increases misconfiguration risk).  
+- Track KPIs manually in ad-hoc documents (rejected: weak reproducibility and trend visibility).
+
+**Implications**  
+- Operators have explicit, testable commands for onboarding, KPI tracking, and drift recovery.
+- Enterprise deployments can map IdP claims without code changes.
+- Plugin contributors can publish extensions using a stable packaging pattern.
+
+**Affected files**  
+- evidence: cli/schemapilot_cli/main.py :: onboard_demo
+- evidence: ui/src/App.tsx :: Create Demo Workspace
+- evidence: backend/control_plane/app.py :: /api/v1/onboarding/demo_bootstrap
+- evidence: deploy/README.md :: Policy pack authoring
+- evidence: docs/PLUGIN_SDK.md :: Entry point registration
+- evidence: spec/12_RUNBOOK.md :: Symptom: CHK-MANIFEST-VERIFY fails
+- evidence: tools/kpi_tracker.py :: PASS KPI report generated
+
+**Verification impact**  
+- evidence: tests/test_cli_commands.py :: test_onboard_demo_command_calls_bootstrap_endpoint
+- evidence: tests/test_cli_commands.py :: test_status_command_reads_tasks_and_summary
+- evidence: tests/test_cli_commands.py :: test_kpi_report_invokes_tracker_script
+- evidence: ui/src/App.test.tsx :: bootstraps demo workspace and renders onboarding details
+- evidence: tests/test_control_plane_api.py :: test_demo_bootstrap_creates_workspace_and_review_task
+- evidence: tests/test_policy_packs.py :: test_policy_pack_template_lookup
+- evidence: tests/test_kpi_tracker.py :: test_kpi_tracker_writes_weekly_and_latest_reports
+- evidence: tests/test_s3_connector.py :: test_s3_connector_fails_closed_when_max_keys_reached_without_truncation_metadata
+
+**DSC summary**  
+- Externally constrained: YES (enterprise IdP claim conventions vary by org)  
+- Critical flow impacted: YES (auth, policy enforcement, release/operator recovery)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny-by-default auth/policy behavior and documented fail-closed recovery paths)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

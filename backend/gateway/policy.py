@@ -15,10 +15,17 @@ class AccessDecision:
     applied_masks: list[str]
 
 
-def evaluate_access(actor: dict[str, object]) -> AccessDecision:
+def evaluate_access(actor: dict[str, object], *, allow_ai: bool = False) -> AccessDecision:
     """Evaluate actor access using conservative default policy."""
     actor_type = str(actor.get("actor_type", "")).lower()
     if actor_type == "ai":
+        if allow_ai:
+            return AccessDecision(
+                result="allow",
+                reason="ai_allowlisted",
+                applied_filters=[],
+                applied_masks=[],
+            )
         return AccessDecision(
             result="deny",
             reason="ai_tool_deny_by_default",

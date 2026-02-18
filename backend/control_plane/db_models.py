@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.shared_domain.audit_models import AccessDecision, AuditEvent
@@ -31,7 +30,7 @@ class CatalogSource(Base):
         String(36), ForeignKey("workspaces.workspace_id"), index=True, nullable=False
     )
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
-    scope_json: Mapped[dict[str, object]] = mapped_column(SQLiteJSON, nullable=False)
+    scope_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
     credentials_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -48,7 +47,7 @@ class CatalogDataset(Base):
     logical_name: Mapped[str] = mapped_column(Text, nullable=False)
     physical_locator: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    sensitivity_summary_json: Mapped[dict[str, object]] = mapped_column(SQLiteJSON, nullable=False)
+    sensitivity_summary_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
 
 
 class RunRecord(Base):
@@ -57,14 +56,14 @@ class RunRecord(Base):
     __tablename__ = "runs_runs"
 
     run_id: Mapped[str] = mapped_column(String(26), primary_key=True)
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.workspace_id"), index=True, nullable=False
+    )
     run_type: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
-    input_refs_json: Mapped[dict[str, object]] = mapped_column(
-        SQLiteJSON, nullable=False, default=dict
-    )
+    input_refs_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
     output_refs_json: Mapped[dict[str, object]] = mapped_column(
-        SQLiteJSON, nullable=False, default=dict
+        JSON, nullable=False, default=dict
     )
 
 

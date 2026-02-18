@@ -40,7 +40,10 @@ def extract_snapshot(
     """Extract a bounded read-only snapshot from a table."""
     metadata = MetaData()
     table = Table(table_name, metadata, autoload_with=engine, schema=schema)
-    query = select(table).limit(row_limit)
+    order_columns = list(table.primary_key.columns)
+    if not order_columns:
+        order_columns = [table.c[name] for name in sorted(table.c.keys())]
+    query = select(table).order_by(*order_columns).limit(row_limit)
     with engine.connect() as connection:
         rows = connection.execute(query).mappings().all()
     return [dict(row) for row in rows]

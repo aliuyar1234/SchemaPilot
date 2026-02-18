@@ -64,6 +64,8 @@ def parse_ts_import_targets(path: Path) -> list[str]:
 
 def check_python(repo_root: Path, rules: dict, state: CheckState) -> None:
     module_roots: dict[str, str] = rules["python_module_roots"]
+    managed_prefixes: list[str] = list(rules.get("managed_python_prefixes", []))
+    unmanaged_allowlist: set[str] = set(rules.get("unmanaged_python_path_allowlist", []))
     allowed_imports: dict[str, list[str]] = rules["allowed_module_imports"]
     engine_import_roots: set[str] = set(rules["engine_client_import_roots"])
     modules: set[str] = set(rules["modules"])
@@ -77,8 +79,16 @@ def check_python(repo_root: Path, rules: dict, state: CheckState) -> None:
         if ".venv" not in p.parts and "__pycache__" not in p.parts
     )
     for py_file in py_files:
+        rel = py_file.relative_to(repo_root).as_posix()
         owner = module_owner(py_file, module_roots, repo_root)
         if owner is None:
+            is_managed_path = any(
+                rel == prefix.replace("\\", "/")
+                or rel.startswith(prefix.replace("\\", "/") + "/")
+                for prefix in managed_prefixes
+            )
+            if is_managed_path and rel not in unmanaged_allowlist:
+                state.violations.append(f"Unregistered module root: {rel}")
             continue
         for raw_target in parse_python_import_targets(py_file):
             target = normalize_import_target(raw_target)
@@ -87,12 +97,10 @@ def check_python(repo_root: Path, rules: dict, state: CheckState) -> None:
                 if owner == target:
                     continue
                 if target not in allowed_imports.get(owner, []):
-                    rel = py_file.relative_to(repo_root).as_posix()
                     state.violations.append(f"Forbidden import: {owner} -> {target} in {rel}")
             if owner != "gateway":
                 target_root = normalize_import_target(raw_target)
                 if target_root in engine_import_roots:
-                    rel = py_file.relative_to(repo_root).as_posix()
                     state.violations.append(
                         f"Engine client import outside gateway: {raw_target} in {rel}"
                     )

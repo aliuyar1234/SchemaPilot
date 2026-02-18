@@ -136,3 +136,27 @@ def unresolved_blocking_task_count(session: Session, workspace_id: str) -> int:
         )
     ).scalars()
     return len(list(rows))
+
+
+def get_review_queue_summary(session: Session, workspace_id: str) -> dict[str, object]:
+    """Aggregate review queue counters for UI/operator visibility."""
+    rows = session.execute(
+        select(ReviewTask).where(ReviewTask.workspace_id == workspace_id)
+    ).scalars()
+    by_status: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    total = 0
+    blocking_open = 0
+    for row in rows:
+        total += 1
+        by_status[row.status] = by_status.get(row.status, 0) + 1
+        by_priority[row.priority] = by_priority.get(row.priority, 0) + 1
+        if row.blocking and row.status in {"open", "in_review"}:
+            blocking_open += 1
+    return {
+        "workspace_id": workspace_id,
+        "total_tasks": total,
+        "blocking_open_tasks": blocking_open,
+        "by_status": by_status,
+        "by_priority": by_priority,
+    }

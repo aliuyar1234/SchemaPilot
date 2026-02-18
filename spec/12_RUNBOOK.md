@@ -4,6 +4,31 @@
 
 Goal: run SchemaPilot locally in progressive profiles with safe defaults.
 
+## Demo Path: Local Folders to First Governed Query
+
+1) Bootstrap demo workspace + source + review seed:
+```bash
+python -m cli.schemapilot_cli.main onboard-demo --workspace-name "Demo Workspace"
+```
+
+2) Inspect queue status:
+```bash
+python -m cli.schemapilot_cli.main status --workspace <workspace_id>
+```
+
+3) Run first governed query:
+```bash
+curl -s http://127.0.0.1:8001/api/v1/gateway/query \
+  -H "Authorization: Bearer local-analyst-token" \
+  -H "Content-Type: application/json" \
+  -d "{\"workspace_id\":\"<workspace_id>\",\"query\":{\"text\":\"select 1 as one\"},\"resource_attributes\":{\"dataset_id\":\"dataset-1\"}}"
+```
+
+Expected:
+- response includes `policy_decision_id`,
+- provenance contains `applied_filters` and `applied_masks`,
+- access decision is recorded in append-only audit tables.
+
 ### Prerequisites
 - Docker + Docker Compose
 - A local directory for data (or a local MinIO container)
@@ -69,6 +94,20 @@ Procedure:
 2) Confirm deny-by-default policy.
 3) Validate gateway non-bypass network isolation.
 4) Run security denial tests before allowing external traffic.
+
+OIDC-first enterprise integration:
+- `SCHEMAPILOT_AUTH_MODE=oidc`
+- `SCHEMAPILOT_OIDC_CLAIMS_HEADER=x-schemapilot-oidc-claims`
+- `SCHEMAPILOT_OIDC_REQUIRED_ISSUER=<issuer>`
+- `SCHEMAPILOT_OIDC_REQUIRED_AUDIENCE=<audience>`
+- `SCHEMAPILOT_OIDC_ACTOR_ID_CLAIM=sub`
+- `SCHEMAPILOT_OIDC_ROLES_CLAIM=roles`
+- `SCHEMAPILOT_OIDC_ATTRIBUTES_CLAIM=attributes`
+
+Fail-closed auth behavior:
+- missing trusted claims header -> deny
+- issuer/audience mismatch -> deny
+- missing roles -> deny by default policy
 
 ## CI and Test Commands
 
@@ -152,6 +191,7 @@ evidence: spec/11_QUALITY_GATES.md :: G-OPS-0002 Backup Restore Drills
 - Execute deletion request (intake -> preview -> approvals -> execute -> evidence report)
 - Rotate secrets (update secret store -> reload -> validate no leaks)
 - Compact small files (if Iceberg; per ops procedure)
+- Track weekly KPI scorecard (TTFSA, install success, security regressions, determinism, community responsiveness)
 
 Secrets rotation drill command:
 ```bash
@@ -171,6 +211,22 @@ python tools/perf_harness.py
 Expected:
 - outputs include `PASS MessyBench harness` and `PASS CHK-PERF-HARNESS`
 - machine-readable results are written to `runtime/messybench/results.json` and `runtime/perf/results.json`
+
+Weekly KPI report command:
+```bash
+python tools/kpi_tracker.py \
+  --week 2026-W08 \
+  --ttfsa-minutes 24 \
+  --install-success-rate 0.92 \
+  --security-regressions 0 \
+  --deterministic-pass-rate 1.0 \
+  --active-contributors 5 \
+  --issue-response-hours 12
+```
+
+Expected:
+- output includes `PASS KPI report generated: runtime/kpi/weekly/<week>.json`
+- `runtime/kpi/latest.json` is updated
 
 Deletion workflow reference:
 evidence: spec/05_DATASTORE_AND_MIGRATIONS.md :: Retention and Deletion Mechanics
@@ -192,12 +248,40 @@ Check:
 - policy decision logs and access decisions
 - actor roles/attributes
 - masking rules applied
+- OIDC claim mapping (`iss`, `aud`, role claim, attributes claim) when `SCHEMAPILOT_AUTH_MODE=oidc`
 
 Reference:
 evidence: spec/05_DATASTORE_AND_MIGRATIONS.md :: audit.access_decisions (append-only)
+
+### Symptom: demo onboarding fails
+Check:
+- `/api/v1/onboarding/demo_bootstrap` API response for workspace/source/run IDs
+- demo files exist under `runtime/demo_data`
+- audit event `onboarding.demo_bootstrap` is present
+
+### Symptom: retrieval returns empty results unexpectedly
+Check:
+- actor `allowed_dataset_ids` entitlements
+- server-side corpus files under `runtime/storage/documents/<workspace_id>`
+- query text and dataset filters
 
 ### Symptom: missing observability signals
 Check:
 - `/api/v1/metrics` on control plane and gateway
 - dashboard definition at `deploy/dashboards/schemapilot_overview.json`
 - structured logs include `correlation_id`, `service`, and `event_type`
+
+### Symptom: connector discovery or ingest appears partial
+Check:
+- filesystem scope includes explicit `root_path` and non-empty `include_globs`
+- S3 listings are not truncated and include pagination metadata
+- ingest manifest entries are created per discovered object
+- connector logs for fail-closed errors before retrying discovery
+
+### Symptom: CHK-MANIFEST-VERIFY fails
+Check:
+- regenerate `MANIFEST.sha256` after all edits:
+  - `python tools/generate_manifest.py`
+- re-run verification:
+  - `python tools/verify_manifest.py`
+- ensure no new untracked files were added unintentionally

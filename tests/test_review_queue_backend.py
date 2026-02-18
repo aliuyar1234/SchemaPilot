@@ -39,6 +39,9 @@ def test_review_queue_create_list_decide() -> None:
 
     listed = client.get(f"/api/v1/workspaces/{workspace_id}/review_tasks").json()
     assert any(task["task_id"] == task_id for task in listed)
+    summary = client.get(f"/api/v1/workspaces/{workspace_id}/review_tasks/summary").json()
+    assert summary["total_tasks"] == 1
+    assert summary["blocking_open_tasks"] == 1
 
     decision_response = client.post(
         f"/api/v1/workspaces/{workspace_id}/review_tasks/{task_id}/decision",
@@ -46,3 +49,5 @@ def test_review_queue_create_list_decide() -> None:
     )
     assert decision_response.status_code == 200
     assert decision_response.json()["decision"] == "approve"
+    summary_after = client.get(f"/api/v1/workspaces/{workspace_id}/review_tasks/summary").json()
+    assert summary_after["blocking_open_tasks"] == 0

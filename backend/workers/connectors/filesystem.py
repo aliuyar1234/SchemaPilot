@@ -27,6 +27,10 @@ def discover_files(
 ) -> list[DiscoveredFile]:
     """Discover files under root path in read-only mode."""
     root = Path(root_path)
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Filesystem root does not exist or is not a directory: {root_path}")
+    if not include_globs:
+        raise ValueError("include_globs must not be empty.")
     excluded = exclude_globs or []
     discovered: list[DiscoveredFile] = []
     for file_path in sorted(path for path in root.rglob("*") if path.is_file()):

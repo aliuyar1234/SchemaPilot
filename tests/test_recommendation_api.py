@@ -33,3 +33,45 @@ def test_recommendation_endpoint_returns_report_fields() -> None:
     assert "ranked_templates" in body
     assert "hard_constraint_gates" in body
     assert "confidence" in body
+
+
+def test_recommendation_endpoint_surfaces_missing_evidence_and_approval() -> None:
+    client = TestClient(create_app(settings_factory=_settings))
+    workspace = client.post(
+        "/api/v1/workspaces",
+        json={"name": "rec-2", "profile": "starter", "security_baseline": "standard"},
+    ).json()
+    workspace_id = workspace["workspace_id"]
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/recommendations",
+        json={
+            "intent": {
+                "strict_security": True,
+                "needs_documents": True,
+                "confidence_signal": 0.2,
+                "evidence_completeness": 0.2,
+            }
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["approval_required"] is True
+    assert "confidence_below_threshold" in body["approval_reasons"]
+    assert "query_workload_evidence" in body["missing_evidence"]
+    assert "deployment_constraints_confirmation" in body["missing_evidence"]
+
+
+def test_recommendation_get_not_found_uses_error_contract() -> None:
+    client = TestClient(create_app(settings_factory=_settings))
+    workspace = client.post(
+        "/api/v1/workspaces",
+        json={"name": "rec-3", "profile": "starter", "security_baseline": "standard"},
+    ).json()
+    workspace_id = workspace["workspace_id"]
+    response = client.get(
+        f"/api/v1/workspaces/{workspace_id}/recommendations/missing-report",
+    )
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "NOT_FOUND"
+    assert body["error"]["details"]["report_id"] == "missing-report"

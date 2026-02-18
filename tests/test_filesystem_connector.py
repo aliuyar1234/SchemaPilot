@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backend.workers.connectors.filesystem import discover_files
 
 
@@ -21,3 +23,16 @@ def test_filesystem_connector_discovers_by_scope(tmp_path: Path) -> None:
     )
     assert len(results) == 1
     assert results[0].dataset_family == "orders"
+
+
+def test_filesystem_connector_fails_when_root_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(ValueError, match="does not exist"):
+        discover_files(root_path=missing.as_posix(), include_globs=["**/*.csv"])
+
+
+def test_filesystem_connector_fails_when_include_globs_empty(tmp_path: Path) -> None:
+    data = tmp_path / "exports"
+    data.mkdir()
+    with pytest.raises(ValueError, match="include_globs"):
+        discover_files(root_path=data.as_posix(), include_globs=[])

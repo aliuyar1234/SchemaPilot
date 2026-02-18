@@ -87,6 +87,54 @@ evidence: spec/10_PHASES_AND_TASKS.md :: PHASE_0_BOOTSTRAP
 - If MANIFEST.sha256 is stale, **acceptance is blocked**.
 evidence: checks/CHECKS_INDEX.md :: CHK-MANIFEST-VERIFY
 
+## Demo Path: First Safe Query in Minutes
+
+Use this path for "messy folders to governed AI-ready query" onboarding:
+
+1) Bootstrap demo workspace and data:
+```bash
+python -m cli.schemapilot_cli.main onboard-demo --workspace-name "Demo Workspace"
+```
+
+2) Review queue summary:
+```bash
+python -m cli.schemapilot_cli.main status --workspace <workspace_id>
+```
+
+3) First governed query through gateway:
+```bash
+curl -s http://127.0.0.1:8001/api/v1/gateway/query \
+  -H "Authorization: Bearer local-analyst-token" \
+  -H "Content-Type: application/json" \
+  -d "{\"workspace_id\":\"<workspace_id>\",\"query\":{\"text\":\"select 1 as one\"},\"resource_attributes\":{\"dataset_id\":\"dataset-1\"}}"
+```
+
+Expected:
+- policy decision id in response provenance,
+- applied filters/masks metadata,
+- append-only audit rows in gateway audit tables.
+
+## Weekly KPI Tracking
+
+Track adoption and reliability every week:
+- Time-to-first-safe-answer
+- Install success rate
+- Security regression count
+- Deterministic rebuild pass rate
+- Active contributors and issue response time
+
+Generate report:
+```bash
+python tools/kpi_tracker.py \
+  --week 2026-W08 \
+  --ttfsa-minutes 24 \
+  --install-success-rate 0.92 \
+  --security-regressions 0 \
+  --deterministic-pass-rate 1.0 \
+  --active-contributors 5 \
+  --issue-response-hours 12
+```
+
 ## Change Map: If you change X, update Y (top 10)
 
 1) **Public API shapes** → update contracts + compatibility policy + tests

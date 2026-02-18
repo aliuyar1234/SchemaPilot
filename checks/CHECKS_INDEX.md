@@ -376,6 +376,8 @@ Type:
 
 How to run:
 - In a production-like compose profile, attempt direct connections to engine/index ports.
+- Validate direct TCP connections to expected engine/index ports are blocked from non-gateway clients
+  (baseline ports: Trino `8083`, OpenSearch `9200`, Qdrant `6333`).
 - Attempt gateway queries and confirm they succeed with provenance.
 
 Pass/fail rule:

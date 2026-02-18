@@ -27,11 +27,17 @@ def build_silver_snapshot(
     snapshot_id: str,
 ) -> SilverBuildResult:
     """Normalize records and write silver snapshot + crosswalk."""
+    if not natural_key_fields:
+        raise ValueError("natural_key_fields must not be empty")
     normalized = [_normalize_record(record) for record in source_records]
     with_ids = []
     crosswalk = []
     for index, record in enumerate(normalized):
-        natural_key = "|".join(str(record.get(field, "")) for field in natural_key_fields)
+        natural_key = _build_natural_key(
+            record=record,
+            natural_key_fields=natural_key_fields,
+            source_record_index=index,
+        )
         canonical_id = _stable_id(entity_name, natural_key)
         with_ids.append({"canonical_id": canonical_id, **record})
         crosswalk.append(
@@ -78,3 +84,19 @@ def _normalize_record(record: dict[str, object]) -> dict[str, object]:
 def _stable_id(entity_name: str, natural_key: str) -> str:
     digest = hashlib.sha256(f"{entity_name}::{natural_key}".encode()).hexdigest()
     return f"sid_{digest[:16]}"
+
+
+def _build_natural_key(
+    *, record: dict[str, object], natural_key_fields: list[str], source_record_index: int
+) -> str:
+    parts: list[str] = []
+    for field in natural_key_fields:
+        raw = record.get(field)
+        normalized = str(raw).strip() if raw is not None else ""
+        if not normalized:
+            raise ValueError(
+                "Missing natural key component: "
+                f"field={field} source_record_index={source_record_index}"
+            )
+        parts.append(normalized)
+    return "|".join(parts)

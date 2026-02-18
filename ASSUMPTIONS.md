@@ -6,6 +6,7 @@
 - A-0003 Identity provider integration: OIDC/SAML are optional modules; local auth is acceptable for Starter/Team dev
 - A-0004 Embeddings provider: vector embeddings are pluggable; default is disabled unless explicitly configured
 - A-0005 Typical early adopters have limited historical query logs; wizard-collected intents are acceptable
+- A-0006 OIDC trusted claims are supplied by a validated ingress/proxy in enterprise deployments
 
 ---
 
@@ -135,4 +136,30 @@ Query log ingestion is required for enterprise customers.
 - Critical flow impacted: NO  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES  
+- Safe to decide: NO (assumption)
+
+---
+
+## A-0006 OIDC trusted claims are supplied by a validated ingress/proxy in enterprise deployments
+
+**Assumption**  
+When `SCHEMAPILOT_AUTH_MODE=oidc` is enabled, upstream infrastructure validates identity tokens and forwards trusted claims to SchemaPilot.
+
+**Why**  
+SchemaPilot's gateway consumes a trusted claims header and applies fail-closed issuer/audience checks, but enterprise ingress hardening is environment-specific.
+
+**Risk if wrong**  
+If ingress is misconfigured and untrusted headers reach the gateway, actor context could be spoofed.
+
+**How to validate**  
+Verify ingress strips client-provided claims headers, enforces token validation, and injects only server-generated claims headers.
+
+**Promote to decision when**  
+An enterprise deployment standard defines mandatory ingress products/policies for claims forwarding.
+
+**DSC summary**  
+- Externally constrained: YES (enterprise network/IdP controls vary)  
+- Critical flow impacted: YES (authentication and authorization)  
+- Unsafe/high-risk: YES  
+- Conservative baseline available: YES (deny on missing/invalid claims header and issuer/audience mismatch)  
 - Safe to decide: NO (assumption)
