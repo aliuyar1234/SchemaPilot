@@ -23,6 +23,16 @@ def _is_ignored(path: Path) -> bool:
     return any(part in IGNORED_PARTS for part in path.parts)
 
 
+def _stable_file_bytes(file_path: Path) -> bytes:
+    """Return cross-platform stable bytes for hashing."""
+    raw = file_path.read_bytes()
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def verify_manifest(base: Path, manifest_path: Path) -> bool:
     """Verify manifest entries and report drift."""
     lines = [
@@ -40,7 +50,7 @@ def verify_manifest(base: Path, manifest_path: Path) -> bool:
             print(f"FAIL {rel}: missing file")
             ok = False
             continue
-        actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(_stable_file_bytes(target)).hexdigest()
         if actual_hash != expected_hash:
             print(f"FAIL {rel}: expected {expected_hash} got {actual_hash}")
             ok = False

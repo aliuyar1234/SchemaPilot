@@ -2848,3 +2848,38 @@ After upgrading Vite/Vitest, remaining moderate advisories were isolated to the 
 - Safe to decide: YES  
 - Conservative baseline: YES
 
+---
+
+## D-0067 Cross-platform manifest hash stability for CI/release determinism
+
+**Decision**  
+Normalize line endings for UTF-8 text files when generating and verifying `MANIFEST.sha256` so Windows (CRLF) and Linux (LF) checkouts produce identical manifest digests.
+
+**Rationale**  
+CI/release runs on Linux while local development often runs on Windows with `autocrlf`, which caused false manifest drift and failing release/CI checks despite no semantic file changes.
+
+**Alternatives considered**  
+- Enforce repository-wide LF conversion only (rejected: disruptive and still brittle across local settings).  
+- Keep raw-byte hashing (rejected: non-deterministic across OS checkout policies).
+
+**Implications**  
+- Manifest verification is now robust across Windows/Linux text checkout differences.  
+- Binary files remain raw-byte hashed; only UTF-8 text bytes are normalized.
+
+**Affected files**  
+- evidence: tools/generate_manifest.py :: _stable_file_bytes  
+- evidence: tools/verify_manifest.py :: _stable_file_bytes  
+- evidence: MANIFEST.sha256 :: tools/generate_manifest.py
+
+**Verification impact**  
+- evidence: python tools/verify_manifest.py :: PASS  
+- evidence: python tools/check_tooling_baseline.py :: PASS CHK-TOOLING-BASELINE
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (release/CI integrity checks)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (text normalization only; binary hashing unchanged)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+

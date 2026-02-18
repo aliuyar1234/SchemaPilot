@@ -23,6 +23,20 @@ def _is_ignored(path: Path) -> bool:
     return any(part in IGNORED_PARTS for part in path.parts)
 
 
+def _stable_file_bytes(file_path: Path) -> bytes:
+    """Return cross-platform stable bytes for hashing.
+
+    Text files are normalized to LF line endings to avoid CRLF/LF drift
+    across operating systems and git autocrlf settings.
+    """
+    raw = file_path.read_bytes()
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def generate_manifest(base: Path, output: Path) -> None:
     """Generate SHA256 manifest for all files except manifest itself."""
     files = sorted(p for p in base.rglob("*") if p.is_file() and not _is_ignored(p))
@@ -31,7 +45,7 @@ def generate_manifest(base: Path, output: Path) -> None:
         rel = file_path.relative_to(base).as_posix()
         if rel == output.name:
             continue
-        digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        digest = hashlib.sha256(_stable_file_bytes(file_path)).hexdigest()
         lines.append(f"{digest}  {rel}")
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
