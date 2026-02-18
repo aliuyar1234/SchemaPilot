@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.shared_domain.audit_models import AccessDecision, AuditEvent
+from backend.shared_domain.audit_models import AccessDecision, AuditEvent, AuditOutboxEvent
 from backend.shared_domain.db import Base
 
 
@@ -65,6 +65,29 @@ class RunRecord(Base):
     output_refs_json: Mapped[dict[str, object]] = mapped_column(
         JSON, nullable=False, default=dict
     )
+
+
+class RunStepRecord(Base):
+    """Per-run execution step state with deterministic ordering/evidence pointers."""
+
+    __tablename__ = "runs_run_steps"
+    __table_args__ = (UniqueConstraint("run_id", "step_key", name="uq_runs_run_steps_run_step"),)
+
+    run_step_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(26), index=True, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    run_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    depends_on_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finished_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_bundle_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class ReviewProposal(Base):
@@ -184,6 +207,7 @@ __all__ = [
     "CatalogSource",
     "CatalogDataset",
     "RunRecord",
+    "RunStepRecord",
     "ReviewProposal",
     "ReviewTask",
     "ReviewApproval",
@@ -194,4 +218,5 @@ __all__ = [
     "GovernanceDeletionApproval",
     "AuditEvent",
     "AccessDecision",
+    "AuditOutboxEvent",
 ]

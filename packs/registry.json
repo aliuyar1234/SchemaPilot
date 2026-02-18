@@ -1,33 +1,83 @@
 {
-  "registry_version": "v1",
-  "policy_packs": [
-    {
-      "pack_id": "baseline-team",
-      "version": "1.0.0",
-      "path": "packs/policy/baseline-team.json",
-      "checksum_hint": "generated-by-pack-lint"
-    }
-  ],
-  "semantic_packs": [
-    {
-      "pack_id": "starter-invoices",
-      "version": "1.0.0",
-      "path": "packs/semantic/starter-invoices.json",
-      "checksum_hint": "generated-by-pack-lint"
-    }
-  ],
   "connector_examples": [
     {
+      "checksum_hint": "generated-by-pack-lint",
       "pack_id": "hubspot-export",
-      "version": "0.1.0",
       "path": "plugins/examples/hubspot_export_connector.py",
-      "checksum_hint": "generated-by-pack-lint"
+      "version": "0.1.0"
     },
     {
+      "checksum_hint": "generated-by-pack-lint",
       "pack_id": "zendesk-export",
-      "version": "0.1.0",
       "path": "plugins/examples/zendesk_export_connector.py",
-      "checksum_hint": "generated-by-pack-lint"
+      "version": "0.1.0"
+    }
+  ],
+  "policy_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "baseline-team",
+      "path": "packs/policy/baseline-team.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "acca2f5efbd732c679eeacd796270277ca443825c9cdfded9aba14ef5ed2608e"
+      },
+      "version": "1.0.0"
+    }
+  ],
+  "registry_version": "v1",
+  "semantic_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "starter-invoices",
+      "path": "packs/semantic/starter-invoices.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "6337bd6400cbb174415965b63598124026a13c18c5b20d0ae17c546c554b04de"
+      },
+      "version": "1.0.0"
+    }
+  ],
+  "template_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "crm",
+      "path": "packs/templates/crm.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "159f516db52b9ef6fb678769a129d621326d913e7eb800448a6315dec5123b8e"
+      },
+      "version": "1.0.0"
+    },
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "invoices",
+      "path": "packs/templates/invoices.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "f4ce3ed4e753db978a1ec14045c2a3fbd4709042fbcc51118479e037dcb0bcad"
+      },
+      "version": "1.0.0"
+    },
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "support",
+      "path": "packs/templates/support.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "ff35e3207a7d5bfe1f2ce3ef4369365d24c8d2e3057fb86ac4eb1bd231f22a63"
+      },
+      "version": "1.0.0"
     }
   ]
 }

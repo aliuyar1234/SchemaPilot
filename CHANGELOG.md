@@ -459,6 +459,47 @@
   - evidence: tests/test_anomaly_detection.py :: test_discover_run_creates_anomaly_blocking_task
   - evidence: tests/test_generate_clients.py :: test_render_generated_endpoints_contains_core_paths
 
+## v1.0.43
+- Post-milestone lane A kickoff (`TASKLIST_NEXT_V2`) update:
+  - implemented `V2-0005` strict config schema v2 with config-file support (`.json` + simple `.yaml`) and fail-closed unknown-key handling
+  - added diagnostics redaction contract via `Settings.to_redacted_dict`
+  - implemented `V2-0003` deterministic `schemapilot doctor` preflight checks (settings validation, storage/db, migration posture, no-bypass scan, secrets backend availability, JWKS reachability)
+  - added regression coverage for config strictness/redaction and doctor preflight/CLI behavior
+  - evidence: DECISIONS.md :: D-0062 Config/doctor operability baseline (`V2-0005` strict config schema and `V2-0003` deterministic preflight diagnostics)
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0005 Strict config schema v2 (unknown keys fail; config file; redaction contract)
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0003 `schemapilot doctor` preflight checks
+  - evidence: tests/test_config_loading_v2.py :: test_load_settings_rejects_unknown_config_keys
+  - evidence: tests/test_doctor_preflight.py :: test_doctor_preflight_passes_with_valid_local_config
+  - evidence: tests/test_cli_commands.py :: test_doctor_command_returns_ok_report_for_valid_config
+
+## v1.0.44
+- Post-milestone lane A reliability update (`TASKLIST_NEXT_V2`):
+  - completed `V2-0001` by adding durable audit outbox delivery (`audit_outbox_events`) and bounded sink dispatcher retries
+  - decoupled optional audit sink outages from core request success while preserving fail-closed local audit persistence
+  - added outbox observability metrics (delivery outcomes, backlog, delivery latency)
+  - added migration `0002_audit_outbox_events` and advanced non-local required DB revision
+  - added regression coverage for outbox dispatch success/failure bounds and sink-outage queue behavior in gateway/control-plane
+  - evidence: DECISIONS.md :: D-0063 Audit outbox delivery baseline (`V2-0001` durable sink dispatch decoupling with fail-closed local audit writes)
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0001 Audit outbox + sink dispatcher (decouple sinks; preserve fail-closed local audit)
+  - evidence: tests/test_audit_outbox.py :: test_dispatch_outbox_writes_jsonl_and_marks_rows_sent
+  - evidence: tests/test_audit_sinks.py :: test_webhook_audit_sink_failure_queues_outbox_without_denying_request
+  - evidence: tests/test_migrations_enforced.py :: test_non_local_allows_expected_revision_present
+
+## v1.0.45
+- Post-milestone operator diagnostics update (`TASKLIST_NEXT_V2`):
+  - completed `V2-0002` with run-step DAG persistence (`runs_run_steps`) and step-level status/evidence/error tracking in worker execution
+  - exposed run-step visibility through control-plane run responses and a dedicated run-steps endpoint
+  - completed `V2-0032` by adding `schemapilot analyze` workspace analytics (policy denials, review backlog, run/run-step health, outbox backlog)
+  - completed `V2-0004` by adding `schemapilot diag-bundle` redacted support zip generation
+  - advanced non-local required DB revision to `0003_run_step_dag`
+  - evidence: DECISIONS.md :: D-0064 Operator diagnostics baseline (`V2-0002`, `V2-0004`, `V2-0032`: run-step DAG visibility + redacted support bundle + workspace analytics CLI)
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0002 Run step DAG + step-level evidence/status
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0004 `schemapilot diag bundle` (redacted support pack)
+  - evidence: TASKLIST_NEXT_V2.md :: [x] V2-0032 Denials + review queue analytics CLI (`schemapilot analyze`)
+  - evidence: tests/test_run_steps.py :: test_run_endpoint_includes_step_breakdown_after_success
+  - evidence: tests/test_cli_operability_v2.py :: test_analyze_command_reports_denials_and_run_steps
+  - evidence: tests/test_cli_operability_v2.py :: test_diag_bundle_command_writes_redacted_zip
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

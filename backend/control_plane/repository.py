@@ -12,6 +12,7 @@ from backend.shared_domain.metadata_models import (
     CatalogDataset,
     CatalogSource,
     RunRecord,
+    RunStepRecord,
     Workspace,
 )
 
@@ -224,6 +225,43 @@ def get_run(session: Session, *, workspace_id: str, run_id: str) -> dict[str, ob
         "status": run.status,
         "input_refs": run.input_refs_json,
         "output_refs": run.output_refs_json,
+        "run_steps": list_run_steps(session, workspace_id=workspace_id, run_id=run_id),
+    }
+
+
+def list_run_steps(session: Session, *, workspace_id: str, run_id: str) -> list[dict[str, object]]:
+    rows = (
+        session.execute(
+            select(RunStepRecord)
+            .where(
+                RunStepRecord.workspace_id == workspace_id,
+                RunStepRecord.run_id == run_id,
+            )
+            .order_by(RunStepRecord.step_order, RunStepRecord.run_step_id)
+        )
+        .scalars()
+        .all()
+    )
+    return [_serialize_run_step(row) for row in rows]
+
+
+def _serialize_run_step(row: RunStepRecord) -> dict[str, object]:
+    return {
+        "run_step_id": row.run_step_id,
+        "run_id": row.run_id,
+        "workspace_id": row.workspace_id,
+        "run_type": row.run_type,
+        "step_key": row.step_key,
+        "step_order": row.step_order,
+        "depends_on": list(row.depends_on_json),
+        "status": row.status,
+        "started_epoch": row.started_epoch,
+        "finished_epoch": row.finished_epoch,
+        "duration_ms": row.duration_ms,
+        "attempt_count": row.attempt_count,
+        "error_code": row.error_code,
+        "evidence_bundle_uri": row.evidence_bundle_uri,
+        "details": dict(row.details_json),
     }
 
 

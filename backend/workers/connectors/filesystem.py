@@ -24,6 +24,8 @@ def discover_files(
     root_path: str,
     include_globs: list[str],
     exclude_globs: list[str] | None = None,
+    max_files: int = 10_000,
+    max_total_bytes: int = 1_000_000_000,
 ) -> list[DiscoveredFile]:
     """Discover files under root path in read-only mode."""
     root = Path(root_path)
@@ -33,6 +35,7 @@ def discover_files(
         raise ValueError("include_globs must not be empty.")
     excluded = exclude_globs or []
     discovered: list[DiscoveredFile] = []
+    total_bytes = 0
     for file_path in sorted(path for path in root.rglob("*") if path.is_file()):
         rel = file_path.relative_to(root).as_posix()
         if not any(_match_pattern(rel, pattern) for pattern in include_globs):
@@ -40,6 +43,11 @@ def discover_files(
         if any(_match_pattern(rel, pattern) for pattern in excluded):
             continue
         stat = file_path.stat()
+        total_bytes += int(stat.st_size)
+        if len(discovered) + 1 > max(max_files, 1):
+            raise ValueError("filesystem_discovery_backpressure_limit_exceeded")
+        if total_bytes > max(max_total_bytes, 1):
+            raise ValueError("filesystem_discovery_backpressure_limit_exceeded")
         discovered.append(
             DiscoveredFile(
                 path=file_path.as_posix(),

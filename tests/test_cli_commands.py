@@ -41,6 +41,37 @@ def test_connect_command_calls_control_plane(monkeypatch) -> None:
     assert captured["payload"]["scope"]["root_path"] == "/tmp/data"
 
 
+def test_doctor_command_returns_ok_report_for_valid_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "doctor.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "profile": "starter",
+                "bind_address": "127.0.0.1",
+                "auth_mode": "local",
+                "database_url": f"sqlite:///{(tmp_path / 'doctor.db').as_posix()}",
+                "storage_root": (tmp_path / "storage").as_posix(),
+                "secrets_store_backend": "local_encrypted",
+                "secrets_store_root": (tmp_path / "secrets").as_posix(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["doctor", "--config", config_path.as_posix()])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+
+
+def test_doctor_command_fails_for_invalid_config_key(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.json"
+    config_path.write_text(json.dumps({"unknown_key": "x"}), encoding="utf-8")
+    result = runner.invoke(app, ["doctor", "--config", config_path.as_posix()])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fail"
+
+
 def test_onboard_demo_command_calls_bootstrap_endpoint(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -312,3 +343,217 @@ def test_demo_generate_writes_deterministic_files(tmp_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["scenario_version"] == "v1"
     assert manifest["exports"] == ["customers.csv", "invoices.csv", "tickets.csv"]
+
+
+def test_init_interactive_bootstraps_workspace_source_and_run(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-interactive"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-interactive"}
+        if url.endswith("/runs"):
+            return {"run_id": "r-interactive", "status": "queued"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        ["init-interactive", "--api-base-url", "http://cp"],
+        input="Acme Workspace\nfilesystem\n/tmp/exports\n",
+    )
+    assert result.exit_code == 0
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "http://cp/api/v1/workspaces"
+    assert calls[1][1] == "http://cp/api/v1/workspaces/w-interactive/sources"
+    assert calls[2][1] == "http://cp/api/v1/workspaces/w-interactive/runs"
+
+
+def test_review_batch_requires_confirmation(monkeypatch) -> None:
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = (method, url, payload, auth_token)
+        return []
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "review-batch",
+            "--workspace",
+            "w1",
+            "--decision",
+            "approve",
+            "--task-id",
+            "t1",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Batch decisions require --confirm YES." in (result.stdout + result.stderr)
+
+
+def test_review_batch_all_open_applies_decision(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/review_tasks"):
+            return [{"task_id": "t2", "status": "open"}, {"task_id": "t1", "status": "open"}]
+        return {"status": "done"}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "review-batch",
+            "--workspace",
+            "w1",
+            "--decision",
+            "approve",
+            "--all-open",
+            "--confirm",
+            "YES",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert ("GET", "http://cp/api/v1/workspaces/w1/review_tasks", None) in calls
+    assert (
+        "POST",
+        "http://cp/api/v1/workspaces/w1/review_tasks/t1/decision",
+        {"decision": "approve", "reason": "batch_cli_decision"},
+    ) in calls
+    assert (
+        "POST",
+        "http://cp/api/v1/workspaces/w1/review_tasks/t2/decision",
+        {"decision": "approve", "reason": "batch_cli_decision"},
+    ) in calls
+
+
+def test_query_command_formats_output_and_exports_json(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["auth_token"] = auth_token
+        return {
+            "result": {
+                "columns": [{"name": "one", "type": "INTEGER"}],
+                "rows": [[1]],
+                "row_count": 1,
+            },
+            "provenance": {"provenance_version": "1", "citations": []},
+            "request_id": "req-1",
+        }
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    export_path = tmp_path / "query.json"
+    result = runner.invoke(
+        app,
+        [
+            "query",
+            "--workspace",
+            "w1",
+            "--sql",
+            "select 1 as one",
+            "--dataset-id",
+            "dataset-1",
+            "--gateway-base-url",
+            "http://gw",
+            "--export",
+            export_path.as_posix(),
+            "--export-format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://gw/api/v1/gateway/query"
+    assert captured["payload"]["resource_attributes"]["dataset_id"] == "dataset-1"
+    assert export_path.exists()
+    exported = json.loads(export_path.read_text(encoding="utf-8"))
+    assert exported["provenance"]["provenance_version"] == "1"
+
+
+def test_policy_simulate_calls_gateway_endpoint(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["auth_token"] = auth_token
+        return {"result": "allow", "reason": "allow", "applied_masks": {}, "applied_filters": {}}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "policy-simulate",
+            "--workspace",
+            "w1",
+            "--actor-roles",
+            "data_steward,analyst",
+            "--actor-attributes",
+            '{"allowed_dataset_ids":["dataset-1"]}',
+            "--resource-attributes",
+            '{"dataset_id":"dataset-1"}',
+            "--gateway-base-url",
+            "http://gw",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://gw/api/v1/gateway/policy/simulate"
+    assert captured["payload"]["actor"]["roles"] == ["data_steward", "analyst"]
+
+
+def test_policy_audit_report_generates_output_file(monkeypatch, tmp_path: Path) -> None:
+    scenario_path = tmp_path / "scenarios.json"
+    scenario_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "scenario-1",
+                    "actor": {"actor_type": "human", "roles": ["data_steward"], "attributes": {}},
+                    "resource_attributes": {"dataset_id": "dataset-1"},
+                    "action": "query",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = (method, url, payload, auth_token)
+        return {"result": "allow", "reason": "allow", "applied_masks": {}, "applied_filters": {}}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    output_path = tmp_path / "audit_report.json"
+    result = runner.invoke(
+        app,
+        [
+            "policy-audit-report",
+            "--workspace",
+            "w1",
+            "--scenarios",
+            scenario_path.as_posix(),
+            "--output",
+            output_path.as_posix(),
+            "--gateway-base-url",
+            "http://gw",
+        ],
+    )
+    assert result.exit_code == 0
+    assert output_path.exists()
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["scenario_count"] == 1
+    assert report["scenarios"][0]["id"] == "scenario-1"

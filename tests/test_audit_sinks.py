@@ -4,13 +4,22 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from backend.control_plane.app import create_app
 from backend.gateway.app import create_gateway_app
 from backend.shared_domain.config import Settings
+from backend.shared_domain.db import get_session_factory
+from backend.shared_domain.metadata_models import AuditOutboxEvent
 
 
-def _control_plane_settings(tmp_path: Path, sink_type: str, sink_target: str | None) -> Settings:
+def _control_plane_settings(
+    tmp_path: Path,
+    sink_type: str,
+    sink_target: str | None,
+    sink_mode: str = "outbox",
+) -> Settings:
     return Settings(
         profile="starter",
         bind_address="127.0.0.1",
@@ -20,10 +29,16 @@ def _control_plane_settings(tmp_path: Path, sink_type: str, sink_target: str | N
         database_url=f"sqlite:///{(tmp_path / 'audit_sinks_cp.db').as_posix()}",
         audit_sink_type=sink_type,
         audit_sink_target=sink_target,
+        audit_sink_mode=sink_mode,
     )
 
 
-def _gateway_settings(tmp_path: Path, sink_type: str, sink_target: str | None) -> Settings:
+def _gateway_settings(
+    tmp_path: Path,
+    sink_type: str,
+    sink_target: str | None,
+    sink_mode: str = "outbox",
+) -> Settings:
     return Settings(
         profile="starter",
         bind_address="127.0.0.1",
@@ -33,6 +48,7 @@ def _gateway_settings(tmp_path: Path, sink_type: str, sink_target: str | None) -
         database_url=f"sqlite:///{(tmp_path / 'audit_sinks_gw.db').as_posix()}",
         audit_sink_type=sink_type,
         audit_sink_target=sink_target,
+        audit_sink_mode=sink_mode,
     )
 
 
@@ -53,7 +69,7 @@ def test_jsonl_audit_sink_writes_events_from_control_plane(tmp_path: Path) -> No
     assert first["event_type"] == "workspace.created"
 
 
-def test_webhook_audit_sink_failure_denies_gateway_request(tmp_path: Path) -> None:
+def test_webhook_audit_sink_failure_queues_outbox_without_denying_request(tmp_path: Path) -> None:
     settings = _gateway_settings(
         tmp_path,
         sink_type="webhook",
@@ -69,5 +85,55 @@ def test_webhook_audit_sink_failure_denies_gateway_request(tmp_path: Path) -> No
             "resource_attributes": {"dataset_id": "dataset-1"},
         },
     )
-    assert response.status_code == 403
-    assert response.json()["error"]["details"]["reason"] == "audit_sink_unavailable"
+    assert response.status_code == 200
+    session_factory = get_session_factory(settings.database_url)
+    session: Session = session_factory()
+    try:
+        rows = (
+            session.execute(
+                select(AuditOutboxEvent).where(
+                    AuditOutboxEvent.service == "gateway",
+                    AuditOutboxEvent.status == "pending",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert rows
+        assert rows[0].attempt_count >= 1
+        assert rows[0].last_error
+    finally:
+        session.close()
+
+
+def test_webhook_audit_sink_failure_queues_outbox_for_control_plane(tmp_path: Path) -> None:
+    settings = _control_plane_settings(
+        tmp_path,
+        sink_type="webhook",
+        sink_target="http://127.0.0.1:1/unreachable",
+    )
+    client = TestClient(create_app(settings_factory=lambda: settings))
+    response = client.post(
+        "/api/v1/workspaces",
+        headers={"Authorization": "Bearer local-platform-admin-token"},
+        json={"name": "Outbox CP", "profile": "starter", "security_baseline": "standard"},
+    )
+    assert response.status_code == 200
+    session_factory = get_session_factory(settings.database_url)
+    session: Session = session_factory()
+    try:
+        rows = (
+            session.execute(
+                select(AuditOutboxEvent).where(
+                    AuditOutboxEvent.service == "control_plane",
+                    AuditOutboxEvent.status == "pending",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert rows
+        assert rows[0].attempt_count >= 1
+        assert rows[0].last_error
+    finally:
+        session.close()

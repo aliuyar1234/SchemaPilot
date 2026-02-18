@@ -20,6 +20,32 @@ def execute_sql_trino(
     max_retries: int = 2,
 ) -> tuple[list[dict[str, str]], list[list[object]]]:
     """Execute read-only SQL through Trino HTTP protocol."""
+    columns, rows, _ = execute_sql_trino_with_metadata(
+        query=query,
+        max_rows=max_rows,
+        timeout_ms=timeout_ms,
+        trino_url=trino_url,
+        trino_user=trino_user,
+        trino_catalog=trino_catalog,
+        trino_schema=trino_schema,
+        max_retries=max_retries,
+    )
+    return columns, rows
+
+
+def execute_sql_trino_with_metadata(
+    *,
+    query: str,
+    max_rows: int,
+    timeout_ms: int,
+    trino_url: str,
+    trino_user: str,
+    trino_catalog: str,
+    trino_schema: str,
+    max_retries: int = 2,
+    request_id: str | None = None,
+) -> tuple[list[dict[str, str]], list[list[object]], dict[str, object]]:
+    """Execute SQL through Trino and return rows plus execution metadata."""
     statement_url = trino_url.rstrip("/") + "/v1/statement"
     timeout_seconds = max(1.0, float(timeout_ms) / 1000.0)
     deadline = perf_counter() + timeout_seconds
@@ -30,6 +56,9 @@ def execute_sql_trino(
         "X-Trino-Catalog": trino_catalog,
         "X-Trino-Schema": trino_schema,
     }
+    if request_id:
+        headers["X-Trino-Client-Info"] = f"schemapilot_request_id={request_id}"
+    started = perf_counter()
     try:
         response = _request_json_with_retries(
             method="POST",
@@ -44,6 +73,7 @@ def execute_sql_trino(
             raise TimeoutError("trino_query_timeout") from exc
         raise
     query_id = str(response.get("id", "")).strip()
+    bytes_scanned = _extract_processed_bytes(response)
     columns = _extract_columns(response)
     rows = _extract_rows(response, max_rows=max_rows)
     next_uri = str(response.get("nextUri", "")).strip()
@@ -81,9 +111,15 @@ def execute_sql_trino(
             query_id = str(page.get("id", "")).strip()
         if not columns:
             columns = _extract_columns(page)
+        bytes_scanned = max(bytes_scanned, _extract_processed_bytes(page))
         rows.extend(_extract_rows(page, max_rows=max_rows - len(rows)))
         next_uri = str(page.get("nextUri", "")).strip()
-    return columns, rows[:max_rows]
+    metadata = {
+        "query_id": query_id,
+        "bytes_scanned": bytes_scanned,
+        "elapsed_ms": round((perf_counter() - started) * 1000.0, 3),
+    }
+    return columns, rows[:max_rows], metadata
 
 
 def cancel_trino_query(
@@ -193,3 +229,18 @@ def _extract_rows(response: dict[str, object], *, max_rows: int) -> list[list[ob
         if len(rows) >= max_rows:
             break
     return rows
+
+
+def _extract_processed_bytes(response: dict[str, object]) -> int:
+    stats = response.get("stats", {})
+    if not isinstance(stats, dict):
+        return 0
+    processed_raw = stats.get("processedBytes", 0)
+    if isinstance(processed_raw, (int, float)):
+        return int(processed_raw)
+    if isinstance(processed_raw, str):
+        try:
+            return int(processed_raw.strip())
+        except ValueError:
+            return 0
+    return 0

@@ -85,6 +85,36 @@ AUDIT_WRITE_FAILURES_TOTAL = Counter(
     labelnames=("workspace_id", "service", "operation"),
     registry=REGISTRY,
 )
+AUDIT_SINK_DELIVERY_TOTAL = Counter(
+    "schemapilot_audit_sink_delivery_total",
+    "Audit sink delivery outcomes from outbox dispatch.",
+    labelnames=("service", "result"),
+    registry=REGISTRY,
+)
+AUDIT_OUTBOX_BACKLOG_TOTAL = Gauge(
+    "schemapilot_audit_outbox_backlog_total",
+    "Pending audit outbox rows per service.",
+    labelnames=("service",),
+    registry=REGISTRY,
+)
+AUDIT_SINK_DELIVERY_LATENCY_MS = Histogram(
+    "schemapilot_audit_sink_delivery_latency_ms",
+    "Audit sink delivery latency in milliseconds.",
+    labelnames=("service", "result"),
+    registry=REGISTRY,
+)
+GATEWAY_QUERY_CACHE_TOTAL = Counter(
+    "schemapilot_gateway_query_cache_total",
+    "Gateway query cache events.",
+    labelnames=("workspace_id", "result"),
+    registry=REGISTRY,
+)
+WORKER_STEP_DURATION_MS = Histogram(
+    "schemapilot_worker_step_duration_ms",
+    "Worker run-step duration in milliseconds.",
+    labelnames=("workspace_id", "run_type", "step_key", "result"),
+    registry=REGISTRY,
+)
 
 LOGGER = logging.getLogger("schemapilot")
 if not LOGGER.handlers:
@@ -123,6 +153,38 @@ def increment_audit_write_failure(*, workspace_id: str, service: str, operation:
     AUDIT_WRITE_FAILURES_TOTAL.labels(
         workspace_id=workspace_id, service=service, operation=operation
     ).inc()
+
+
+def increment_audit_sink_delivery(*, service: str, result: str) -> None:
+    """Increment audit sink delivery counter."""
+    AUDIT_SINK_DELIVERY_TOTAL.labels(service=service, result=result).inc()
+
+
+def set_audit_outbox_backlog(*, service: str, count: int) -> None:
+    """Set pending audit outbox backlog gauge."""
+    AUDIT_OUTBOX_BACKLOG_TOTAL.labels(service=service).set(count)
+
+
+def observe_audit_sink_delivery_latency(*, service: str, result: str, latency_ms: float) -> None:
+    """Observe audit sink delivery latency."""
+    AUDIT_SINK_DELIVERY_LATENCY_MS.labels(service=service, result=result).observe(latency_ms)
+
+
+def increment_gateway_query_cache(*, workspace_id: str, result: str) -> None:
+    """Increment gateway query cache event counter."""
+    GATEWAY_QUERY_CACHE_TOTAL.labels(workspace_id=workspace_id, result=result).inc()
+
+
+def observe_worker_step_duration(
+    *, workspace_id: str, run_type: str, step_key: str, result: str, duration_ms: float
+) -> None:
+    """Observe worker step duration."""
+    WORKER_STEP_DURATION_MS.labels(
+        workspace_id=workspace_id,
+        run_type=run_type,
+        step_key=step_key,
+        result=result,
+    ).observe(max(duration_ms, 0.0))
 
 
 def increment_contract_failure(*, workspace_id: str, layer: str) -> None:

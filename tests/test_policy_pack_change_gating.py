@@ -12,7 +12,7 @@ from backend.shared_domain.config import Settings
 from backend.shared_domain.db import get_session_factory
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(tmp_path: Path, *, canary_enabled: bool = False) -> Settings:
     return Settings(
         profile="team",
         bind_address="127.0.0.1",
@@ -20,6 +20,7 @@ def _settings(tmp_path: Path) -> Settings:
         require_auth_for_non_local=True,
         storage_root=(tmp_path / "storage").as_posix(),
         database_url=f"sqlite:///{(tmp_path / 'policy_pack_lifecycle.db').as_posix()}",
+        policy_pack_canary_enabled=canary_enabled,
     )
 
 
@@ -145,3 +146,40 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
         )
     finally:
         session.close()
+
+
+def test_policy_pack_canary_requires_promotion_before_apply(tmp_path: Path) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path, canary_enabled=True)))
+    workspace_id = _create_workspace(client, name="Policy Canary")
+    change_request = client.post(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/change-request",
+        json={"pack_id": "enterprise_ai_assistant"},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert change_request.status_code == 200
+    change_id = str(change_request.json()["change_request_id"])
+    decision = client.post(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_id}/decision",
+        json={"decision": "approve", "decision_reason": "start canary"},
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert decision.status_code == 200
+    assert decision.json()["status"] == "canary_active"
+    canary = client.get(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/canary",
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert canary.status_code == 200
+    assert canary.json()["status"] == "canary_active"
+    promote = client.post(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/canary/promote",
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert promote.status_code == 200
+    assert promote.json()["status"] == "promoted"
+    effective = client.get(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack",
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert effective.status_code == 200
+    assert effective.json()["pack_id"] == "enterprise_ai_assistant"

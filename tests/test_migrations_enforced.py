@@ -48,8 +48,8 @@ def test_gateway_non_local_requires_migration_state(tmp_path: Path) -> None:
 def test_non_local_allows_expected_revision_present(tmp_path: Path) -> None:
     control_db_path = tmp_path / "control_ok.db"
     gateway_db_path = tmp_path / "gateway_ok.db"
-    _seed_alembic_revision(control_db_path, "0001_initial_schema")
-    _seed_alembic_revision(gateway_db_path, "0001_initial_schema")
+    _seed_alembic_revision(control_db_path, "0003_run_step_dag")
+    _seed_alembic_revision(gateway_db_path, "0003_run_step_dag")
     create_app(settings_factory=lambda: _settings(control_db_path))
     create_gateway_app(settings_factory=lambda: _settings(gateway_db_path))
 

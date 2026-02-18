@@ -1,0 +1,53 @@
+{
+  "matrix_version": "v1",
+  "runtime_version": "0.1.0",
+  "sections": {
+    "connector_examples": {
+      "current_schema_version": "v1",
+      "supported_schema_versions": [
+        "v1"
+      ]
+    },
+    "policy_packs": {
+      "current_schema_version": "v2",
+      "supported_schema_versions": [
+        "v1",
+        "v2"
+      ]
+    },
+    "semantic_packs": {
+      "current_schema_version": "v2",
+      "supported_schema_versions": [
+        "v1",
+        "v2"
+      ]
+    },
+    "template_packs": {
+      "current_schema_version": "v2",
+      "supported_schema_versions": [
+        "v1",
+        "v2"
+      ]
+    }
+  },
+  "migrations": [
+    {
+      "from_schema_version": "v1",
+      "section": "policy_packs",
+      "to_schema_version": "v2",
+      "tool": "tools/pack_migrate.py"
+    },
+    {
+      "from_schema_version": "v1",
+      "section": "semantic_packs",
+      "to_schema_version": "v2",
+      "tool": "tools/pack_migrate.py"
+    },
+    {
+      "from_schema_version": "v1",
+      "section": "template_packs",
+      "to_schema_version": "v2",
+      "tool": "tools/pack_migrate.py"
+    }
+  ]
+}

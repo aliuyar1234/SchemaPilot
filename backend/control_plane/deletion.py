@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -237,6 +241,18 @@ def execute_deletion_request(
             "report": report_payload,
         },
     )
+    attestation = _build_deletion_attestation(
+        workspace_id=workspace_id,
+        deletion_request_id=row.deletion_request_id,
+        report_payload=report_payload,
+        workflow_result=workflow_result,
+    )
+    store_evidence_bundle(
+        workspace_id=workspace_id,
+        storage_root=storage_root,
+        bundle_type="deletion_attestation",
+        payload=attestation,
+    )
     row.status = "executed"
     row.evidence_bundle_uri = stored.evidence_bundle_uri
     session.flush()
@@ -247,6 +263,7 @@ def execute_deletion_request(
         "reason": "approved",
         "evidence_report_path": report_path,
         "evidence_bundle_uri": stored.evidence_bundle_uri,
+        "attestation": attestation,
     }
 
 
@@ -289,3 +306,34 @@ def _serialize_deletion_request(row: GovernanceDeletionRequest) -> dict[str, obj
         "approval_reason": row.approval_reason,
         "evidence_bundle_uri": row.evidence_bundle_uri,
     }
+
+
+def _build_deletion_attestation(
+    *,
+    workspace_id: str,
+    deletion_request_id: str,
+    report_payload: dict[str, object],
+    workflow_result: dict[str, object],
+) -> dict[str, object]:
+    payload = {
+        "workspace_id": workspace_id,
+        "deletion_request_id": deletion_request_id,
+        "status": str(workflow_result.get("status", "")),
+        "reason": str(workflow_result.get("reason", "")),
+        "execution_epoch": int(time.time()),
+        "report_summary": {
+            "snapshots_updated": report_payload.get("execution", {}).get("snapshots_updated", [])
+            if isinstance(report_payload.get("execution", {}), dict)
+            else [],
+            "indexes_updated": report_payload.get("execution", {}).get("indexes_updated", [])
+            if isinstance(report_payload.get("execution", {}), dict)
+            else [],
+        },
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signing_key = os.getenv("SCHEMAPILOT_DELETION_ATTESTATION_KEY", "local-attestation-key")
+    signature = hmac.new(signing_key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    payload["signature"] = signature
+    payload["algorithm"] = "HMAC-SHA256"
+    payload["key_id"] = "deletion-attestation-v1"
+    return payload

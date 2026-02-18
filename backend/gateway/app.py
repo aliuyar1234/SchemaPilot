@@ -16,12 +16,17 @@ from sqlalchemy.orm import Session
 from backend.gateway.abac import apply_mask, evaluate_abac
 from backend.gateway.executor import QueryTimeoutError, UnsafeSqlError, execute_sql
 from backend.gateway.policy import AccessDecision, evaluate_access
+from backend.gateway.query_cache import InMemoryQueryCache
 from backend.gateway.retrieval_opensearch import (
     OpenSearchUnavailableError,
     search_opensearch_documents,
 )
 from backend.gateway.retrieval_qdrant import QdrantUnavailableError, search_qdrant_documents
 from backend.gateway.semantic_binding import SemanticQueryBinding, bind_semantic_query
+from backend.shared_domain.audit_outbox import (
+    dispatch_audit_outbox_batch,
+    enqueue_audit_outbox_event,
+)
 from backend.shared_domain.audit_models import AccessDecision as AccessDecisionRow
 from backend.shared_domain.audit_models import AuditEvent
 from backend.shared_domain.audit_sinks import (
@@ -44,11 +49,13 @@ from backend.shared_domain.errors import (
     PolicyDeniedError,
     SchemaPilotError,
 )
+from backend.shared_domain.gold_pointer import load_latest_gold_pointer
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import CatalogDataset, GovernancePolicy
 from backend.shared_domain.observability import (
     increment_audit_write_failure,
     increment_cost_bytes_scanned,
+    increment_gateway_query_cache,
     increment_policy_denial,
     log_structured_event,
     observe_query_latency,
@@ -57,8 +64,12 @@ from backend.shared_domain.observability import (
 from backend.shared_domain.provenance import build_provenance_v1
 from backend.shared_domain.rate_limit import InMemoryActorRateLimiter
 from backend.shared_domain.retrieval import load_retrieval_corpus, retrieve_documents
+from backend.shared_domain.tracing import start_trace
 
 _ACTIVE_AUDIT_SINK: AuditSink = DisabledAuditSink()
+_AUDIT_SINK_MODE: str = "outbox"
+_AUDIT_OUTBOX_DISPATCH_BATCH_SIZE: int = 100
+_AUDIT_OUTBOX_MAX_ATTEMPTS: int = 5
 
 
 def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
@@ -66,7 +77,13 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
     settings = settings_factory()
     settings.validate()
     global _ACTIVE_AUDIT_SINK  # noqa: PLW0603
+    global _AUDIT_SINK_MODE  # noqa: PLW0603
+    global _AUDIT_OUTBOX_DISPATCH_BATCH_SIZE  # noqa: PLW0603
+    global _AUDIT_OUTBOX_MAX_ATTEMPTS  # noqa: PLW0603
     _ACTIVE_AUDIT_SINK = load_audit_sink(settings)
+    _AUDIT_SINK_MODE = settings.audit_sink_mode
+    _AUDIT_OUTBOX_DISPATCH_BATCH_SIZE = settings.audit_outbox_dispatch_batch_size
+    _AUDIT_OUTBOX_MAX_ATTEMPTS = settings.audit_outbox_max_attempts
     embeddings_provider = load_embeddings_provider(
         provider_name=settings.embeddings_provider,
         dimensions=settings.embeddings_dimensions,
@@ -78,14 +95,27 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         max_requests_per_minute=_env_int("SCHEMAPILOT_GATEWAY_MAX_REQUESTS_PER_MINUTE", 120),
         max_concurrent_per_actor=_env_int("SCHEMAPILOT_GATEWAY_MAX_CONCURRENT_PER_ACTOR", 4),
     )
+    query_cache = InMemoryQueryCache(
+        enabled=settings.gateway_query_cache_enabled,
+        ttl_seconds=settings.gateway_query_cache_ttl_seconds,
+        max_entries=settings.gateway_query_cache_max_entries,
+    )
     app = FastAPI(title="SchemaPilot Gateway", version="0.1.0")
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next: Callable):
         request_id = request.headers.get("x-request-id", new_ulid())
         request.state.request_id = request_id
+        trace_context = start_trace(
+            service_name=settings.tracing_service_name,
+            operation=f"{request.method}:{request.url.path}",
+            correlation_id=request_id,
+            enabled=settings.tracing_enabled,
+        )
+        request.state.trace_id = trace_context.trace_id
         response = await call_next(request)
         response.headers["x-request-id"] = request_id
+        response.headers["x-trace-id"] = trace_context.trace_id
         log_structured_event(
             level="info",
             msg="request.completed",
@@ -98,6 +128,24 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "status_code": response.status_code,
             },
         )
+        if _AUDIT_SINK_MODE == "outbox":
+            try:
+                dispatch_audit_outbox_batch(
+                    session_factory=session_factory,
+                    sink=_ACTIVE_AUDIT_SINK,
+                    service="gateway",
+                    max_batch=_AUDIT_OUTBOX_DISPATCH_BATCH_SIZE,
+                    max_attempts=_AUDIT_OUTBOX_MAX_ATTEMPTS,
+                )
+            except Exception as exc:  # pragma: no cover - defensive runtime fallback
+                log_structured_event(
+                    level="error",
+                    msg="audit.outbox_dispatch_failed",
+                    service="gateway",
+                    correlation_id=request_id,
+                    event_type="audit.outbox_dispatch_failed",
+                    extra={"error": str(exc)},
+                )
         return response
 
     @app.exception_handler(SchemaPilotError)
@@ -432,142 +480,185 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             timeout_raw = constraints.get("timeout_ms", 5000)
             if isinstance(timeout_raw, (int, float, str)):
                 timeout_ms = int(timeout_raw)
-
-        try:
+        query_cache_key = _build_query_cache_key(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            actor_roles=actor_dict.get("roles", []),
+            actor_attributes=actor_attributes,
+            query_text=query_text,
+            datasets_used=datasets_used,
+            row_filter=abac.row_filter,
+            masks=abac.masks,
+            max_rows=max_rows,
+            timeout_ms=timeout_ms,
+            query_engine=settings.query_engine,
+            policy_pack=effective_policy_pack,
+            storage_root=settings.storage_root,
+        )
+        cached_payload = query_cache.get(query_cache_key)
+        if cached_payload is not None:
+            increment_gateway_query_cache(workspace_id=workspace_id, result="hit")
+            result_columns = (
+                cached_payload.get("columns", [])
+                if isinstance(cached_payload.get("columns", []), list)
+                else []
+            )
+            masked_rows = (
+                cached_payload.get("rows", [])
+                if isinstance(cached_payload.get("rows", []), list)
+                else []
+            )
+        else:
+            increment_gateway_query_cache(workspace_id=workspace_id, result="miss")
             try:
-                result_set = execute_sql(
-                    query_text or "select 1 as one",
-                    max_rows=max_rows,
-                    row_filter=abac.row_filter,
-                    timeout_ms=timeout_ms,
-                    workspace_id=workspace_id,
-                    storage_root=settings.storage_root,
-                    query_engine=settings.query_engine,
-                    trino_url=settings.trino_url,
-                    trino_user=settings.trino_user,
-                    trino_catalog=settings.trino_catalog,
-                    trino_schema=settings.trino_schema,
-                )
-            except UnsafeSqlError as exc:
-                reason = "sql_unsafe"
-                _record_access_decision(
-                    session_factory(),
-                    workspace_id=workspace_id,
-                    actor_id=str(actor_dict.get("actor_id", "unknown")),
-                    result="deny",
-                    reason=reason,
-                    request_context=request_context,
-                    resources={"endpoint": "query", "query_text": query_text},
-                    applied_filters=_serialize_row_filter(abac.row_filter),
-                    applied_masks=abac.masks,
-                    policy_decision_id=policy_decision_id,
-                    event_type="gateway.query",
-                    correlation_id=request.state.request_id,
-                )
-                increment_policy_denial(workspace_id=workspace_id, reason=reason)
-                observe_query_latency(
-                    workspace_id=workspace_id,
-                    engine="sql",
-                    result="deny",
-                    latency_ms=(perf_counter() - started_at) * 1000.0,
-                )
-                raise PolicyDeniedError(
-                    "Access denied by policy",
-                    details={
-                        "reason": reason,
-                        "policy_decision_id": policy_decision_id,
-                        "error": str(exc),
-                    },
-                ) from exc
-            except QueryTimeoutError as exc:
-                reason = "query_timeout"
-                _record_access_decision(
-                    session_factory(),
-                    workspace_id=workspace_id,
-                    actor_id=str(actor_dict.get("actor_id", "unknown")),
-                    result="deny",
-                    reason=reason,
-                    request_context=request_context,
-                    resources={"endpoint": "query", "query_text": query_text},
-                    applied_filters=_serialize_row_filter(abac.row_filter),
-                    applied_masks=abac.masks,
-                    policy_decision_id=policy_decision_id,
-                    event_type="gateway.query",
-                    correlation_id=request.state.request_id,
-                )
-                increment_policy_denial(workspace_id=workspace_id, reason=reason)
-                observe_query_latency(
-                    workspace_id=workspace_id,
-                    engine="sql",
-                    result="deny",
-                    latency_ms=(perf_counter() - started_at) * 1000.0,
-                )
-                raise PolicyDeniedError(
-                    "Access denied by policy",
-                    details={
-                        "reason": reason,
-                        "policy_decision_id": policy_decision_id,
-                        "error": str(exc),
-                    },
-                ) from exc
-            except Exception as exc:  # pragma: no cover - exercised by API tests
-                reason = (
-                    "abac_filter_not_enforceable"
-                    if abac.row_filter is not None
-                    else "query_error"
-                )
-                _record_access_decision(
-                    session_factory(),
-                    workspace_id=workspace_id,
-                    actor_id=str(actor_dict.get("actor_id", "unknown")),
-                    result="deny",
-                    reason=reason,
-                    request_context=request_context,
-                    resources={"endpoint": "query", "query_text": query_text},
-                    applied_filters=_serialize_row_filter(abac.row_filter),
-                    applied_masks=abac.masks,
-                    policy_decision_id=policy_decision_id,
-                    event_type="gateway.query",
-                    correlation_id=request.state.request_id,
-                )
-                increment_policy_denial(workspace_id=workspace_id, reason=reason)
-                observe_query_latency(
-                    workspace_id=workspace_id,
-                    engine="sql",
-                    result="deny",
-                    latency_ms=(perf_counter() - started_at) * 1000.0,
-                )
-                if abac.row_filter is not None:
+                try:
+                    result_set = execute_sql(
+                        query_text or "select 1 as one",
+                        max_rows=max_rows,
+                        row_filter=abac.row_filter,
+                        timeout_ms=timeout_ms,
+                        workspace_id=workspace_id,
+                        storage_root=settings.storage_root,
+                        query_engine=settings.query_engine,
+                        trino_url=settings.trino_url,
+                        trino_user=settings.trino_user,
+                        trino_catalog=settings.trino_catalog,
+                        trino_schema=settings.trino_schema,
+                    )
+                except UnsafeSqlError as exc:
+                    reason = "sql_unsafe"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={"endpoint": "query", "query_text": query_text},
+                        applied_filters=_serialize_row_filter(abac.row_filter),
+                        applied_masks=abac.masks,
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.query",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="sql",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
                     raise PolicyDeniedError(
-                        "Access denied by ABAC",
+                        "Access denied by policy",
                         details={
                             "reason": reason,
                             "policy_decision_id": policy_decision_id,
                             "error": str(exc),
                         },
                     ) from exc
-                raise
-        finally:
+                except QueryTimeoutError as exc:
+                    reason = "query_timeout"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={"endpoint": "query", "query_text": query_text},
+                        applied_filters=_serialize_row_filter(abac.row_filter),
+                        applied_masks=abac.masks,
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.query",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="sql",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={
+                            "reason": reason,
+                            "policy_decision_id": policy_decision_id,
+                            "error": str(exc),
+                        },
+                    ) from exc
+                except Exception as exc:  # pragma: no cover - exercised by API tests
+                    reason = (
+                        "abac_filter_not_enforceable"
+                        if abac.row_filter is not None
+                        else "query_error"
+                    )
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={"endpoint": "query", "query_text": query_text},
+                        applied_filters=_serialize_row_filter(abac.row_filter),
+                        applied_masks=abac.masks,
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.query",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="sql",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    if abac.row_filter is not None:
+                        raise PolicyDeniedError(
+                            "Access denied by ABAC",
+                            details={
+                                "reason": reason,
+                                "policy_decision_id": policy_decision_id,
+                                "error": str(exc),
+                            },
+                        ) from exc
+                    raise
+            finally:
+                rate_limiter.release(actor_id)
+            increment_cost_bytes_scanned(
+                workspace_id=workspace_id,
+                engine="sql",
+                bytes_scanned=max(len(query_text.encode("utf-8")), 1),
+            )
+            masked_rows = []
+            result_columns = list(result_set.columns)
+            column_names = [column["name"] for column in result_set.columns]
+            for row in result_set.rows:
+                masked_row = []
+                for idx, value in enumerate(row):
+                    column_name = (
+                        str(column_names[idx]) if idx < len(column_names) else f"col_{idx}"
+                    )
+                    mask_mode = abac.masks.get(column_name)
+                    masked_row.append(apply_mask(value, mask_mode) if mask_mode else value)
+                masked_rows.append(masked_row)
+            query_cache.set(
+                query_cache_key,
+                {"columns": result_columns, "rows": masked_rows},
+            )
+            increment_gateway_query_cache(workspace_id=workspace_id, result="store")
+        if cached_payload is not None:
             rate_limiter.release(actor_id)
-
-        increment_cost_bytes_scanned(
-            workspace_id=workspace_id,
-            engine="sql",
-            bytes_scanned=max(len(query_text.encode("utf-8")), 1),
-        )
-        masked_rows = []
-        column_names = [column["name"] for column in result_set.columns]
-        for row in result_set.rows:
-            masked_row = []
-            for idx, value in enumerate(row):
-                column_name = str(column_names[idx]) if idx < len(column_names) else f"col_{idx}"
-                mask_mode = abac.masks.get(column_name)
-                masked_row.append(apply_mask(value, mask_mode) if mask_mode else value)
-            masked_rows.append(masked_row)
+            increment_cost_bytes_scanned(
+                workspace_id=workspace_id,
+                engine="sql",
+                bytes_scanned=max(len(query_text.encode("utf-8")), 1),
+            )
         estimated_query_bytes = estimate_query_cost_bytes(
             query_text=query_text,
             row_count=len(masked_rows),
-            column_count=len(result_set.columns),
+            column_count=len(result_columns),
         )
         if not enforce_budget(
             estimated_bytes=estimated_query_bytes,
@@ -679,6 +770,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     else None
                 ),
                 "policy_pack": effective_policy_pack,
+                "query_engine_metadata": (
+                    result_set.execution_metadata if cached_payload is None else {}
+                ),
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
             applied_masks=abac.masks,
@@ -695,7 +789,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
         response_payload = {
             "result": {
-                "columns": result_set.columns,
+                "columns": result_columns,
                 "rows": masked_rows,
                 "row_count": len(masked_rows),
             },
@@ -1416,6 +1510,42 @@ def _request_context(payload: dict[str, object]) -> dict[str, object]:
     return {k: v for k, v in payload.items() if k not in {"actor", "corpus"}}
 
 
+def _build_query_cache_key(
+    *,
+    workspace_id: str,
+    actor_id: str,
+    actor_roles: object,
+    actor_attributes: dict[str, object],
+    query_text: str,
+    datasets_used: list[str],
+    row_filter: tuple[str, str] | None,
+    masks: Mapping[str, object],
+    max_rows: int,
+    timeout_ms: int,
+    query_engine: str,
+    policy_pack: dict[str, object] | None,
+    storage_root: str,
+) -> str:
+    pointer = load_latest_gold_pointer(workspace_id=workspace_id, storage_root=storage_root) or {}
+    payload = {
+        "workspace_id": workspace_id,
+        "actor_id": actor_id,
+        "actor_roles": list(actor_roles) if isinstance(actor_roles, list) else [],
+        "actor_attributes": actor_attributes,
+        "query_text": query_text,
+        "datasets_used": sorted(str(item) for item in datasets_used),
+        "row_filter": _serialize_row_filter(row_filter),
+        "masks": dict(masks),
+        "max_rows": max_rows,
+        "timeout_ms": timeout_ms,
+        "query_engine": query_engine,
+        "policy_pack": policy_pack or {},
+        "snapshot_id": str(pointer.get("snapshot_id", "")),
+        "build_id": str(pointer.get("build_id", "")),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def _serialize_row_filter(row_filter: tuple[str, str] | None) -> dict[str, object]:
     if row_filter is None:
         return {}
@@ -1535,19 +1665,27 @@ def _record_access_decision(
             audit_event_id=event.audit_event_id,
         )
         session.add(decision)
-        _ACTIVE_AUDIT_SINK.emit(
-            {
-                "audit_event_id": event.audit_event_id,
-                "workspace_id": workspace_id,
-                "actor_id": actor_id,
-                "event_type": event_type,
-                "event_json": event.event_json,
-                "correlation_id": correlation_id,
-                "decision_id": policy_decision_id,
-                "result": result,
-                "reason": reason,
-            }
-        )
+        payload = {
+            "audit_event_id": event.audit_event_id,
+            "workspace_id": workspace_id,
+            "actor_id": actor_id,
+            "event_type": event_type,
+            "event_json": event.event_json,
+            "correlation_id": correlation_id,
+            "decision_id": policy_decision_id,
+            "result": result,
+            "reason": reason,
+        }
+        if _AUDIT_SINK_MODE == "inline":
+            _ACTIVE_AUDIT_SINK.emit(payload)
+        else:
+            enqueue_audit_outbox_event(
+                session,
+                service="gateway",
+                workspace_id=workspace_id,
+                audit_event_id=event.audit_event_id,
+                payload=payload,
+            )
         session.commit()
     except AuditSinkError as exc:
         session.rollback()

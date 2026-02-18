@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from plugins.examples.google_drive_connector import discover as discover_google_drive
 from plugins.examples.hubspot_export_connector import discover as discover_hubspot
+from plugins.examples.imap_connector import discover as discover_imap
+from plugins.examples.sftp_connector import discover as discover_sftp
 from plugins.examples.zendesk_export_connector import discover as discover_zendesk
 
 
@@ -22,3 +25,34 @@ def test_zendesk_reference_connector_requires_existing_root(tmp_path: Path) -> N
         assert str(exc) == "root_path_not_found"
     else:  # pragma: no cover
         raise AssertionError("expected root_path_not_found")
+
+
+def test_sftp_reference_connector_discovers_csv_exports(tmp_path: Path) -> None:
+    (tmp_path / "sftp_customers.csv").write_text("id,name\n1,Alice\n", encoding="utf-8")
+    rows = discover_sftp({"root_path": tmp_path.as_posix()})
+    assert len(rows) == 1
+    assert rows[0]["dataset_family"] == "sftp"
+
+
+def test_google_drive_reference_connector_filters_by_prefix(tmp_path: Path) -> None:
+    (tmp_path / "gdrive_invoices.csv").write_text("id,amount\n1,10\n", encoding="utf-8")
+    (tmp_path / "other.csv").write_text("id,amount\n1,99\n", encoding="utf-8")
+    rows = discover_google_drive({"root_path": tmp_path.as_posix()})
+    assert len(rows) == 1
+    assert rows[0]["dataset_family"] == "google_drive"
+
+
+def test_imap_reference_connector_supports_cursor_incrementality(tmp_path: Path) -> None:
+    first = tmp_path / "imap_mailbox_0001.eml"
+    second = tmp_path / "imap_mailbox_0002.eml"
+    first.write_text("From: a@example.com\nSubject: First\n\nBody", encoding="utf-8")
+    second.write_text("From: b@example.com\nSubject: Second\n\nBody", encoding="utf-8")
+    all_rows = discover_imap({"root_path": tmp_path.as_posix()})
+    assert len(all_rows) == 2
+    cursor_token = f"{float(first.stat().st_mtime):020.3f}:{first.as_posix()}"
+    incremental_rows = discover_imap(
+        {"root_path": tmp_path.as_posix(), "cursor_state": {"cursor": cursor_token}}
+    )
+    assert len(incremental_rows) <= 1
+    if incremental_rows:
+        assert incremental_rows[0]["path"].endswith("imap_mailbox_0002.eml")

@@ -36,3 +36,16 @@ def test_filesystem_connector_fails_when_include_globs_empty(tmp_path: Path) -> 
     data.mkdir()
     with pytest.raises(ValueError, match="include_globs"):
         discover_files(root_path=data.as_posix(), include_globs=[])
+
+
+def test_filesystem_connector_fails_closed_on_backpressure_limits(tmp_path: Path) -> None:
+    data = tmp_path / "exports"
+    data.mkdir()
+    (data / "a.csv").write_text("id\n1\n", encoding="utf-8")
+    (data / "b.csv").write_text("id\n2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="backpressure"):
+        discover_files(
+            root_path=data.as_posix(),
+            include_globs=["**/*.csv"],
+            max_files=1,
+        )

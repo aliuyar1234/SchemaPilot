@@ -1,0 +1,22 @@
+name: Pack Validation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  pack-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Validate pack registry + signatures
+        run: python tools/pack_lint.py
+      - name: Validate policy pack invariants
+        run: python tools/policy_pack_test.py
+      - name: Validate semantic manifest example
+        run: python tools/semantic_validate.py backend/shared_domain/semantic_manifest.example.json

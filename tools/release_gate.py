@@ -151,9 +151,27 @@ def main() -> int:
             None,
         ),
         (
+            "RG-007C",
+            "Connector conformance harness",
+            [sys.executable, "tools/connector_conformance.py"],
+            None,
+        ),
+        (
             "RG-008",
             "Performance harness",
             [sys.executable, "tools/perf_harness.py"],
+            None,
+        ),
+        (
+            "RG-008A",
+            "Security fuzzing harness",
+            [sys.executable, "tools/security_fuzz.py", "--iterations", "100", "--seed", "1337"],
+            None,
+        ),
+        (
+            "RG-008B",
+            "Chaos drills",
+            [sys.executable, "tools/chaos_drills.py"],
             None,
         ),
         (
@@ -166,6 +184,24 @@ def main() -> int:
             "RG-010",
             "SSOT reference integrity",
             [sys.executable, "tools/ssot_verify.py"],
+            None,
+        ),
+        (
+            "RG-011",
+            "SBOM generation",
+            [sys.executable, "tools/generate_sbom.py"],
+            None,
+        ),
+        (
+            "RG-012",
+            "Build provenance generation",
+            [sys.executable, "tools/generate_build_provenance.py"],
+            None,
+        ),
+        (
+            "RG-013",
+            "Release artifact signing",
+            [sys.executable, "tools/sign_release_artifacts.py"],
             None,
         ),
     ]

@@ -12,8 +12,10 @@ def test_execute_sql_uses_trino_adapter_with_pagination(monkeypatch) -> None:
     responses = iter(
         [
             {
+                "id": "query_abc",
                 "columns": [{"name": "value", "type": "bigint"}],
                 "data": [[1]],
+                "stats": {"processedBytes": 128},
                 "nextUri": "http://trino.local/next",
             },
             {
@@ -37,6 +39,8 @@ def test_execute_sql_uses_trino_adapter_with_pagination(monkeypatch) -> None:
     assert result.row_count == 2
     assert result.columns[0]["name"] == "value"
     assert result.rows == [[1], [2]]
+    assert result.execution_metadata is not None
+    assert result.execution_metadata.get("query_id") == "query_abc"
 
 
 def test_trino_path_still_denies_unsafe_sql_before_remote_execution(monkeypatch) -> None:

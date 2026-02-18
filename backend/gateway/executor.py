@@ -19,6 +19,7 @@ class QueryResult:
     columns: list[dict[str, str]]
     rows: list[list[object]]
     row_count: int
+    execution_metadata: dict[str, object] | None = None
 
 
 FILTER_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -108,11 +109,11 @@ def execute_sql(
         raise QueryTimeoutError("query_timeout_exceeded")
 
     if query_engine == "trino":
-        from backend.gateway.executor_trino import execute_sql_trino
+        from backend.gateway.executor_trino import execute_sql_trino_with_metadata
 
         started_at = perf_counter()
         try:
-            columns, trino_rows = execute_sql_trino(
+            columns, trino_rows, metadata = execute_sql_trino_with_metadata(
                 query=query,
                 max_rows=capped_rows,
                 timeout_ms=budget_ms,
@@ -132,7 +133,12 @@ def execute_sql(
             row_filter=row_filter,
             capped_rows=capped_rows,
         )
-        return QueryResult(columns=columns, rows=rows, row_count=len(rows))
+        return QueryResult(
+            columns=columns,
+            rows=rows,
+            row_count=len(rows),
+            execution_metadata=metadata,
+        )
 
     connection = duckdb.connect(database=":memory:")
     try:
@@ -166,7 +172,7 @@ def execute_sql(
             )
     finally:
         connection.close()
-    return QueryResult(columns=columns, rows=rows, row_count=len(rows))
+    return QueryResult(columns=columns, rows=rows, row_count=len(rows), execution_metadata={})
 
 
 def _apply_optional_row_filter(

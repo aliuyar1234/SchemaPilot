@@ -94,3 +94,8 @@ The loader in `backend/shared_domain/policy_packs.py` reads this file, exposes s
 
 `deploy/k8s/` contains non-default manifests for operators that need Kubernetes deployment wiring.
 These manifests are intentionally minimal and should be adapted per environment standards.
+
+## Reference profiles and upgrade path
+
+- Reference deployment profiles: `deploy/REFERENCE_DEPLOYMENTS.md`
+- Upgrade path and rollback steps: `deploy/UPGRADE_PLAYBOOK.md`

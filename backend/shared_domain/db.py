@@ -45,7 +45,7 @@ def prepare_database(settings: Settings) -> None:
     if settings.is_local_bind:
         Base.metadata.create_all(bind=engine)
         return
-    required_revision = os.getenv("SCHEMAPILOT_REQUIRED_DB_REVISION", "0001_initial_schema")
+    required_revision = os.getenv("SCHEMAPILOT_REQUIRED_DB_REVISION", "0003_run_step_dag")
     ensure_required_revision(engine=engine, required_revision=required_revision)
 
 

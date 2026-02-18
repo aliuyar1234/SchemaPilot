@@ -99,6 +99,7 @@ def decide_policy_pack_change(
     approver_actor_id: str,
     decision: str,
     reason: str,
+    canary_enabled: bool = False,
 ) -> dict[str, object] | None:
     """Approve/reject/defer staged policy-pack changes and apply when approved."""
     staged_row = _get_change_request_row(
@@ -147,6 +148,27 @@ def decide_policy_pack_change(
                 "failures": invariant_failures,
             },
         )
+    if canary_enabled:
+        canary_state = _upsert_policy_pack_canary(
+            session,
+            workspace_id=workspace_id,
+            requested_pack_id=requested_pack_id,
+            requested_pack_checksum=str(staged.get("requested_pack_checksum", "")),
+            requested_by=str(staged.get("requester_actor_id", "")),
+            approved_by=approver_actor_id,
+            change_request_id=change_request_id,
+        )
+        staged["status"] = "canary_active"
+        staged["approved_by"] = approver_actor_id
+        staged["decision_reason"] = reason
+        staged_row.status = "canary_active"
+        staged_row.definition_ref = json.dumps(staged, sort_keys=True)
+        session.flush()
+        return {
+            "change_request_id": change_request_id,
+            "status": "canary_active",
+            "canary": canary_state,
+        }
     current_version = int(active.get("version", 0))
     next_version = current_version + 1
     next_state = {
@@ -217,6 +239,96 @@ def rollback_policy_pack(
     return {"status": "rolled_back", "effective_policy_pack": rollback_state}
 
 
+def get_policy_pack_canary(
+    session: Session, *, workspace_id: str
+) -> dict[str, object] | None:
+    """Return canary policy-pack state for a workspace."""
+    row = (
+        session.execute(
+            select(GovernancePolicy).where(
+                GovernancePolicy.workspace_id == workspace_id,
+                GovernancePolicy.policy_type == "policy_pack_canary",
+                GovernancePolicy.status == "active",
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        return None
+    definition = _load_definition(row.definition_ref)
+    return {
+        "workspace_id": workspace_id,
+        "pack_id": str(definition.get("pack_id", "")),
+        "pack_checksum": str(definition.get("pack_checksum", "")),
+        "requested_by": str(definition.get("requested_by", "")),
+        "approved_by": str(definition.get("approved_by", "")),
+        "change_request_id": str(definition.get("change_request_id", "")),
+        "status": str(definition.get("status", "canary_active")),
+    }
+
+
+def promote_policy_pack_canary(
+    session: Session,
+    *,
+    workspace_id: str,
+    actor_id: str,
+) -> dict[str, object]:
+    """Promote active canary policy pack into effective policy pack."""
+    canary = get_policy_pack_canary(session, workspace_id=workspace_id)
+    if canary is None:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "policy_pack_canary_not_found"},
+        )
+    active = get_effective_policy_pack(session, workspace_id=workspace_id) or {}
+    next_version = int(active.get("version", 0)) + 1
+    next_state = {
+        "workspace_id": workspace_id,
+        "pack_id": canary["pack_id"],
+        "pack_checksum": canary["pack_checksum"],
+        "version": next_version,
+        "previous_pack_id": str(active.get("pack_id", "")),
+        "previous_pack_checksum": str(active.get("pack_checksum", "")),
+    }
+    active_row = _get_active_policy_pack_row(session, workspace_id=workspace_id)
+    if active_row is None:
+        active_row = GovernancePolicy(
+            policy_id=new_ulid(),
+            workspace_id=workspace_id,
+            policy_type="policy_pack",
+            definition_ref=json.dumps(next_state, sort_keys=True),
+            status="active",
+        )
+        session.add(active_row)
+    else:
+        active_row.definition_ref = json.dumps(next_state, sort_keys=True)
+        active_row.status = "active"
+    row = (
+        session.execute(
+            select(GovernancePolicy).where(
+                GovernancePolicy.workspace_id == workspace_id,
+                GovernancePolicy.policy_type == "policy_pack_canary",
+                GovernancePolicy.status == "active",
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is not None:
+        definition = _load_definition(row.definition_ref)
+        definition["status"] = "promoted"
+        definition["promoted_by"] = actor_id
+        row.definition_ref = json.dumps(definition, sort_keys=True)
+        row.status = "promoted"
+    session.flush()
+    return {
+        "status": "promoted",
+        "effective_policy_pack": next_state,
+        "canary_change_request_id": canary["change_request_id"],
+    }
+
+
 def get_effective_policy_pack(
     session: Session, *, workspace_id: str
 ) -> dict[str, object] | None:
@@ -245,6 +357,52 @@ def _load_policy_pack(pack_id: str) -> dict[str, object]:
 def _pack_checksum(pack: dict[str, object]) -> str:
     canonical = json.dumps(pack, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _upsert_policy_pack_canary(
+    session: Session,
+    *,
+    workspace_id: str,
+    requested_pack_id: str,
+    requested_pack_checksum: str,
+    requested_by: str,
+    approved_by: str,
+    change_request_id: str,
+) -> dict[str, object]:
+    payload = {
+        "workspace_id": workspace_id,
+        "pack_id": requested_pack_id,
+        "pack_checksum": requested_pack_checksum,
+        "requested_by": requested_by,
+        "approved_by": approved_by,
+        "change_request_id": change_request_id,
+        "status": "canary_active",
+    }
+    existing = (
+        session.execute(
+            select(GovernancePolicy).where(
+                GovernancePolicy.workspace_id == workspace_id,
+                GovernancePolicy.policy_type == "policy_pack_canary",
+                GovernancePolicy.status == "active",
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing is None:
+        existing = GovernancePolicy(
+            policy_id=new_ulid(),
+            workspace_id=workspace_id,
+            policy_type="policy_pack_canary",
+            definition_ref=json.dumps(payload, sort_keys=True),
+            status="active",
+        )
+        session.add(existing)
+    else:
+        existing.definition_ref = json.dumps(payload, sort_keys=True)
+        existing.status = "active"
+    session.flush()
+    return payload
 
 
 def _get_active_policy_pack_row(session: Session, *, workspace_id: str) -> GovernancePolicy | None:

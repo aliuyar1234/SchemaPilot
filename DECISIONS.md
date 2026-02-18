@@ -62,6 +62,10 @@
 - D-0059 Retrieval ABAC parity baseline (metadata-bound row filters + snippet masking across retrieval backends)
 - D-0060 AI/ops extension baseline (optional AI service + policy simulation + catalog/scheduling/fairness + audit sinks + secrets + Helm hardening)
 - D-0061 Completion baseline for NW-0026..NW-0034 and AI track (demo generator, docs wave, pack registry, Trino hardening, compaction, anomaly/ERv2, locale parsing, typed SDK)
+- D-0062 Config/doctor operability baseline (`V2-0005` strict config schema and `V2-0003` deterministic preflight diagnostics)
+- D-0063 Audit outbox delivery baseline (`V2-0001` durable sink dispatch decoupling with fail-closed local audit writes)
+- D-0064 Operator diagnostics baseline (`V2-0002`, `V2-0004`, `V2-0032`: run-step DAG visibility + redacted support bundle + workspace analytics CLI)
+- D-0065 Completion baseline for remaining `TASKLIST_NEXT_V2` items (`V2-0006`..`V2-0031`)
 
 ---
 
@@ -2603,6 +2607,200 @@ This closes the entire execution board while preserving minimal UI and CLI/opera
 - Critical flow impacted: YES (query/retrieval and worker quality gates)  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES (optional paths remain disabled-by-default)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0062 Config/doctor operability baseline (`V2-0005` strict config schema and `V2-0003` deterministic preflight diagnostics)
+
+**Decision**  
+Implement the first `TASKLIST_NEXT_V2` lane with:
+- strict config file support (`.json` and simple `.yaml`) for runtime settings,
+- fail-closed unknown config key handling,
+- explicit redaction contract for diagnostics (`Settings.to_redacted_dict`),
+- deterministic CLI doctor preflight checks over settings validation, storage/database, migration posture, no-bypass deploy artifacts, secrets backend availability, and JWKS reachability.
+
+**Rationale**  
+Operator experience and install safety are the highest-value next milestone. Configuration drift and unclear setup errors are major adoption blockers.
+
+**Alternatives considered**  
+- Keep env-only config without strict validation (rejected: higher misconfiguration risk and weaker reproducibility).  
+- Keep `doctor` as a thin wrapper over SSOT scripts only (rejected: insufficient operational signal for deploy/runtime safety).
+
+**Implications**  
+- Invalid/unknown config keys now fail early when config files are used.
+- Diagnostics can safely print redacted settings context.
+- Operators can use `schemapilot doctor --config <path>` for deterministic preflight health.
+
+**Affected files**  
+- evidence: backend/shared_domain/config.py :: def load_settings(config_path: str | None = None) -> Settings:
+- evidence: backend/shared_domain/config.py :: def to_redacted_dict(self) -> dict[str, object]:
+- evidence: cli/schemapilot_cli/doctor.py :: run_doctor_preflight
+- evidence: cli/schemapilot_cli/main.py :: doctor
+- evidence: tests/test_config_loading_v2.py :: test_load_settings_rejects_unknown_config_keys
+- evidence: tests/test_doctor_preflight.py :: test_doctor_preflight_passes_with_valid_local_config
+- evidence: tests/test_cli_commands.py :: test_doctor_command_returns_ok_report_for_valid_config
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_config_loading_v2.py tests/test_doctor_preflight.py tests/test_cli_commands.py :: [100%]
+- evidence: python -m pytest -q :: [100%]
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (startup safety and operator preflight diagnostics)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (fail-closed config validation and deterministic check list)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0063 Audit outbox delivery baseline (`V2-0001` durable sink dispatch decoupling with fail-closed local audit writes)
+
+**Decision**  
+Implement durable audit sink delivery via outbox semantics:
+- keep local audit persistence fail-closed for control-plane and gateway operations,
+- enqueue sink payloads into `audit_outbox_events` inside the same DB transaction as audit rows,
+- dispatch queued sink payloads in bounded batches with retry caps and explicit `pending|sent|failed` status transitions,
+- keep inline sink mode as an explicit compatibility override while defaulting to `outbox`.
+
+**Rationale**  
+Direct in-request sink delivery made availability dependent on optional integrations. Outbox delivery preserves audit correctness while decoupling external sink outages from core request success.
+
+**Alternatives considered**  
+- Keep synchronous sink delivery only (rejected: operational coupling and avoidable denials).  
+- Make sink delivery best-effort without durable queue state (rejected: no backlog visibility, weak operability).
+
+**Implications**  
+- Sink outages now accumulate visible backlog without bypassing local audit writes.
+- Local DB audit failures still deny critical operations.
+- Operators can tune batch size and retry bounds through strict config fields.
+
+**Affected files**  
+- evidence: backend/shared_domain/audit_models.py :: class AuditOutboxEvent
+- evidence: backend/shared_domain/audit_outbox.py :: dispatch_audit_outbox_batch
+- evidence: backend/shared_domain/observability.py :: schemapilot_audit_outbox_backlog_total
+- evidence: backend/control_plane/app.py :: append_audit_event
+- evidence: backend/gateway/app.py :: _record_access_decision
+- evidence: migrations/versions/0002_audit_outbox_events.py :: upgrade
+- evidence: tests/test_audit_sinks.py :: test_webhook_audit_sink_failure_queues_outbox_without_denying_request
+- evidence: tests/test_audit_outbox.py :: test_dispatch_outbox_bounds_retries_and_marks_failed
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_audit_outbox.py tests/test_audit_sinks.py tests/test_audit_fail_closed.py tests/test_migrations_enforced.py :: [100%]
+- evidence: python -m pytest -q :: [100%]
+- evidence: python tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (audit durability and authorization-denial semantics)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (local audit write remains mandatory and fail-closed)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0064 Operator diagnostics baseline (`V2-0002`, `V2-0004`, `V2-0032`: run-step DAG visibility + redacted support bundle + workspace analytics CLI)
+
+**Decision**  
+Implement operator-facing diagnostics on top of the hardened runtime:
+- add run-step DAG persistence (`runs_run_steps`) with deterministic step ordering, per-step status transitions, timing, error codes, and evidence references,
+- expose run-step state through control-plane run responses and a dedicated run-steps endpoint,
+- add CLI workspace analytics (`schemapilot analyze`) summarizing policy denials, review backlog, run/run-step health, and outbox backlog,
+- add CLI redacted diagnostics bundle (`schemapilot diag-bundle`) exporting settings, analytics, recent runs/steps, and minimal audit excerpts without raw data payloads.
+
+**Rationale**  
+The platform had strong controls but limited day-2 operability visibility. Step-level execution telemetry and deterministic support bundles reduce MTTR without adding UI complexity.
+
+**Alternatives considered**  
+- Build dashboard-heavy UI first (rejected: violates minimal-UI priority).  
+- Keep run status coarse-grained (rejected: weak failure attribution for strict ingest/governance gates).
+
+**Implications**  
+- Worker failures are attributable to explicit step nodes with evidence pointers.
+- Operators can generate self-contained support bundles without exposing secrets.
+- CLI analytics provides quick “why blocked/why denied” summaries directly from runtime state.
+
+**Affected files**  
+- evidence: backend/shared_domain/metadata_models.py :: class RunStepRecord
+- evidence: migrations/versions/0003_run_step_dag.py :: upgrade
+- evidence: backend/workers/run_processor.py :: RUN_STEP_DEFINITIONS
+- evidence: backend/control_plane/repository.py :: list_run_steps
+- evidence: backend/control_plane/app.py :: /api/v1/workspaces/{workspace_id}/runs/{run_id}/steps
+- evidence: cli/schemapilot_cli/analyze.py :: analyze_workspace
+- evidence: cli/schemapilot_cli/diag.py :: generate_diag_bundle
+- evidence: cli/schemapilot_cli/main.py :: analyze
+- evidence: cli/schemapilot_cli/main.py :: diag-bundle
+- evidence: tests/test_run_steps.py :: test_run_step_failure_records_evidence_for_strict_completeness
+- evidence: tests/test_cli_operability_v2.py :: test_diag_bundle_command_writes_redacted_zip
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_run_steps.py tests/test_cli_operability_v2.py tests/test_cli_commands.py tests/test_worker_runner.py tests/test_control_plane_api.py :: [100%]
+- evidence: python -m pytest -q :: [100%]
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (run execution, support diagnostics, audit-derived analytics)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (all new surfaces are additive and fail-closed run behavior is preserved)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0065 Completion baseline for remaining `TASKLIST_NEXT_V2` items (`V2-0006`..`V2-0031`)
+
+**Decision**  
+Mark the remaining V2 execution lane as complete based on implemented code paths and full regression verification, covering:
+- pack trust and lifecycle (`V2-0007`, `V2-0015`, `V2-0031`),
+- connector certification/state/connectors (`V2-0010`, `V2-0014`, `V2-0011`, `V2-0012`, `V2-0013`),
+- CLI operator flows (`V2-0016`..`V2-0019`),
+- performance and execution controls (`V2-0020`..`V2-0024`),
+- security/observability hardening (`V2-0009`, `V2-0025`, `V2-0026`, `V2-0027`, `V2-0008`),
+- enterprise tail tasks (`V2-0028`, `V2-0029`, `V2-0030`, `V2-0006`).
+
+**Rationale**  
+The implementation branch already contained these features but task status files lagged behind. A full suite re-validation confirms they are integrated and stable.
+
+**Implications**  
+- `TASKLIST_NEXT_V2.md` is fully checked.
+- The project can move to post-V2 prioritization without unresolved board debt.
+- Security and operability defaults remain fail-closed and minimal-UI.
+
+**Affected files**  
+- evidence: tools/pack_lint.py :: validate_pack_registry
+- evidence: tools/pack_migrate.py :: migrate_pack_payload
+- evidence: tools/connector_conformance.py :: runtime/connector_conformance/report.json
+- evidence: backend/shared_domain/connector_state.py :: load_connector_state
+- evidence: plugins/examples/sftp_connector.py :: discover
+- evidence: plugins/examples/google_drive_connector.py :: discover
+- evidence: plugins/examples/imap_connector.py :: discover
+- evidence: cli/schemapilot_cli/main.py :: init_interactive
+- evidence: cli/schemapilot_cli/main.py :: review_batch
+- evidence: cli/schemapilot_cli/main.py :: query
+- evidence: cli/schemapilot_cli/main.py :: policy_audit_report
+- evidence: backend/gateway/query_cache.py :: InMemoryQueryCache
+- evidence: backend/workers/run_processor.py :: _process_materialized_refresh_run
+- evidence: backend/shared_domain/tracing.py :: start_trace
+- evidence: tools/security_fuzz.py :: run_fuzz
+- evidence: tools/chaos_drills.py :: run_drills
+- evidence: tools/generate_sbom.py :: build_sbom
+- evidence: backend/control_plane/deletion.py :: _build_deletion_attestation
+- evidence: backend/shared_domain/artifact_crypto.py :: encrypt_payload
+- evidence: deploy/REFERENCE_DEPLOYMENTS.md :: Reference Deployments
+- evidence: backend/control_plane/policy_pack_service.py :: promote_policy_pack_canary
+
+**Verification impact**  
+- evidence: python -m pytest -q :: [100%]
+- evidence: python -m pytest -q tests/test_cli_commands.py tests/test_reference_connectors.py tests/test_connector_state.py tests/test_connector_conformance.py tests/test_gateway_query_cache.py tests/test_policy_pack_change_gating.py tests/test_worker_materialized_refresh.py tests/test_artifact_encryption.py tests/test_tracing.py tests/test_pack_lint.py tests/test_pack_migrate.py tests/test_supply_chain_tools.py tests/test_plugin_sandbox.py tests/test_incremental_ingest_state.py tests/test_security_fuzz_tool.py tests/test_filesystem_connector.py tests/test_gateway_trino_adapter.py :: [100%]
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (gateway, audit, worker execution, deployment hardening)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (optional modules remain explicit opt-in)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

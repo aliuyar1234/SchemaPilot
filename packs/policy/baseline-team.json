@@ -1,6 +1,11 @@
 {
   "pack_id": "baseline-team",
+  "schema_version": "v2",
   "version": "1.0.0",
+  "compatibility": {
+    "max_runtime_version": "0.x",
+    "min_runtime_version": "0.1.0"
+  },
   "defaults": {
     "abac_mode": "strict",
     "masking_enabled": true,

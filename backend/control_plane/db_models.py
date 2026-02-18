@@ -6,6 +6,7 @@ from backend.shared_domain.db import Base
 from backend.shared_domain.metadata_models import (
     AccessDecision,
     AuditEvent,
+    AuditOutboxEvent,
     CatalogDataset,
     CatalogSource,
     GovernancePolicy,
@@ -13,6 +14,7 @@ from backend.shared_domain.metadata_models import (
     ReviewProposal,
     ReviewTask,
     RunRecord,
+    RunStepRecord,
     Workspace,
 )
 
@@ -21,11 +23,13 @@ __all__ = [
     "CatalogSource",
     "CatalogDataset",
     "RunRecord",
+    "RunStepRecord",
     "ReviewProposal",
     "ReviewTask",
     "ReviewApproval",
     "GovernancePolicy",
     "AuditEvent",
     "AccessDecision",
+    "AuditOutboxEvent",
     "Base",
 ]

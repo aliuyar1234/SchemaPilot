@@ -95,6 +95,8 @@ def test_deletion_workflow_enforces_separation_of_duties(tmp_path: Path) -> None
     body = execute_response.json()
     assert body["status"] == "executed"
     assert str(body["evidence_bundle_uri"]).startswith("evidence://")
+    assert body["attestation"]["algorithm"] == "HMAC-SHA256"
+    assert body["attestation"]["signature"]
 
 
 def test_legal_hold_is_server_side_truth_for_deletions(tmp_path: Path) -> None:

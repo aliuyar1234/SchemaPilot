@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.shared_domain.db import get_engine, get_session_factory
 from backend.shared_domain.metadata_models import Base
+from backend.shared_domain.observability import log_structured_event
 from backend.shared_domain.scheduling import enqueue_due_scheduled_runs
+from backend.shared_domain.tracing import start_trace
 from backend.workers.run_processor import process_next_queued_run
 
 
@@ -40,6 +42,12 @@ def process_queued_runs_once(
     try:
         enqueue_due_scheduled_runs(session)
         while processed < max_runs:
+            trace_context = start_trace(
+                service_name="schemapilot-worker",
+                operation="worker.process_next_queued_run",
+                correlation_id=f"worker-tick-{processed}",
+                enabled=os.getenv("SCHEMAPILOT_TRACING_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+            )
             outcome = process_next_queued_run(
                 session,
                 storage_root=storage_root,
@@ -48,6 +56,20 @@ def process_queued_runs_once(
             )
             if outcome is None:
                 break
+            log_structured_event(
+                level="info",
+                msg="worker.run_processed",
+                service="worker",
+                correlation_id=trace_context.trace_id,
+                workspace_id=outcome.workspace_id,
+                actor_id="worker:runner",
+                event_type="run.processed",
+                extra={
+                    "run_id": outcome.run_id,
+                    "run_type": outcome.run_type,
+                    "status": outcome.status,
+                },
+            )
             processed += 1
         session.commit()
         return processed

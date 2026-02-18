@@ -27,6 +27,8 @@ from backend.control_plane.gating import evaluate_gold_publish_gate
 from backend.control_plane.policy_pack_service import (
     decide_policy_pack_change,
     get_effective_policy_pack,
+    get_policy_pack_canary,
+    promote_policy_pack_canary,
     request_policy_pack_change,
     rollback_policy_pack,
 )
@@ -41,6 +43,7 @@ from backend.control_plane.repository import (
     get_run,
     get_workspace,
     list_datasets,
+    list_run_steps,
     list_sources,
     list_workspaces,
     update_source,
@@ -77,6 +80,10 @@ from backend.control_plane.source_health import (
     evaluate_source_slas,
     list_source_slas,
 )
+from backend.shared_domain.audit_outbox import (
+    dispatch_audit_outbox_batch,
+    enqueue_audit_outbox_event,
+)
 from backend.shared_domain.auth import (
     actor_has_any_role,
     authenticated_actor_from_request,
@@ -100,7 +107,7 @@ from backend.shared_domain.observability import (
     render_metrics,
     set_review_queue_backlog,
 )
-from backend.shared_domain.audit_sinks import AuditSinkError, load_audit_sink
+from backend.shared_domain.audit_sinks import load_audit_sink
 from backend.shared_domain.plugin_loader import load_connector_plugin_specs
 from backend.shared_domain.policy_packs import list_policy_pack_summaries
 from backend.shared_domain.secrets_store import load_secrets_store
@@ -108,6 +115,7 @@ from backend.shared_domain.scheduling import (
     create_run_schedule,
     list_run_schedules,
 )
+from backend.shared_domain.tracing import start_trace
 from backend.shared_domain.lineage_sql import derive_column_lineage
 
 
@@ -132,6 +140,24 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         try:
             yield session
             session.commit()
+            if settings.audit_sink_mode == "outbox":
+                try:
+                    dispatch_audit_outbox_batch(
+                        session_factory=session_factory,
+                        sink=audit_sink,
+                        service="control_plane",
+                        max_batch=settings.audit_outbox_dispatch_batch_size,
+                        max_attempts=settings.audit_outbox_max_attempts,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive runtime fallback
+                    log_structured_event(
+                        level="error",
+                        msg="audit.outbox_dispatch_failed",
+                        service="control_plane",
+                        correlation_id="control-plane-dispatch",
+                        event_type="audit.outbox_dispatch_failed",
+                        extra={"error": str(exc)},
+                    )
         except Exception:
             session.rollback()
             raise
@@ -142,8 +168,16 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     async def request_context_middleware(request: Request, call_next: Callable):
         request_id = request.headers.get("x-request-id", new_ulid())
         request.state.request_id = request_id
+        trace_context = start_trace(
+            service_name=settings.tracing_service_name,
+            operation=f"{request.method}:{request.url.path}",
+            correlation_id=request_id,
+            enabled=settings.tracing_enabled,
+        )
+        request.state.trace_id = trace_context.trace_id
         response = await call_next(request)
         response.headers["x-request-id"] = request_id
+        response.headers["x-trace-id"] = trace_context.trace_id
         log_structured_event(
             level="info",
             msg="request.completed",
@@ -228,18 +262,17 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 event_json=event_json,
                 correlation_id=correlation_id,
             )
-            audit_sink.emit(event)
+            if settings.audit_sink_mode == "inline":
+                audit_sink.emit(event)
+            else:
+                enqueue_audit_outbox_event(
+                    session,
+                    service="control_plane",
+                    workspace_id=workspace_id,
+                    audit_event_id=str(event["audit_event_id"]),
+                    payload=event,
+                )
             return event
-        except AuditSinkError as exc:
-            increment_audit_write_failure(
-                workspace_id=workspace_id or "unknown",
-                service="control_plane",
-                operation=f"{event_type}:audit_sink",
-            )
-            raise PolicyDeniedError(
-                "Access denied by policy",
-                details={"reason": "audit_sink_unavailable", "operation": event_type},
-            ) from exc
         except Exception as exc:
             increment_audit_write_failure(
                 workspace_id=workspace_id or "unknown",
@@ -401,6 +434,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         actor = require_actor(request, roles=steward_or_admin_roles)
         decision = str(payload.get("decision", "defer"))
         reason = str(payload.get("decision_reason", ""))
+        canary_enabled = bool(payload.get("canary", settings.policy_pack_canary_enabled))
         result = decide_policy_pack_change(
             session,
             workspace_id=workspace_id,
@@ -408,6 +442,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             approver_actor_id=str(actor.get("actor_id", "unknown")),
             decision=decision,
             reason=reason,
+            canary_enabled=canary_enabled,
         )
         if result is None:
             return not_found_response(
@@ -438,6 +473,44 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             workspace_id=workspace_id,
             actor_id=str(actor.get("actor_id", "unknown")),
             event_type="policy_pack.rolled_back",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.get("/api/v1/workspaces/{workspace_id}/policy-pack/canary")
+    async def api_get_policy_pack_canary(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=steward_or_admin_roles)
+        canary = get_policy_pack_canary(session, workspace_id=workspace_id)
+        if canary is not None:
+            return canary
+        return not_found_response(
+            request=request,
+            message="Policy pack canary not found.",
+            details={"workspace_id": workspace_id},
+        )  # type: ignore[return-value]
+
+    @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/canary/promote")
+    async def api_promote_policy_pack_canary(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        result = promote_policy_pack_canary(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="policy_pack.canary_promoted",
             event_json=result,
             correlation_id=request.state.request_id,
         )
@@ -969,6 +1042,22 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 details={"workspace_id": workspace_id, "run_id": run_id},
             )  # type: ignore[return-value]
         return run
+
+    @app.get("/api/v1/workspaces/{workspace_id}/runs/{run_id}/steps")
+    async def api_list_run_steps(
+        workspace_id: str,
+        run_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        run = get_run(session, workspace_id=workspace_id, run_id=run_id)
+        if run is None:
+            return not_found_response(
+                request=request,
+                message="Run not found.",
+                details={"workspace_id": workspace_id, "run_id": run_id},
+            )  # type: ignore[return-value]
+        return list_run_steps(session, workspace_id=workspace_id, run_id=run_id)
 
     @app.get("/api/v1/workspaces/{workspace_id}/run-schedules")
     async def api_list_run_schedules(

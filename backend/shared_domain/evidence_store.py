@@ -7,6 +7,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.shared_domain.artifact_crypto import (
+    decrypt_payload,
+    encrypt_payload,
+    load_artifact_crypto_config,
+)
 from backend.shared_domain.errors import NotFoundError
 
 EVIDENCE_URI_PREFIX = "evidence://"
@@ -45,8 +50,13 @@ def store_evidence_bundle(
         "workspace_id": workspace_id,
         "bundle_type": safe_bundle_type,
         "content_hash": content_hash,
-        "payload": payload,
     }
+    envelope.update(
+        encrypt_payload(
+            payload=payload,
+            config=load_artifact_crypto_config(),
+        )
+    )
     envelope_json = json.dumps(envelope, indent=2, sort_keys=True)
     if bundle_path.exists():
         existing_json = bundle_path.read_text(encoding="utf-8")
@@ -79,7 +89,10 @@ def load_evidence_bundle(
     raw = json.loads(bundle_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("Evidence bundle content is invalid.")
-    return {str(key): value for key, value in raw.items()}
+    payload = decrypt_payload(envelope=raw, config=load_artifact_crypto_config())
+    normalized = {str(key): value for key, value in raw.items() if key != "payload"}
+    normalized["payload"] = payload
+    return normalized
 
 
 def resolve_evidence_uri(uri: str, *, storage_root: str) -> dict[str, object]:

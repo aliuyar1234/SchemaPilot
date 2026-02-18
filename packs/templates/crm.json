@@ -1,0 +1,14 @@
+{
+  "pack_id": "crm",
+  "schema_version": "v2",
+  "version": "1.0.0",
+  "compatibility": {
+    "max_runtime_version": "0.x",
+    "min_runtime_version": "0.1.0",
+    "semantic_manifest_version": "1"
+  },
+  "template_models": [
+    "crm_pipeline_stage_counts"
+  ],
+  "template_type": "gold"
+}

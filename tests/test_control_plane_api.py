@@ -57,6 +57,11 @@ def test_workspace_source_run_flow() -> None:
     run_get_response = client.get(f"/api/v1/workspaces/{workspace_id}/runs/{run_id}")
     assert run_get_response.status_code == 200
     assert run_get_response.json()["run_type"] == "discover"
+    assert isinstance(run_get_response.json()["run_steps"], list)
+
+    run_steps_response = client.get(f"/api/v1/workspaces/{workspace_id}/runs/{run_id}/steps")
+    assert run_steps_response.status_code == 200
+    assert isinstance(run_steps_response.json(), list)
 
 
 def test_control_plane_not_found_responses_follow_error_contract() -> None:

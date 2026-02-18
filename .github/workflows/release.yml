@@ -29,11 +29,24 @@ jobs:
       - name: Run release gate
         run: python tools/release_gate.py --output runtime/release_gate/report.json
 
+      - name: Generate SBOM
+        run: python tools/generate_sbom.py --output runtime/supply_chain/sbom.json
+
+      - name: Generate build provenance
+        run: python tools/generate_build_provenance.py --output runtime/supply_chain/provenance.json
+
+      - name: Sign release artifacts
+        run: python tools/sign_release_artifacts.py --output runtime/supply_chain/signature.json
+
       - name: Upload release gate report
         uses: actions/upload-artifact@v4
         with:
           name: release-gate-report
-          path: runtime/release_gate/report.json
+          path: |
+            runtime/release_gate/report.json
+            runtime/supply_chain/sbom.json
+            runtime/supply_chain/provenance.json
+            runtime/supply_chain/signature.json
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -42,3 +55,6 @@ jobs:
           files: |
             MANIFEST.sha256
             runtime/release_gate/report.json
+            runtime/supply_chain/sbom.json
+            runtime/supply_chain/provenance.json
+            runtime/supply_chain/signature.json

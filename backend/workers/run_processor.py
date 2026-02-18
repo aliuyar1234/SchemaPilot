@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -13,6 +15,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.shared_domain.audit_models import AuditEvent
+from backend.shared_domain.connector_state import (
+    load_connector_state,
+    next_cursor_from_discovery_rows,
+    save_connector_state,
+)
 from backend.shared_domain.evidence_store import store_evidence_bundle
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import (
@@ -22,8 +29,10 @@ from backend.shared_domain.metadata_models import (
     ReviewProposal,
     ReviewTask,
     RunRecord,
+    RunStepRecord,
 )
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
+from backend.shared_domain.observability import observe_worker_step_duration
 from backend.workers.anomaly_detection import detect_profile_anomalies
 from backend.workers.bronze import ingest_file_to_bronze
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
@@ -39,6 +48,8 @@ PROFILE_SAMPLE_LIMIT = 1000
 WORKER_ACTOR_ID = "worker:runner"
 PII_HIGH_RISK_TAGS = {"email", "phone", "iban"}
 PII_REVIEW_CONFIDENCE_THRESHOLD = 0.6
+DEFAULT_WORKER_STEP_TIMEOUT_SECONDS = 300
+DEFAULT_WORKER_STEP_MAX_ITEMS = 10_000
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,15 @@ class ProcessedRun:
     run_type: str
     status: str
     output_refs: dict[str, object]
+
+
+@dataclass(frozen=True)
+class RunStepDefinition:
+    """Deterministic run-step node in a run-type DAG."""
+
+    step_key: str
+    step_order: int
+    depends_on: tuple[str, ...]
 
 
 class StrictIngestCompletenessError(ValueError):
@@ -68,6 +88,54 @@ class StrictIngestCompletenessError(ValueError):
         self.failure_count = failure_count
         self.proposal_id = proposal_id
         self.task_id = task_id
+
+
+RUN_STEP_DEFINITIONS: dict[str, tuple[RunStepDefinition, ...]] = {
+    "discover": (
+        RunStepDefinition(step_key="discover_inventory", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="ingest_profile_governance",
+            step_order=20,
+            depends_on=("discover_inventory",),
+        ),
+        RunStepDefinition(
+            step_key="semantic_drift_gate",
+            step_order=30,
+            depends_on=("ingest_profile_governance",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=40,
+            depends_on=("semantic_drift_gate",),
+        ),
+    ),
+    "semantic_bootstrap": (
+        RunStepDefinition(step_key="collect_catalog", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="build_manifest_candidate",
+            step_order=20,
+            depends_on=("collect_catalog",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("build_manifest_candidate",),
+        ),
+    ),
+    "materialize_refresh": (
+        RunStepDefinition(step_key="collect_inputs", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="refresh_materializations",
+            step_order=20,
+            depends_on=("collect_inputs",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("refresh_materializations",),
+        ),
+    ),
+}
 
 
 def process_next_queued_run(
@@ -140,6 +208,7 @@ def _process_queued_run(
     session: Session, *, run: RunRecord, storage_root: str, strict_ingest: bool
 ) -> ProcessedRun:
     run.status = "running"
+    step_rows = _ensure_run_steps(session, run=run)
     session.flush()
     _append_run_audit_event(
         session,
@@ -154,6 +223,7 @@ def _process_queued_run(
             run=run,
             storage_root=storage_root,
             strict_ingest=strict_ingest,
+            step_rows=step_rows,
         )
         run.status = "succeeded"
         run.output_refs_json = output_refs
@@ -173,6 +243,15 @@ def _process_queued_run(
             output_refs=output_refs,
         )
     except Exception as exc:  # pragma: no cover - branch validated by failure tests
+        _ensure_failed_run_step(
+            session,
+            step_rows=step_rows,
+            error_code=_error_code_from_exception(exc),
+            details={"error": str(exc), "run_id": run.run_id},
+            evidence_bundle_uri=(
+                exc.evidence_bundle_uri if isinstance(exc, StrictIngestCompletenessError) else None
+            ),
+        )
         failure_payload: dict[str, object] = {
             "run_id": run.run_id,
             "run_type": run.run_type,
@@ -206,7 +285,12 @@ def _process_queued_run(
 
 
 def _execute_run(
-    session: Session, *, run: RunRecord, storage_root: str, strict_ingest: bool
+    session: Session,
+    *,
+    run: RunRecord,
+    storage_root: str,
+    strict_ingest: bool,
+    step_rows: dict[str, RunStepRecord],
 ) -> dict[str, object]:
     if run.run_type == "discover":
         return _process_discover_run(
@@ -214,14 +298,179 @@ def _execute_run(
             run=run,
             storage_root=storage_root,
             strict_ingest=strict_ingest,
+            step_rows=step_rows,
         )
     if run.run_type == "semantic_bootstrap":
         return _process_semantic_bootstrap_run(
             session,
             run=run,
             storage_root=storage_root,
+            step_rows=step_rows,
+        )
+    if run.run_type == "materialize_refresh":
+        return _process_materialized_refresh_run(
+            session,
+            run=run,
+            storage_root=storage_root,
+            step_rows=step_rows,
         )
     raise ValueError(f"Unsupported run_type for worker processor: {run.run_type}")
+
+
+def _ensure_run_steps(session: Session, *, run: RunRecord) -> dict[str, RunStepRecord]:
+    existing_rows = (
+        session.execute(
+            select(RunStepRecord)
+            .where(
+                RunStepRecord.workspace_id == run.workspace_id,
+                RunStepRecord.run_id == run.run_id,
+            )
+            .order_by(RunStepRecord.step_order, RunStepRecord.run_step_id)
+        )
+        .scalars()
+        .all()
+    )
+    if existing_rows:
+        return {row.step_key: row for row in existing_rows}
+    definitions = RUN_STEP_DEFINITIONS.get(run.run_type, ())
+    rows: list[RunStepRecord] = []
+    for definition in definitions:
+        row = RunStepRecord(
+            run_step_id=new_ulid(),
+            run_id=run.run_id,
+            workspace_id=run.workspace_id,
+            run_type=run.run_type,
+            step_key=definition.step_key,
+            step_order=definition.step_order,
+            depends_on_json=list(definition.depends_on),
+            status="queued",
+            started_epoch=None,
+            finished_epoch=None,
+            duration_ms=None,
+            attempt_count=0,
+            error_code=None,
+            evidence_bundle_uri=None,
+            details_json={},
+        )
+        session.add(row)
+        rows.append(row)
+    session.flush()
+    return {row.step_key: row for row in rows}
+
+
+def _start_step(
+    session: Session, *, step_rows: dict[str, RunStepRecord], step_key: str
+) -> None:
+    row = step_rows.get(step_key)
+    if row is None:
+        return
+    row.status = "running"
+    row.attempt_count = int(row.attempt_count) + 1
+    row.started_epoch = int(time.time())
+    row.finished_epoch = None
+    row.duration_ms = None
+    row.error_code = None
+    row.evidence_bundle_uri = None
+    row.details_json = {}
+    session.flush()
+
+
+def _succeed_step(
+    session: Session,
+    *,
+    step_rows: dict[str, RunStepRecord],
+    step_key: str,
+    details: dict[str, object] | None = None,
+    evidence_bundle_uri: str | None = None,
+) -> None:
+    row = step_rows.get(step_key)
+    if row is None:
+        return
+    finished_epoch = int(time.time())
+    started_epoch = int(row.started_epoch or finished_epoch)
+    row.status = "succeeded"
+    row.finished_epoch = finished_epoch
+    row.duration_ms = max((finished_epoch - started_epoch) * 1000, 0)
+    row.error_code = None
+    row.evidence_bundle_uri = evidence_bundle_uri
+    row.details_json = dict(details or {})
+    observe_worker_step_duration(
+        workspace_id=row.workspace_id,
+        run_type=row.run_type,
+        step_key=row.step_key,
+        result="succeeded",
+        duration_ms=float(row.duration_ms or 0),
+    )
+    session.flush()
+
+
+def _fail_step(
+    session: Session,
+    *,
+    step_rows: dict[str, RunStepRecord],
+    step_key: str,
+    error_code: str,
+    details: dict[str, object] | None = None,
+    evidence_bundle_uri: str | None = None,
+) -> None:
+    row = step_rows.get(step_key)
+    if row is None:
+        return
+    finished_epoch = int(time.time())
+    started_epoch = int(row.started_epoch or finished_epoch)
+    row.status = "failed"
+    row.finished_epoch = finished_epoch
+    row.duration_ms = max((finished_epoch - started_epoch) * 1000, 0)
+    row.error_code = error_code
+    row.evidence_bundle_uri = evidence_bundle_uri
+    row.details_json = dict(details or {})
+    observe_worker_step_duration(
+        workspace_id=row.workspace_id,
+        run_type=row.run_type,
+        step_key=row.step_key,
+        result="failed",
+        duration_ms=float(row.duration_ms or 0),
+    )
+    session.flush()
+
+
+def _ensure_failed_run_step(
+    session: Session,
+    *,
+    step_rows: dict[str, RunStepRecord],
+    error_code: str,
+    details: dict[str, object],
+    evidence_bundle_uri: str | None,
+) -> None:
+    if not step_rows:
+        return
+    if any(row.status == "failed" for row in step_rows.values()):
+        return
+    running = next((row for row in step_rows.values() if row.status == "running"), None)
+    if running is None:
+        running = sorted(
+            step_rows.values(),
+            key=lambda row: (int(row.step_order), str(row.run_step_id)),
+        )[0]
+    _fail_step(
+        session,
+        step_rows=step_rows,
+        step_key=running.step_key,
+        error_code=error_code,
+        details=details,
+        evidence_bundle_uri=evidence_bundle_uri,
+    )
+
+
+def _error_code_from_exception(exc: Exception) -> str:
+    if isinstance(exc, StrictIngestCompletenessError):
+        return "strict_ingest_completeness_failed"
+    if isinstance(exc, ValueError):
+        raw = str(exc).strip().lower().replace(" ", "_")
+        normalized = re.sub(r"[^a-z0-9_]+", "_", raw).strip("_")
+        if normalized:
+            return normalized[:80]
+    return exc.__class__.__name__.lower()
 
 
 def _process_semantic_bootstrap_run(
@@ -229,7 +478,10 @@ def _process_semantic_bootstrap_run(
     *,
     run: RunRecord,
     storage_root: str,
+    step_rows: dict[str, RunStepRecord],
 ) -> dict[str, object]:
+    _start_step(session, step_rows=step_rows, step_key="collect_catalog")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="collect_catalog")
     dataset_ids = sorted(
         session.execute(
             select(CatalogDataset.dataset_id).where(
@@ -244,17 +496,36 @@ def _process_semantic_bootstrap_run(
         "dataset_count": len(dataset_ids),
     }
     session.flush()
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="collect_catalog",
+        details={"dataset_count": len(dataset_ids)},
+    )
 
+    _start_step(session, step_rows=step_rows, step_key="build_manifest_candidate")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="build_manifest_candidate")
     candidate = build_semantic_manifest_candidate(
         session,
         workspace_id=run.workspace_id,
         storage_root=storage_root,
     )
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="build_manifest_candidate",
+        details={
+            "entity_count": int(candidate.get("entity_count", 0)),
+            "metric_count": int(candidate.get("metric_count", 0)),
+            "join_count": int(candidate.get("join_count", 0)),
+        },
+        evidence_bundle_uri=str(candidate.get("evidence_bundle_uri", "")) or None,
+    )
     manifest = candidate.get("semantic_manifest", {})
     manifest_version = ""
     if isinstance(manifest, dict):
         manifest_version = str(manifest.get("manifest_version", ""))
-    return {
+    output = {
         "dataset_ids": dataset_ids,
         "dataset_count": len(dataset_ids),
         "manifest_version": manifest_version,
@@ -268,6 +539,19 @@ def _process_semantic_bootstrap_run(
         "metric_count": candidate["metric_count"],
         "join_count": candidate["join_count"],
     }
+    _start_step(session, step_rows=step_rows, step_key="finalize_output")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="finalize_output")
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="finalize_output",
+        details={
+            "manifest_version": manifest_version,
+            "dataset_count": len(dataset_ids),
+        },
+        evidence_bundle_uri=str(candidate.get("evidence_bundle_uri", "")) or None,
+    )
+    return output
 
 
 def _process_discover_run(
@@ -276,7 +560,10 @@ def _process_discover_run(
     run: RunRecord,
     storage_root: str,
     strict_ingest: bool,
+    step_rows: dict[str, RunStepRecord],
 ) -> dict[str, object]:
+    _start_step(session, step_rows=step_rows, step_key="discover_inventory")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="discover_inventory")
     sources = (
         session.execute(
             select(CatalogSource)
@@ -297,7 +584,15 @@ def _process_discover_run(
         "source_count": len(sources),
     }
     session.flush()
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="discover_inventory",
+        details={"source_count": len(sources)},
+    )
 
+    _start_step(session, step_rows=step_rows, step_key="ingest_profile_governance")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="ingest_profile_governance")
     dataset_ids: set[str] = set()
     artifact_manifests: list[dict[str, object]] = []
     evidence_bundles: list[dict[str, object]] = []
@@ -312,6 +607,11 @@ def _process_discover_run(
 
     for source in sources:
         scope = _json_dict(source.scope_json)
+        state = load_connector_state(
+            storage_root=storage_root,
+            workspace_id=run.workspace_id,
+            source_id=source.source_id,
+        )
         try:
             if source.source_type == "filesystem":
                 root_path = str(scope.get("root_path", "")).strip()
@@ -336,9 +636,11 @@ def _process_discover_run(
                         f"Unsupported source_type for discover run: {source.source_type}"
                     )
                 root_path = str(scope.get("root_path", "")).strip() or "."
+                plugin_scope = dict(scope)
+                plugin_scope["cursor_state"] = state
                 discovered_files = _discover_files_via_plugin(
                     plugin,
-                    scope=scope,
+                    scope=plugin_scope,
                     source_type=source.source_type,
                 )
         except Exception as exc:
@@ -351,7 +653,24 @@ def _process_discover_run(
                 }
             )
             continue
+        next_cursor = next_cursor_from_discovery_rows(
+            [{"path": item.path, "mtime_epoch": item.mtime_epoch} for item in discovered_files],
+            previous_cursor=str(state.get("cursor", "")),
+        )
+        if len(discovered_files) > _worker_step_max_items():
+            raise ValueError("worker_step_item_quota_exceeded")
+        save_connector_state(
+            storage_root=storage_root,
+            workspace_id=run.workspace_id,
+            source_id=source.source_id,
+            state={
+                "cursor": next_cursor,
+                "source_type": source.source_type,
+                "last_discovered_count": len(discovered_files),
+            },
+        )
         for discovered in discovered_files:
+            _enforce_worker_step_timeout(step_rows=step_rows, step_key="ingest_profile_governance")
             physical_locator = _relative_locator(root_path=root_path, path=discovered.path)
             completeness_expected_items.append(
                 {
@@ -461,7 +780,14 @@ def _process_discover_run(
                     )
                     session.flush()
                 successful_item_count += 1
+                if successful_item_count > _worker_step_max_items():
+                    raise ValueError("worker_step_item_quota_exceeded")
             except Exception as exc:
+                if str(exc) in {
+                    "worker_step_item_quota_exceeded",
+                    "worker_step_timeout_exceeded",
+                }:
+                    raise
                 completeness_failures.append(
                     {
                         "source_id": source.source_id,
@@ -474,11 +800,6 @@ def _process_discover_run(
                 )
 
     sorted_dataset_ids = sorted(dataset_ids)
-    semantic_drift_blocking_tasks_created += _create_semantic_drift_review_task_if_needed(
-        session=session,
-        workspace_id=run.workspace_id,
-        storage_root=storage_root,
-    )
     if completeness_failures:
         completeness_payload = {
             "workspace_id": run.workspace_id,
@@ -514,6 +835,17 @@ def _process_discover_run(
                 workspace_id=run.workspace_id,
                 evidence_bundle_uri=stored_failure.evidence_bundle_uri,
             )
+            _fail_step(
+                session,
+                step_rows=step_rows,
+                step_key="ingest_profile_governance",
+                error_code="strict_ingest_completeness_failed",
+                evidence_bundle_uri=stored_failure.evidence_bundle_uri,
+                details={
+                    "failure_count": len(completeness_failures),
+                    "success_count": successful_item_count,
+                },
+            )
             raise StrictIngestCompletenessError(
                 evidence_bundle_uri=stored_failure.evidence_bundle_uri,
                 failure_count=len(completeness_failures),
@@ -528,8 +860,38 @@ def _process_discover_run(
         )
     else:
         stored_warning = None
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="ingest_profile_governance",
+        details={
+            "processed_item_count": successful_item_count,
+            "expected_item_count": len(completeness_expected_items),
+            "failure_count": len(completeness_failures),
+            "dataset_count": len(sorted_dataset_ids),
+        },
+        evidence_bundle_uri=(
+            stored_warning.evidence_bundle_uri if stored_warning is not None else None
+        ),
+    )
 
-    return {
+    _start_step(session, step_rows=step_rows, step_key="semantic_drift_gate")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="semantic_drift_gate")
+    semantic_drift_blocking_tasks_created += _create_semantic_drift_review_task_if_needed(
+        session=session,
+        workspace_id=run.workspace_id,
+        storage_root=storage_root,
+    )
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="semantic_drift_gate",
+        details={"semantic_drift_blocking_tasks_created": semantic_drift_blocking_tasks_created},
+    )
+
+    _start_step(session, step_rows=step_rows, step_key="finalize_output")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="finalize_output")
+    output = {
         "source_ids": [source.source_id for source in sources],
         "dataset_ids": sorted_dataset_ids,
         "dataset_count": len(sorted_dataset_ids),
@@ -556,6 +918,87 @@ def _process_discover_run(
             ),
         ),
     }
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="finalize_output",
+        details={
+            "dataset_count": len(sorted_dataset_ids),
+            "processed_item_count": successful_item_count,
+            "completeness_failure_count": len(completeness_failures),
+        },
+        evidence_bundle_uri=(
+            stored_warning.evidence_bundle_uri if stored_warning is not None else None
+        ),
+    )
+    return output
+
+
+def _process_materialized_refresh_run(
+    session: Session,
+    *,
+    run: RunRecord,
+    storage_root: str,
+    step_rows: dict[str, RunStepRecord],
+) -> dict[str, object]:
+    if not _materialized_refresh_enabled():
+        raise ValueError("materialized_refresh_disabled")
+    _start_step(session, step_rows=step_rows, step_key="collect_inputs")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="collect_inputs")
+    datasets = (
+        session.execute(select(CatalogDataset).where(CatalogDataset.workspace_id == run.workspace_id))
+        .scalars()
+        .all()
+    )
+    dataset_ids = sorted(dataset.dataset_id for dataset in datasets)
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="collect_inputs",
+        details={"dataset_count": len(dataset_ids)},
+    )
+
+    _start_step(session, step_rows=step_rows, step_key="refresh_materializations")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="refresh_materializations")
+    snapshot_dir = (
+        Path(storage_root)
+        / "materialized"
+        / run.workspace_id
+        / "snapshots"
+        / new_ulid()
+    )
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_payload = {
+        "workspace_id": run.workspace_id,
+        "run_id": run.run_id,
+        "run_type": run.run_type,
+        "dataset_ids": dataset_ids,
+        "dataset_count": len(dataset_ids),
+        "refreshed_epoch": int(time.time()),
+    }
+    snapshot_path = snapshot_dir / "refresh.json"
+    snapshot_path.write_text(json.dumps(snapshot_payload, indent=2, sort_keys=True), encoding="utf-8")
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="refresh_materializations",
+        details={"snapshot_path": snapshot_path.as_posix(), "dataset_count": len(dataset_ids)},
+    )
+
+    _start_step(session, step_rows=step_rows, step_key="finalize_output")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="finalize_output")
+    output = {
+        "materialized_snapshot_path": snapshot_path.as_posix(),
+        "dataset_ids": dataset_ids,
+        "dataset_count": len(dataset_ids),
+    }
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="finalize_output",
+        details={"dataset_count": len(dataset_ids)},
+    )
+    return output
 
 
 def _discover_files_via_plugin(
@@ -1020,6 +1463,41 @@ def _string_list(value: object, *, default: list[str]) -> list[str]:
         return list(default)
     parsed = [str(item) for item in value if str(item).strip()]
     return parsed if parsed else list(default)
+
+
+def _worker_step_max_items() -> int:
+    return _env_int("SCHEMAPILOT_WORKER_STEP_MAX_ITEMS", DEFAULT_WORKER_STEP_MAX_ITEMS)
+
+
+def _worker_step_timeout_seconds() -> int:
+    return _env_int("SCHEMAPILOT_WORKER_STEP_TIMEOUT_SECONDS", DEFAULT_WORKER_STEP_TIMEOUT_SECONDS)
+
+
+def _materialized_refresh_enabled() -> bool:
+    raw = os.getenv("SCHEMAPILOT_MATERIALIZED_REFRESH_ENABLED")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _enforce_worker_step_timeout(*, step_rows: dict[str, RunStepRecord], step_key: str) -> None:
+    row = step_rows.get(step_key)
+    if row is None:
+        return
+    started = int(row.started_epoch or int(time.time()))
+    elapsed = int(time.time()) - started
+    if elapsed > _worker_step_timeout_seconds():
+        raise ValueError("worker_step_timeout_exceeded")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
 
 
 def _json_dict(value: object) -> dict[str, object]:
