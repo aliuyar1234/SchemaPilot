@@ -7,6 +7,7 @@
 - A-0004 Embeddings provider: vector embeddings are pluggable; default is disabled unless explicitly configured
 - A-0005 Typical early adopters have limited historical query logs; wizard-collected intents are acceptable
 - A-0006 OIDC trusted claims are supplied by a validated ingress/proxy in enterprise deployments
+- A-0007 UI priority: core value remains CLI/gateway/worker first; UI stays intentionally minimal
 
 ---
 
@@ -162,4 +163,30 @@ An enterprise deployment standard defines mandatory ingress products/policies fo
 - Critical flow impacted: YES (authentication and authorization)  
 - Unsafe/high-risk: YES  
 - Conservative baseline available: YES (deny on missing/invalid claims header and issuer/audience mismatch)  
+- Safe to decide: NO (assumption)
+
+---
+
+## A-0007 UI priority: core value remains CLI/gateway/worker first; UI stays intentionally minimal
+
+**Assumption**  
+Most target users can adopt SchemaPilot through CLI/operator workflows first; UI breadth is not the critical adoption lever for this phase.
+
+**Why**  
+This keeps focus on security, determinism, connector breadth, and governed AI workflows while avoiding frontend scope creep.
+
+**Risk if wrong**  
+Non-technical teams may perceive adoption friction without richer UI workflows.
+
+**How to validate**  
+Track install-success and time-to-first-safe-answer for CLI-led journeys; monitor recurring requests that cannot be satisfied without UI expansion.
+
+**Promote to decision when**  
+User research indicates a sustained blocker where minimal UI prevents adoption in core target segments.
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: NO  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (maintain minimal UI while expanding API/CLI coverage)  
 - Safe to decide: NO (assumption)

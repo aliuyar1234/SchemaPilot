@@ -1,0 +1,10 @@
+{
+  "pack_id": "baseline-team",
+  "version": "1.0.0",
+  "defaults": {
+    "abac_mode": "strict",
+    "masking_enabled": true,
+    "ai_semantic_required": true
+  },
+  "notes": "Starter policy pack with fail-closed governance defaults."
+}

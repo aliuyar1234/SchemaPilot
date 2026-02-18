@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-control-plane
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: schemapilot-control-plane
+  ports:
+    - port: {{ .Values.service.controlPlanePort }}
+      targetPort: {{ .Values.service.controlPlanePort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-gateway
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: schemapilot-gateway
+  ports:
+    - port: {{ .Values.service.gatewayPort }}
+      targetPort: {{ .Values.service.gatewayPort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ui
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: schemapilot-ui
+  ports:
+    - port: {{ .Values.service.uiPort }}
+      targetPort: {{ .Values.service.uiPort }}
+{{- if .Values.aiService.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ai-service
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: schemapilot-ai-service
+  ports:
+    - port: {{ .Values.service.aiServicePort }}
+      targetPort: {{ .Values.service.aiServicePort }}
+{{- end }}

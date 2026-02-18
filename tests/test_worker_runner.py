@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.control_plane.repository import create_run, create_source, create_workspace, get_run
+from backend.control_plane.review_repository import list_review_tasks
 from backend.shared_domain.db import get_engine, get_session_factory
 from backend.shared_domain.metadata_models import Base
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec
@@ -189,3 +190,154 @@ def test_worker_service_config_allows_explicit_non_strict_override(monkeypatch) 
     monkeypatch.setenv("SCHEMAPILOT_INGEST_STRICT", "false")
     config = load_worker_service_config()
     assert config.strict_ingest is False
+
+
+def test_worker_runner_processes_semantic_bootstrap_run(tmp_path: Path) -> None:
+    exports_root = tmp_path / "exports"
+    exports_root.mkdir(parents=True, exist_ok=True)
+    (exports_root / "customers.csv").write_text(
+        "customer_id,name,email\n1,Alice,alice@example.com\n",
+        encoding="utf-8",
+    )
+
+    session_factory = _session_factory(tmp_path)
+    storage_root = (tmp_path / "storage").as_posix()
+    with session_factory() as session:
+        workspace = create_workspace(
+            session,
+            name="Runner Semantic Workspace",
+            profile="team",
+            security_baseline="strict",
+        )
+        workspace_id = str(workspace["workspace_id"])
+        create_source(
+            session,
+            workspace_id=workspace_id,
+            source_type="filesystem",
+            scope={"root_path": exports_root.as_posix(), "include_globs": ["**/*.csv"]},
+            display_name="Exports",
+        )
+        discover_run = create_run(
+            session,
+            workspace_id=workspace_id,
+            run_type="discover",
+        )
+        semantic_run = create_run(
+            session,
+            workspace_id=workspace_id,
+            run_type="semantic_bootstrap",
+        )
+        session.commit()
+
+    processed = process_queued_runs_once(
+        session_factory=session_factory,
+        storage_root=storage_root,
+        max_runs=2,
+    )
+    assert processed == 2
+
+    with session_factory() as session:
+        discover_state = get_run(
+            session,
+            workspace_id=workspace_id,
+            run_id=str(discover_run["run_id"]),
+        )
+        assert discover_state is not None
+        assert discover_state["status"] == "succeeded"
+
+        semantic_state = get_run(
+            session,
+            workspace_id=workspace_id,
+            run_id=str(semantic_run["run_id"]),
+        )
+        assert semantic_state is not None
+        assert semantic_state["status"] == "succeeded"
+        output_refs = semantic_state["output_refs"]
+        assert isinstance(output_refs, dict)
+        assert output_refs["manifest_version"] == "1"
+        assert int(output_refs["entity_count"]) >= 1
+        assert int(output_refs["metric_count"]) >= 1
+        assert str(output_refs["evidence_bundle_uri"]).startswith("evidence://")
+        assert str(output_refs["manifest_checksum"])
+        tasks = list_review_tasks(session, workspace_id)
+        matching = [
+            task
+            for task in tasks
+            if task["proposal_type"] == "semantic_manifest_change_proposal"
+            and task["blocking"] is True
+            and task["priority"] == "quality_critical"
+        ]
+        assert len(matching) == 1
+
+    with session_factory() as session:
+        repeat_run = create_run(
+            session,
+            workspace_id=workspace_id,
+            run_type="semantic_bootstrap",
+        )
+        session.commit()
+
+    repeat_processed = process_queued_runs_once(
+        session_factory=session_factory,
+        storage_root=storage_root,
+        max_runs=1,
+    )
+    assert repeat_processed == 1
+
+    with session_factory() as session:
+        repeat_state = get_run(
+            session,
+            workspace_id=workspace_id,
+            run_id=str(repeat_run["run_id"]),
+        )
+        assert repeat_state is not None
+        assert repeat_state["status"] == "succeeded"
+        tasks_after_repeat = list_review_tasks(session, workspace_id)
+        matching_after_repeat = [
+            task
+            for task in tasks_after_repeat
+            if task["proposal_type"] == "semantic_manifest_change_proposal"
+            and task["blocking"] is True
+            and task["priority"] == "quality_critical"
+        ]
+        assert len(matching_after_repeat) == 1
+
+
+def test_worker_runner_fails_semantic_bootstrap_without_catalog(tmp_path: Path) -> None:
+    session_factory = _session_factory(tmp_path)
+    storage_root = (tmp_path / "storage").as_posix()
+    with session_factory() as session:
+        workspace = create_workspace(
+            session,
+            name="Runner Semantic Empty Workspace",
+            profile="team",
+            security_baseline="strict",
+        )
+        workspace_id = str(workspace["workspace_id"])
+        run = create_run(
+            session,
+            workspace_id=workspace_id,
+            run_type="semantic_bootstrap",
+        )
+        session.commit()
+
+    processed = process_queued_runs_once(
+        session_factory=session_factory,
+        storage_root=storage_root,
+        max_runs=1,
+    )
+    assert processed == 1
+
+    with session_factory() as session:
+        run_state = get_run(
+            session,
+            workspace_id=workspace_id,
+            run_id=str(run["run_id"]),
+        )
+        assert run_state is not None
+        assert run_state["status"] == "failed"
+        output_refs = run_state["output_refs"]
+        assert isinstance(output_refs, dict)
+        assert "semantic_bootstrap_requires_catalog_datasets" in str(
+            output_refs.get("error", "")
+        )

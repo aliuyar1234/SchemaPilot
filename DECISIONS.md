@@ -51,6 +51,17 @@
 - D-0048 Provenance and policy lifecycle baseline (provenance v1 contract, audit export, policy-pack approval/rollback controls)
 - D-0049 Plugin security and contract gate baseline (plugin allowlist isolation + OpenAPI compatibility + golden-path regression gate)
 - D-0050 Team query engine upgrade baseline (gateway trino adapter with duckdb fallback and docs/runbook finalization)
+- D-0051 Semantic manifest foundation baseline (schema validator + review-gated control-plane lifecycle + rollback)
+- D-0052 Semantic bootstrap worker-run baseline (deterministic candidate generation with evidence-backed review artifacts)
+- D-0053 Gateway semantic-bound AI query baseline (semantic resolver + AI-only semantic-query enforcement)
+- D-0054 Gold template pack baseline (invoices/crm/support packs + deterministic CLI bundle generation)
+- D-0055 Monotonic ULID generation baseline (per-process ordered ULIDs for deterministic queue execution)
+- D-0056 Document connector extraction baseline (PDF/EML/MBOX discovery + confidence-scored evidence)
+- D-0057 OpenSearch retrieval module baseline (optional gateway backend + internal-only indexing helpers)
+- D-0058 Qdrant vector retrieval baseline (optional embeddings provider + internal-only vector index module)
+- D-0059 Retrieval ABAC parity baseline (metadata-bound row filters + snippet masking across retrieval backends)
+- D-0060 AI/ops extension baseline (optional AI service + policy simulation + catalog/scheduling/fairness + audit sinks + secrets + Helm hardening)
+- D-0061 Completion baseline for NW-0026..NW-0034 and AI track (demo generator, docs wave, pack registry, Trino hardening, compaction, anomaly/ERv2, locale parsing, typed SDK)
 
 ---
 
@@ -2098,6 +2109,500 @@ Team profile readiness requires a scalable engine path without weakening existin
 - Critical flow impacted: YES (query execution and deployment security posture)  
 - Unsafe/high-risk: NO  
 - Conservative baseline available: YES (duckdb default, trino opt-in)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0051 Semantic manifest foundation baseline (schema validator + review-gated control-plane lifecycle + rollback)
+
+**Decision**  
+Introduce the first semantic-layer governance slice:
+- shared semantic manifest schema validation and deterministic checksum utilities,
+- semantic manifest validation tool with CI/tooling-baseline wiring,
+- control-plane lifecycle for semantic manifests (change request, review-gated decision, publish, rollback),
+- deny-by-default behavior for invalid semantic manifests and role-guarded mutation endpoints.
+
+**Rationale**  
+Semantic definitions are required to safely scale AI-ready querying. Treating semantic artifacts as governed, review-backed, rollbackable state mirrors existing policy-pack safety patterns.
+
+**Alternatives considered**  
+- Store semantic manifests as free-form payloads without validation (rejected: weak contract guarantees).  
+- Allow direct semantic manifest publish without review queue (rejected: bypasses governance controls).
+
+**Implications**  
+- Semantic manifest becomes an explicit control-plane contract surface.
+- Invalid manifests are denied before persistence.
+- Lifecycle is auditable and compatible with existing role model and review queue.
+
+**Affected files**  
+- evidence: backend/shared_domain/semantic.py :: validate_semantic_manifest
+- evidence: backend/shared_domain/semantic.py :: semantic_manifest_checksum
+- evidence: tools/semantic_validate.py :: PASS semantic manifest validation
+- evidence: backend/control_plane/semantic_manifest_service.py :: request_semantic_manifest_change
+- evidence: backend/control_plane/semantic_manifest_service.py :: rollback_semantic_manifest
+- evidence: backend/control_plane/app.py :: /api/v1/workspaces/{workspace_id}/semantic-manifest
+- evidence: tests/test_semantic_schema.py :: test_validate_semantic_manifest_normalizes_and_hashes_deterministically
+- evidence: tests/test_semantic_manifest_lifecycle.py :: test_semantic_manifest_is_approval_gated_and_rollbackable
+
+**Verification impact**  
+- evidence: tests/test_semantic_schema.py :: test_validate_semantic_manifest_rejects_workspace_mismatch
+- evidence: tests/test_semantic_manifest_lifecycle.py :: test_semantic_manifest_change_requires_steward_or_admin_role
+- evidence: tests/test_semantic_validate_tool.py :: test_semantic_validate_tool_passes_for_example_manifest
+- evidence: tools/check_tooling_baseline.py :: tools/semantic_validate.py
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (governed semantic contract lifecycle)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny invalid manifests; review-gated publish)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0052 Semantic bootstrap worker-run baseline (deterministic candidate generation with evidence-backed review artifacts)
+
+**Decision**  
+Add a deterministic `semantic_bootstrap` worker run type that:
+- builds a semantic manifest candidate from catalog profiling evidence,
+- stores immutable evidence bundles for the candidate output,
+- creates/updates blocking `semantic_manifest_change_proposal` review artifacts,
+- fails closed when no catalog datasets are available.
+
+**Rationale**  
+The next-wave semantic lifecycle needs a worker-produced bootstrap path so teams can generate a governed starting manifest from discovered data instead of manual payload authoring.
+
+**Alternatives considered**  
+- Keep semantic bootstrap as a manual control-plane-only flow (rejected: high onboarding friction).  
+- Let workers import control-plane lifecycle services directly (rejected: boundary fitness violation).
+
+**Implications**  
+- Worker orchestration now supports `discover` and `semantic_bootstrap` run types.
+- Semantic bootstrap output is deterministic for unchanged catalog evidence and reuses existing open blocking tasks on reruns.
+- Empty catalog bootstrap attempts fail with explicit run failure evidence.
+
+**Affected files**  
+- evidence: backend/workers/run_processor.py :: _process_semantic_bootstrap_run
+- evidence: backend/workers/run_processor.py :: if run.run_type == "semantic_bootstrap":
+- evidence: backend/workers/semantic_builder.py :: build_semantic_manifest_candidate
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+- evidence: tests/test_worker_runner.py :: test_worker_runner_fails_semantic_bootstrap_without_catalog
+
+**Verification impact**  
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+- evidence: tests/test_worker_runner.py :: test_worker_runner_fails_semantic_bootstrap_without_catalog
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_queued_run_with_status_transition
+- evidence: tests/test_semantic_schema.py :: test_validate_semantic_manifest_normalizes_and_hashes_deterministically
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (governed semantic artifact generation path)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (fail on missing catalog evidence)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0053 Gateway semantic-bound AI query baseline (semantic resolver + AI-only semantic-query enforcement)
+
+**Decision**  
+Enforce semantic-bound query execution for AI identities in the gateway:
+- AI requests to `/api/v1/gateway/query` must provide `semantic_query`,
+- gateway resolves `semantic_query` against active workspace semantic manifest state,
+- gateway executes generated SQL only after dataset/workspace entitlement checks over all mapped semantic datasets,
+- raw client-provided SQL for AI identities is denied by default.
+
+**Rationale**  
+This tightens AI query behavior to governed semantic objects and prevents direct/raw SQL paths from becoming implicit privilege expansion vectors.
+
+**Alternatives considered**  
+- Keep AI SQL path dataset-scoped but permit raw query text (rejected: weak semantic governance).  
+- Enforce semantic mode for all actors immediately (rejected: too disruptive; conservative baseline is AI-first).
+
+**Implications**  
+- AI callers need active semantic manifests before query success.
+- Entitlement checks now evaluate all semantic-bound dataset IDs, not a single client-supplied dataset field.
+- Gateway responses/audit resources include semantic context for traceability.
+
+**Affected files**  
+- evidence: backend/gateway/semantic_binding.py :: bind_semantic_query
+- evidence: backend/gateway/app.py :: semantic_query_required
+- evidence: backend/gateway/app.py :: semantic_metric_id
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_semantic_query_without_manifest
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_allows_ai_query_for_entitled_dataset
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+
+**Verification impact**  
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_query_without_semantic_query
+- evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_unknown_semantic_metric
+- evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+- evidence: tests/test_provenance_schema_stability.py :: test_gateway_query_provenance_v1_fields_are_stable
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (gateway authorization and AI query enforcement path)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (AI-only semantic enforcement, human SQL unchanged)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0054 Gold template pack baseline (invoices/crm/support packs + deterministic CLI bundle generation)
+
+**Decision**  
+Implement deterministic starter gold template packs and CLI generation:
+- introduce template packs `invoices`, `crm`, and `support`,
+- generate workspace-scoped template bundles with validated semantic starter manifests,
+- expose CLI commands `schemapilot templates list` and `schemapilot templates apply ...`.
+
+**Rationale**  
+This reduces onboarding friction by giving repeatable starter semantic/gold model scaffolds for common business domains.
+
+**Alternatives considered**  
+- Keep templates as docs-only snippets (rejected: no executable deterministic output).  
+- Put template logic under workers and import from CLI (rejected: violates boundary fitness rules).
+
+**Implications**  
+- Template generation is boundary-safe (`cli -> shared_domain`) and deterministic by output content.
+- Users can bootstrap semantic/gold starter definitions without editing manifests manually.
+- Unknown packs and overwrite collisions fail closed.
+
+**Affected files**  
+- evidence: backend/shared_domain/gold_templates.py :: GOLD_TEMPLATE_PACKS
+- evidence: backend/shared_domain/gold_templates.py :: generate_gold_template_bundle
+- evidence: cli/schemapilot_cli/main.py :: @templates_app.command("apply")
+- evidence: cli/schemapilot_cli/main.py :: @templates_app.command("list")
+- evidence: tests/test_gold_templates.py :: test_generate_gold_template_bundle_is_deterministic
+- evidence: tests/test_cli_commands.py :: test_templates_apply_generates_bundle
+
+**Verification impact**  
+- evidence: tests/test_gold_templates.py :: test_list_gold_template_packs_contains_expected_ids
+- evidence: tests/test_gold_templates.py :: test_generate_gold_template_bundle_rejects_unknown_pack
+- evidence: tests/test_cli_commands.py :: test_templates_list_shows_expected_packs
+- evidence: tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: NO  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (explicit pack IDs + fail-closed generation)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0055 Monotonic ULID generation baseline (per-process ordered ULIDs for deterministic queue execution)
+
+**Decision**  
+Replace randomized ULID suffix generation with a lock-protected per-millisecond monotonic counter in `new_ulid()`.
+
+**Rationale**  
+Random suffixes could reorder queued runs created within the same millisecond, causing non-deterministic worker execution order and flaky sequencing behavior.
+
+**Alternatives considered**  
+- Keep randomized suffixes and patch tests only (rejected: leaves runtime ordering hazard).  
+- Add DB-level created-at ordering column everywhere (rejected for now: broader migration surface).
+
+**Implications**  
+- ULIDs remain 26-char Crockford base32 and time-sortable.
+- Sequential ULID creation in a process is now deterministic and monotonic.
+- Queue processing ordered by `run_id` is stable under same-millisecond run creation.
+
+**Affected files**  
+- evidence: backend/shared_domain/ids.py :: new_ulid
+- evidence: backend/workers/run_processor.py :: .order_by(RunRecord.run_id)
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+
+**Verification impact**  
+- evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+- evidence: tests/test_pipeline_discover_catalog.py :: test_discover_run_populates_catalog_and_evidence_deterministically
+- evidence: tests/test_manifest_tools.py :: test_manifest_roundtrip
+- evidence: python -m pytest -q :: [100%] (full suite pass)
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (run ordering determinism in worker orchestration)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (monotonic counter under lock)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0056 Document connector extraction baseline (PDF/EML/MBOX discovery + confidence-scored evidence)
+
+**Decision**  
+Expand document ingestion baseline to support common document-first sources:
+- add read-only document connector discovery for `PDF`, `EML`, `MBOX` (plus `TXT`),
+- add extraction methods per document type with confidence scoring and labels,
+- keep fail-closed behavior: invalid/unsupported documents mark extraction as failed while preserving raw artifacts.
+
+**Rationale**  
+Many adoption candidates are document-heavy. Extraction method metadata and confidence evidence are required before enabling downstream retrieval/indexing decisions.
+
+**Alternatives considered**  
+- Keep plain-text-only extraction (rejected: too narrow for common enterprise inputs).  
+- Auto-ignore extraction failures without explicit evidence (rejected: violates evidence-backed governance).
+
+**Implications**  
+- Evidence payloads now include `source_extension`, `extraction_method`, `confidence`, `confidence_label`, and `text_length`.
+- Invalid PDFs fail closed with explicit error evidence.
+- Connector discovery can scope document-specific scans independently of generic filesystem discovery.
+
+**Affected files**  
+- evidence: backend/workers/connectors/documents.py :: discover_document_files
+- evidence: backend/workers/documents.py :: _extract_document_text
+- evidence: backend/workers/documents.py :: _extract_eml_text
+- evidence: backend/workers/documents.py :: _extract_mbox_text
+- evidence: tests/test_documents_extraction_quality.py :: test_document_connector_discovers_supported_document_extensions
+- evidence: tests/test_documents_extraction_quality.py :: test_ingest_pdf_fails_closed_on_invalid_signature
+
+**Verification impact**  
+- evidence: tests/test_documents_extraction_quality.py :: test_ingest_eml_extracts_subject_and_body_with_confidence
+- evidence: tests/test_documents_extraction_quality.py :: test_ingest_mbox_extracts_message_content
+- evidence: tests/test_documents_retrieval.py :: test_document_ingest_preserves_raw_on_extraction_failure
+- evidence: python -m pytest -q :: [100%] (full suite pass)
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (sensitive-data handling and fail-closed extraction behavior)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (preserve raw, fail extraction with evidence)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0057 OpenSearch retrieval module baseline (optional gateway backend + internal-only indexing helpers)
+
+**Decision**  
+Implement `NW-0007` as an optional retrieval/index module with fail-closed defaults:
+- gateway retrieval can use `retrieval_backend=opensearch`,
+- opensearch path is denied with `module_disabled` unless explicitly enabled,
+- retrieval remains policy-bound (workspace + dataset entitlements) and always audited,
+- worker-side OpenSearch indexing helpers remain boundary-safe (`workers -> shared_domain`, no imports from `gateway`),
+- compose includes optional OpenSearch service with no host port exposure.
+
+**Rationale**  
+Document search/index capability is needed for next-wave adoption, but must not weaken non-bypass and deny-by-default security invariants.
+
+**Alternatives considered**  
+- Auto-fallback from OpenSearch to filesystem corpus when unavailable (rejected: silent fail-open behavior).  
+- Expose OpenSearch service ports for easy local debugging (rejected: violates no-bypass posture).
+
+**Implications**  
+- OpenSearch retrieval is explicit opt-in and safe by default.
+- Gateway can deny unavailable/disabled retrieval backends with deterministic reasons.
+- Indexer utilities can be extended in worker orchestration without cross-layer dependency drift.
+
+**Affected files**  
+- evidence: backend/gateway/app.py :: /api/v1/gateway/retrieve
+- evidence: backend/gateway/retrieval_opensearch.py :: search_opensearch_documents
+- evidence: backend/workers/indexers/opensearch_indexer.py :: index_documents_opensearch
+- evidence: backend/workers/indexers/__init__.py :: Document and retrieval indexer helpers
+- evidence: deploy/docker-compose.yml :: opensearch
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_opensearch_module_disabled_fail_closed
+- evidence: tests/test_retrieval_opensearch.py :: test_search_opensearch_documents_filters_by_allowed_datasets
+- evidence: tests/test_opensearch_indexer.py :: test_build_bulk_payload_is_deterministic_and_sorted
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_gateway_retrieve.py tests/test_retrieval_opensearch.py tests/test_opensearch_indexer.py :: [100%]
+- evidence: python tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+- evidence: python tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (gateway retrieval enforcement + non-bypass deployment posture)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (disabled-by-default module + explicit deny reasons)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0058 Qdrant vector retrieval baseline (optional embeddings provider + internal-only vector index module)
+
+**Decision**  
+Implement `NW-0008` as an optional vector retrieval/indexing extension:
+- add a shared embeddings provider interface/loader with strict defaults (`disabled` by default, deterministic local `hash` provider opt-in),
+- add gateway Qdrant retrieval adapter behind `retrieval_backend=qdrant`,
+- deny retrieval with `module_disabled` when Qdrant is not explicitly enabled,
+- deny retrieval with `embedding_provider_disabled` when vector retrieval is enabled but embeddings provider remains disabled,
+- add worker-side Qdrant indexer helpers that remain boundary-safe and deterministic.
+
+**Rationale**  
+Vector retrieval is high-leverage for document-heavy AI workflows, but it must remain opt-in, fail-closed, and consistent with gateway-only enforcement.
+
+**Alternatives considered**  
+- Auto-enable local embeddings whenever Qdrant is enabled (rejected: implicit capability expansion).  
+- Add direct Qdrant client access from UI or worker-facing endpoints (rejected: non-bypass architecture erosion risk).
+
+**Implications**  
+- Operators explicitly choose both vector backend and embeddings provider.
+- Qdrant paths can be added without exposing index ports.
+- Deterministic hash embeddings provide a safe local baseline for tests and offline development.
+
+**Affected files**  
+- evidence: backend/shared_domain/embeddings_provider.py :: load_embeddings_provider
+- evidence: backend/shared_domain/config.py :: SUPPORTED_RETRIEVAL_BACKENDS
+- evidence: backend/gateway/retrieval_qdrant.py :: search_qdrant_documents
+- evidence: backend/gateway/app.py :: embedding_provider_disabled
+- evidence: backend/workers/indexers/qdrant_indexer.py :: index_documents_qdrant
+- evidence: deploy/docker-compose.yml :: qdrant
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_qdrant_backend_returns_results
+- evidence: tests/test_embeddings_provider.py :: test_hash_embeddings_provider_is_deterministic
+- evidence: tests/test_retrieval_qdrant.py :: test_search_qdrant_documents_filters_by_allowed_datasets
+- evidence: tests/test_qdrant_indexer.py :: test_build_points_payload_is_deterministic_and_sorted
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_gateway_retrieve.py tests/test_embeddings_provider.py tests/test_retrieval_qdrant.py tests/test_qdrant_indexer.py :: [100%]
+- evidence: python tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+- evidence: python tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (retrieval security boundary and optional external vector backend integration)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (disabled backend/provider by default + deny reasons)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0059 Retrieval ABAC parity baseline (metadata-bound row filters + snippet masking across retrieval backends)
+
+**Decision**  
+Bring retrieval paths to ABAC/masking parity with SQL enforcement:
+- gateway retrieval now evaluates ABAC using request `resource_attributes`,
+- retrieval denies on ABAC mismatch (e.g. region mismatch),
+- ABAC row filters are enforced against server-side dataset metadata (`sensitivity_summary_json`) as a conservative metadata-bound gate,
+- ABAC masks are applied to retrieval snippets (including email-token masking when email masking is active),
+- allow responses/provenance/access-decision records now include applied filters/masks for retrieval.
+
+**Rationale**  
+`NW-0009` closes a policy gap where retrieval was entitlement-scoped but not ABAC/masking-equivalent to SQL execution.
+
+**Alternatives considered**  
+- Keep retrieval ABAC as advisory metadata only (rejected: policy drift between SQL/retrieval paths).  
+- Filter only on client-provided metadata attributes (rejected: trust boundary violation).
+
+**Implications**  
+- Retrieval now fails closed when dataset metadata is missing required ABAC filter keys.
+- Snippet outputs avoid exposing obvious sensitive tokens when masking rules apply.
+- Policy evidence between query and retrieval is more consistent for audits.
+
+**Affected files**  
+- evidence: backend/gateway/app.py :: evaluate_abac(actor=actor_dict, resource_attributes=resource_attrs, mode=abac_mode)
+- evidence: backend/gateway/app.py :: _apply_retrieval_row_filter
+- evidence: backend/gateway/app.py :: _apply_retrieval_masks
+- evidence: backend/gateway/app.py :: _load_dataset_sensitivity_summaries
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_denies_abac_region_mismatch
+- evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_applies_metadata_row_filter_and_email_mask
+
+**Verification impact**  
+- evidence: python -m pytest -q tests/test_gateway_retrieve.py :: [100%]
+- evidence: python tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+- evidence: python tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (authorization/masking parity on retrieval path)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (deny on ABAC mismatch; drop rows missing metadata required by row filter)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0060 AI/ops extension baseline (optional AI service + policy simulation + catalog/scheduling/fairness + audit sinks + secrets + Helm hardening)
+
+**Decision**  
+Complete `NW-0010` through `NW-0025` with secure defaults:
+- keep AI service optional and disabled-by-default, while adding semantic-constrained SQL planning and a deterministic AI eval harness,
+- enforce operator safety additions (policy simulation endpoint, cost budgets, audit sink plugins, run scheduling and workspace fairness),
+- wire secrets-store abstraction into source credential flows with opaque refs,
+- ship hardened Helm/K8s assets and no-bypass static checks.
+
+**Rationale**  
+This tranche closes governance and operability gaps without weakening fail-closed defaults.
+
+**Implications**  
+- Optional services remain explicit opt-in and non-bypass.
+- Control-plane and gateway operational checks are now easier to automate.
+- Scheduling/fairness and policy simulation improve multi-workspace reliability and safe debugging.
+
+**Affected files**  
+- evidence: backend/ai_service/app.py :: /api/v1/ai/ask-sql
+- evidence: backend/gateway/app.py :: /api/v1/gateway/policy/simulate
+- evidence: backend/shared_domain/secrets_store.py :: load_secrets_store
+- evidence: backend/shared_domain/scheduling.py :: enqueue_due_scheduled_runs
+- evidence: backend/shared_domain/audit_sinks.py :: load_audit_sink
+- evidence: backend/control_plane/catalog_snapshot.py :: export_catalog_snapshot
+- evidence: deploy/helm/templates/networkpolicy.yaml :: NetworkPolicy
+- evidence: tests/test_ai_eval_harness.py :: test_ai_eval_harness_smoke_passes_and_writes_report
+- evidence: tests/test_gateway_policy_simulation.py :: test_policy_simulation_allows_steward_role
+
+**Verification impact**  
+- evidence: python -m pytest -q :: [100%]
+- evidence: python tools/check_boundary_fitness.py :: PASS CHK-BOUNDARY-FITNESS
+- evidence: python tools/check_no_bypass_ports.py :: PASS CHK-NO-BYPASS-PORTS
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (gateway enforcement + control-plane governance and deployment posture)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (all optional modules disabled by default)  
+- Safe to decide: YES  
+- Conservative baseline: YES
+
+---
+
+## D-0061 Completion baseline for NW-0026..NW-0034 and AI track (demo generator, docs wave, pack registry, Trino hardening, compaction, anomaly/ERv2, locale parsing, typed SDK)
+
+**Decision**  
+Finalize remaining next-wave tasks and AI track endpoints with deterministic, test-covered implementations:
+- add CLI/tool first-hour demo scenario generation,
+- add documentation wave (quickstart, security model, connector guide),
+- add pack registry + linter gate,
+- harden Trino adapter with retry/cancel timeout path and add maintenance hooks,
+- add compact/anomaly/ERv2/locale parsing modules with fail-closed behavior,
+- add generated Python SDK endpoint artifacts with up-to-date check gate,
+- complete AI endpoint surface (`AI-0101`..`AI-0115`) including metric-first and eval-generator flows.
+
+**Rationale**  
+This closes the entire execution board while preserving minimal UI and CLI/operator-first usage.
+
+**Implications**  
+- `TASKLIST_NEXT.md` is now fully checked with all NW and AI items complete.
+- Tooling baseline can now verify pack registry and client SDK generation drift.
+- Data quality and parsing resilience improve reliability for messy real-world exports.
+
+**Affected files**  
+- evidence: backend/shared_domain/demo_scenario.py :: generate_demo_scenario
+- evidence: cli/schemapilot_cli/main.py :: demo-generate
+- evidence: tools/demo_scenario_generator.py :: PASS demo scenario generated
+- evidence: tools/pack_lint.py :: PASS CHK-PACK-REGISTRY
+- evidence: backend/gateway/executor_trino.py :: cancel_trino_query
+- evidence: backend/workers/compaction.py :: compact_json_files
+- evidence: backend/workers/anomaly_detection.py :: detect_profile_anomalies
+- evidence: backend/workers/entity_resolution_v2.py :: resolve_entities_v2
+- evidence: backend/workers/parsing.py :: parse_currency
+- evidence: tools/generate_clients.py :: PASS CHK-CLIENT-SDK-GEN
+- evidence: sdk/python/schemapilot_client/generated_endpoints.py :: OPENAPI_FINGERPRINT
+
+**Verification impact**  
+- evidence: python -m pytest -q :: [100%]
+- evidence: python tools/pack_lint.py :: PASS CHK-PACK-REGISTRY
+- evidence: python tools/generate_clients.py --check :: PASS CHK-CLIENT-SDK-GEN
+
+**DSC summary**  
+- Externally constrained: NO  
+- Critical flow impacted: YES (query/retrieval and worker quality gates)  
+- Unsafe/high-risk: NO  
+- Conservative baseline available: YES (optional paths remain disabled-by-default)  
 - Safe to decide: YES  
 - Conservative baseline: YES
 

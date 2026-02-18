@@ -1,0 +1,33 @@
+{
+  "registry_version": "v1",
+  "policy_packs": [
+    {
+      "pack_id": "baseline-team",
+      "version": "1.0.0",
+      "path": "packs/policy/baseline-team.json",
+      "checksum_hint": "generated-by-pack-lint"
+    }
+  ],
+  "semantic_packs": [
+    {
+      "pack_id": "starter-invoices",
+      "version": "1.0.0",
+      "path": "packs/semantic/starter-invoices.json",
+      "checksum_hint": "generated-by-pack-lint"
+    }
+  ],
+  "connector_examples": [
+    {
+      "pack_id": "hubspot-export",
+      "version": "0.1.0",
+      "path": "plugins/examples/hubspot_export_connector.py",
+      "checksum_hint": "generated-by-pack-lint"
+    },
+    {
+      "pack_id": "zendesk-export",
+      "version": "0.1.0",
+      "path": "plugins/examples/zendesk_export_connector.py",
+      "checksum_hint": "generated-by-pack-lint"
+    }
+  ]
+}

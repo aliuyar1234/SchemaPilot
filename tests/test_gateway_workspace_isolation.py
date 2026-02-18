@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from backend.gateway.app import create_gateway_app
 from backend.shared_domain.config import Settings
 from backend.shared_domain.db import get_session_factory
-from backend.shared_domain.metadata_models import CatalogDataset
+from backend.shared_domain.metadata_models import CatalogDataset, GovernancePolicy
+from backend.shared_domain.semantic import semantic_manifest_checksum
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -45,6 +46,53 @@ def _insert_foreign_dataset(*, database_url: str, dataset_id: str) -> None:
         session.close()
 
 
+def _insert_semantic_manifest(*, database_url: str, workspace_id: str, dataset_id: str) -> None:
+    manifest = {
+        "manifest_version": "1",
+        "workspace_id": workspace_id,
+        "entities": [
+            {
+                "entity_id": "invoice",
+                "dataset_id": dataset_id,
+                "primary_key": "invoice_id",
+                "attributes": ["amount"],
+            }
+        ],
+        "metrics": [
+            {
+                "metric_id": "invoice_count",
+                "entity_id": "invoice",
+                "aggregation": "count",
+                "field": "invoice_id",
+                "expression": "count(invoice_id)",
+            }
+        ],
+        "joins": [],
+    }
+    session = get_session_factory(database_url)()
+    try:
+        session.add(
+            GovernancePolicy(
+                policy_id="semantic-policy-workspace-a",
+                workspace_id=workspace_id,
+                policy_type="semantic_manifest",
+                definition_ref=json.dumps(
+                    {
+                        "workspace_id": workspace_id,
+                        "manifest": manifest,
+                        "manifest_checksum": semantic_manifest_checksum(manifest),
+                        "version": 1,
+                    },
+                    sort_keys=True,
+                ),
+                status="active",
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
 def test_gateway_query_denies_ai_dataset_from_other_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
@@ -69,13 +117,17 @@ def test_gateway_query_denies_ai_dataset_from_other_workspace(
     _insert_foreign_dataset(
         database_url=settings.database_url, dataset_id="dataset-cross-workspace"
     )
+    _insert_semantic_manifest(
+        database_url=settings.database_url,
+        workspace_id="workspace-a",
+        dataset_id="dataset-cross-workspace",
+    )
 
     response = client.post(
         "/api/v1/gateway/query",
         json={
             "workspace_id": "workspace-a",
-            "query": {"text": "select 1 as one"},
-            "resource_attributes": {"dataset_id": "dataset-cross-workspace"},
+            "semantic_query": {"metric_id": "invoice_count"},
         },
         headers=_auth_headers("ai-cross-workspace-token"),
     )

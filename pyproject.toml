@@ -37,7 +37,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["backend*", "cli*"]
+include = ["backend*", "cli*", "sdk*"]
 
 [tool.ruff]
 line-length = 100

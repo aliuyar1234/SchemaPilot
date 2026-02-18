@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
-import random
 import string
+import threading
 import uuid
 
 ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_ULID_LOCK = threading.Lock()
+_LAST_ULID_MILLIS = 0
+_LAST_ULID_COUNTER = -1
 
 
 def new_uuid() -> str:
@@ -18,12 +21,19 @@ def new_uuid() -> str:
 def new_ulid() -> str:
     """Generate a simple ULID-compatible identifier.
 
-    This bootstrap implementation is deterministic in format and sortable by time prefix.
+    This implementation is deterministic in format and monotonic per-process.
     """
-    millis = int(dt.datetime.now(tz=dt.UTC).timestamp() * 1000)
-    ts = _encode_base32(millis, length=10)
-    rand = "".join(random.choice(ULID_ALPHABET) for _ in range(16))
-    return ts + rand
+    global _LAST_ULID_MILLIS, _LAST_ULID_COUNTER
+    with _ULID_LOCK:
+        millis = int(dt.datetime.now(tz=dt.UTC).timestamp() * 1000)
+        if millis == _LAST_ULID_MILLIS:
+            _LAST_ULID_COUNTER += 1
+        else:
+            _LAST_ULID_MILLIS = millis
+            _LAST_ULID_COUNTER = 0
+        ts = _encode_base32(millis, length=10)
+        counter = _encode_base32(_LAST_ULID_COUNTER, length=16)
+    return ts + counter
 
 
 def _encode_base32(value: int, *, length: int) -> str:

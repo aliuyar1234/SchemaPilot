@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1",
+  "workspace_id": "example_workspace",
+  "entities": [
+    {
+      "entity_id": "invoice",
+      "dataset_id": "dataset_invoices",
+      "primary_key": "invoice_id",
+      "attributes": [
+        "customer_id",
+        "invoice_date",
+        "region"
+      ]
+    },
+    {
+      "entity_id": "customer",
+      "dataset_id": "dataset_customers",
+      "primary_key": "customer_id",
+      "attributes": [
+        "customer_name",
+        "region"
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "metric_id": "invoice_count",
+      "entity_id": "invoice",
+      "aggregation": "count",
+      "field": "invoice_id",
+      "expression": "count(invoice_id)"
+    },
+    {
+      "metric_id": "gross_revenue",
+      "entity_id": "invoice",
+      "aggregation": "sum",
+      "field": "invoice_amount",
+      "expression": "sum(invoice_amount)"
+    }
+  ],
+  "joins": [
+    {
+      "join_id": "invoice_customer",
+      "left_entity_id": "invoice",
+      "right_entity_id": "customer",
+      "left_key": "customer_id",
+      "right_key": "customer_id",
+      "join_type": "inner"
+    }
+  ]
+}

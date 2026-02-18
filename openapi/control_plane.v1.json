@@ -1562,6 +1562,203 @@
         "summary": "Api Get Run"
       }
     },
+    "/api/v1/workspaces/{workspace_id}/semantic-manifest": {
+      "get": {
+        "operationId": "api_get_effective_semantic_manifest_api_v1_workspaces__workspace_id__semantic_manifest_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Get Effective Semantic Manifest Api V1 Workspaces  Workspace Id  Semantic Manifest Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Get Effective Semantic Manifest"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/semantic-manifest/change-request": {
+      "post": {
+        "operationId": "api_request_semantic_manifest_change_api_v1_workspaces__workspace_id__semantic_manifest_change_request_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Request Semantic Manifest Change Api V1 Workspaces  Workspace Id  Semantic Manifest Change Request Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Request Semantic Manifest Change"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/semantic-manifest/change-requests/{change_request_id}/decision": {
+      "post": {
+        "operationId": "api_decide_semantic_manifest_change_api_v1_workspaces__workspace_id__semantic_manifest_change_requests__change_request_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "change_request_id",
+            "required": true,
+            "schema": {
+              "title": "Change Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Payload",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Decide Semantic Manifest Change Api V1 Workspaces  Workspace Id  Semantic Manifest Change Requests  Change Request Id  Decision Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Decide Semantic Manifest Change"
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/semantic-manifest/rollback": {
+      "post": {
+        "operationId": "api_rollback_semantic_manifest_api_v1_workspaces__workspace_id__semantic_manifest_rollback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Rollback Semantic Manifest Api V1 Workspaces  Workspace Id  Semantic Manifest Rollback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Rollback Semantic Manifest"
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/sources": {
       "get": {
         "operationId": "api_list_sources_api_v1_workspaces__workspace_id__sources_get",

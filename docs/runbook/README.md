@@ -14,6 +14,12 @@ Use this file as a stable docs entrypoint and quick map:
 - Weekly KPI workflow and artifacts: `spec/12_RUNBOOK.md` (`Weekly KPI report command`)
 - Troubleshooting matrix: `spec/12_RUNBOOK.md` (`Troubleshooting`)
 
+Supplemental docs:
+
+- First-hour quickstart: `docs/quickstart/FIRST_HOUR.md`
+- Security model overview: `docs/security/SECURITY_MODEL.md`
+- Connector plugin guide: `docs/connectors/CONNECTOR_GUIDE.md`
+
 Weekly KPI example:
 
 ```bash

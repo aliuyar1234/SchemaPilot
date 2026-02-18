@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-ai-service
+  namespace: schemapilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-ai-service
+  template:
+    metadata:
+      labels:
+        app: schemapilot-ai-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ai-service
+          image: ghcr.io/example/schemapilot-ai-service:latest
+          envFrom:
+            - secretRef:
+                name: schemapilot-secrets
+          env:
+            - name: SCHEMAPILOT_PROFILE
+              value: "team"
+            - name: SCHEMAPILOT_AI_SERVICE_ENABLED
+              value: "false"
+            - name: SCHEMAPILOT_AI_PROVIDER
+              value: "disabled"
+            - name: SCHEMAPILOT_AI_GATEWAY_URL
+              value: "http://schemapilot-gateway:8001"
+            - name: SCHEMAPILOT_AI_CONTROL_PLANE_URL
+              value: "http://schemapilot-control-plane:8000"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8002

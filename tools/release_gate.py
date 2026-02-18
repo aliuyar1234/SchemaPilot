@@ -145,6 +145,12 @@ def main() -> int:
             None,
         ),
         (
+            "RG-007B",
+            "AI eval harness smoke",
+            [sys.executable, "tools/ai_eval_harness.py", "--smoke"],
+            None,
+        ),
+        (
             "RG-008",
             "Performance harness",
             [sys.executable, "tools/perf_harness.py"],

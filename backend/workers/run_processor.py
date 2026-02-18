@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import csv
+import json
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.shared_domain.audit_models import AuditEvent
@@ -16,17 +18,21 @@ from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import (
     CatalogDataset,
     CatalogSource,
+    GovernancePolicy,
     ReviewProposal,
     ReviewTask,
     RunRecord,
 )
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
+from backend.workers.anomaly_detection import detect_profile_anomalies
 from backend.workers.bronze import ingest_file_to_bronze
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
 from backend.workers.connectors.plugin_runner import execute_connector_plugin
 from backend.workers.drift import detect_schema_drift
 from backend.workers.pii import detect_pii_proposals
 from backend.workers.profiler import profile_csv_file
+from backend.workers.semantic_drift import detect_semantic_manifest_drift
+from backend.workers.semantic_builder import build_semantic_manifest_candidate
 
 DEFAULT_INCLUDE_GLOBS = ["**/*.csv"]
 PROFILE_SAMPLE_LIMIT = 1000
@@ -65,19 +71,38 @@ class StrictIngestCompletenessError(ValueError):
 
 
 def process_next_queued_run(
-    session: Session, *, storage_root: str, strict_ingest: bool = True
+    session: Session,
+    *,
+    storage_root: str,
+    max_active_per_workspace: int = 1,
+    strict_ingest: bool = True,
 ) -> ProcessedRun | None:
     """Process the oldest queued run deterministically."""
-    run = (
+    queued = (
         session.execute(
             select(RunRecord)
             .where(RunRecord.status == "queued")
             .order_by(RunRecord.run_id)
-            .limit(1)
         )
         .scalars()
-        .first()
+        .all()
     )
+    run = None
+    workspace_limit = max(max_active_per_workspace, 1)
+    for candidate in queued:
+        running_count = int(
+            session.execute(
+                select(func.count())
+                .select_from(RunRecord)
+                .where(
+                    RunRecord.workspace_id == candidate.workspace_id,
+                    RunRecord.status == "running",
+                )
+            ).scalar_one()
+        )
+        if running_count < workspace_limit:
+            run = candidate
+            break
     if run is None:
         return None
     return process_run_by_id(
@@ -190,7 +215,59 @@ def _execute_run(
             storage_root=storage_root,
             strict_ingest=strict_ingest,
         )
+    if run.run_type == "semantic_bootstrap":
+        return _process_semantic_bootstrap_run(
+            session,
+            run=run,
+            storage_root=storage_root,
+        )
     raise ValueError(f"Unsupported run_type for worker processor: {run.run_type}")
+
+
+def _process_semantic_bootstrap_run(
+    session: Session,
+    *,
+    run: RunRecord,
+    storage_root: str,
+) -> dict[str, object]:
+    dataset_ids = sorted(
+        session.execute(
+            select(CatalogDataset.dataset_id).where(
+                CatalogDataset.workspace_id == run.workspace_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    run.input_refs_json = {
+        "dataset_ids": dataset_ids,
+        "dataset_count": len(dataset_ids),
+    }
+    session.flush()
+
+    candidate = build_semantic_manifest_candidate(
+        session,
+        workspace_id=run.workspace_id,
+        storage_root=storage_root,
+    )
+    manifest = candidate.get("semantic_manifest", {})
+    manifest_version = ""
+    if isinstance(manifest, dict):
+        manifest_version = str(manifest.get("manifest_version", ""))
+    return {
+        "dataset_ids": dataset_ids,
+        "dataset_count": len(dataset_ids),
+        "manifest_version": manifest_version,
+        "manifest_checksum": candidate["manifest_checksum"],
+        "evidence_bundle_uri": candidate["evidence_bundle_uri"],
+        "confidence": candidate["confidence"],
+        "confidence_flag_count": candidate["confidence_flag_count"],
+        "proposal_id": candidate["proposal_id"],
+        "task_id": candidate["task_id"],
+        "entity_count": candidate["entity_count"],
+        "metric_count": candidate["metric_count"],
+        "join_count": candidate["join_count"],
+    }
 
 
 def _process_discover_run(
@@ -229,6 +306,8 @@ def _process_discover_run(
     successful_item_count = 0
     pii_blocking_tasks_created = 0
     drift_blocking_tasks_created = 0
+    semantic_drift_blocking_tasks_created = 0
+    anomaly_blocking_tasks_created = 0
     connector_plugins = load_connector_plugin_specs()
 
     for source in sources:
@@ -338,6 +417,7 @@ def _process_discover_run(
                         "row_count_sampled": evidence.row_count_sampled,
                         "parse_error_rate": evidence.parse_error_rate,
                         "schema_columns": evidence.schema_columns,
+                        "last_profile_epoch": int(time.time()),
                     }
                     summary["last_evidence_bundle_uri"] = stored_evidence.evidence_bundle_uri
                     summary["last_evidence_content_hash"] = stored_evidence.content_hash
@@ -370,6 +450,15 @@ def _process_discover_run(
                         current_columns=evidence.schema_columns,
                         storage_root=storage_root,
                     )
+                    anomaly_blocking_tasks_created += _create_anomaly_review_task_if_needed(
+                        session=session,
+                        workspace_id=run.workspace_id,
+                        dataset_id=dataset.dataset_id,
+                        source_id=source.source_id,
+                        physical_locator=physical_locator,
+                        profile=evidence.to_dict(),
+                        storage_root=storage_root,
+                    )
                     session.flush()
                 successful_item_count += 1
             except Exception as exc:
@@ -385,6 +474,11 @@ def _process_discover_run(
                 )
 
     sorted_dataset_ids = sorted(dataset_ids)
+    semantic_drift_blocking_tasks_created += _create_semantic_drift_review_task_if_needed(
+        session=session,
+        workspace_id=run.workspace_id,
+        storage_root=storage_root,
+    )
     if completeness_failures:
         completeness_payload = {
             "workspace_id": run.workspace_id,
@@ -442,6 +536,8 @@ def _process_discover_run(
         "strict_ingest": strict_ingest,
         "pii_blocking_tasks_created": pii_blocking_tasks_created,
         "drift_blocking_tasks_created": drift_blocking_tasks_created,
+        "semantic_drift_blocking_tasks_created": semantic_drift_blocking_tasks_created,
+        "anomaly_blocking_tasks_created": anomaly_blocking_tasks_created,
         "expected_item_count": len(completeness_expected_items),
         "processed_item_count": successful_item_count,
         "completeness_failure_count": len(completeness_failures),
@@ -586,6 +682,129 @@ def _create_drift_review_task_if_needed(
         session,
         workspace_id=workspace_id,
         proposal_type="drift_proposal",
+        evidence_bundle_uri=stored.evidence_bundle_uri,
+        confidence=1.0,
+    )
+    created = _create_blocking_review_task_if_missing(
+        session,
+        workspace_id=workspace_id,
+        proposal_id=proposal.proposal_id,
+        priority="quality_critical",
+    )
+    return 1 if created else 0
+
+
+def _create_semantic_drift_review_task_if_needed(
+    session: Session,
+    *,
+    workspace_id: str,
+    storage_root: str,
+) -> int:
+    semantic_policy = (
+        session.execute(
+            select(GovernancePolicy).where(
+                GovernancePolicy.workspace_id == workspace_id,
+                GovernancePolicy.policy_type == "semantic_manifest",
+                GovernancePolicy.status == "active",
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if semantic_policy is None:
+        return 0
+    try:
+        payload = json.loads(semantic_policy.definition_ref)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    manifest = payload.get("semantic_manifest", {})
+    if not isinstance(manifest, dict):
+        return 0
+    datasets = (
+        session.execute(select(CatalogDataset).where(CatalogDataset.workspace_id == workspace_id))
+        .scalars()
+        .all()
+    )
+    available_columns_by_dataset: dict[str, set[str]] = {}
+    for dataset in datasets:
+        summary = _json_dict(dataset.sensitivity_summary_json)
+        profile = summary.get("profile", {})
+        if not isinstance(profile, dict):
+            continue
+        columns_raw = profile.get("schema_columns", [])
+        if not isinstance(columns_raw, list):
+            continue
+        available_columns_by_dataset[dataset.dataset_id] = {
+            str(column).lower() for column in columns_raw if str(column).strip()
+        }
+    if not available_columns_by_dataset:
+        return 0
+    drift = detect_semantic_manifest_drift(
+        semantic_manifest=manifest,
+        available_columns_by_dataset=available_columns_by_dataset,
+    )
+    if not bool(drift.get("drift_detected", False)):
+        return 0
+    stored = store_evidence_bundle(
+        workspace_id=workspace_id,
+        storage_root=storage_root,
+        bundle_type="semantic_drift",
+        payload={
+            "workspace_id": workspace_id,
+            "drift": drift,
+            "available_columns_by_dataset": {
+                dataset_id: sorted(columns)
+                for dataset_id, columns in sorted(available_columns_by_dataset.items())
+            },
+        },
+    )
+    proposal = _get_or_create_review_proposal(
+        session,
+        workspace_id=workspace_id,
+        proposal_type="semantic_drift_proposal",
+        evidence_bundle_uri=stored.evidence_bundle_uri,
+        confidence=1.0,
+    )
+    created = _create_blocking_review_task_if_missing(
+        session,
+        workspace_id=workspace_id,
+        proposal_id=proposal.proposal_id,
+        priority="quality_critical",
+    )
+    return 1 if created else 0
+
+
+def _create_anomaly_review_task_if_needed(
+    session: Session,
+    *,
+    workspace_id: str,
+    dataset_id: str,
+    source_id: str,
+    physical_locator: str,
+    profile: dict[str, object],
+    storage_root: str,
+) -> int:
+    anomalies = detect_profile_anomalies(profile)
+    if not anomalies:
+        return 0
+    stored = store_evidence_bundle(
+        workspace_id=workspace_id,
+        storage_root=storage_root,
+        bundle_type="anomaly_detection",
+        payload={
+            "dataset_id": dataset_id,
+            "source_id": source_id,
+            "physical_locator": physical_locator,
+            "profile": profile,
+            "anomalies": anomalies,
+        },
+    )
+    proposal = _get_or_create_review_proposal(
+        session,
+        workspace_id=workspace_id,
+        proposal_type="anomaly_detection_proposal",
         evidence_bundle_uri=stored.evidence_bundle_uri,
         confidence=1.0,
     )

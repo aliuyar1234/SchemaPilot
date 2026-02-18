@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+
+from backend.workers.parsing import normalize_text, open_csv_reader_with_fallback
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,8 @@ class ProfileEvidence:
 
 def profile_csv_file(path: str, sample_limit: int = 1000) -> ProfileEvidence:
     """Profile a CSV file with bounded sampling."""
-    file_path = Path(path)
-    with file_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
+    handle, reader = open_csv_reader_with_fallback(path)
+    with handle:
         columns = list(reader.fieldnames or [])
         null_counts = Counter({column: 0 for column in columns})
         unique_values: dict[str, set[str]] = {column: set() for column in columns}
@@ -44,7 +44,7 @@ def profile_csv_file(path: str, sample_limit: int = 1000) -> ProfileEvidence:
                 break
             row_count += 1
             for column in columns:
-                value = (row.get(column) or "").strip()
+                value = normalize_text(str(row.get(column) or ""))
                 if value == "":
                     null_counts[column] += 1
                 unique_values[column].add(value)

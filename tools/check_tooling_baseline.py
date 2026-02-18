@@ -40,6 +40,17 @@ def main() -> int:
     run([sys.executable, "tools/check_boundary_fitness.py"], cwd=root)
     run([sys.executable, "tools/check_no_bypass_ports.py"], cwd=root)
     run([sys.executable, "tools/check_openapi_compat.py"], cwd=root)
+    run([sys.executable, "tools/generate_clients.py", "--check"], cwd=root)
+    run([sys.executable, "tools/pack_lint.py"], cwd=root)
+    run([sys.executable, "tools/policy_pack_test.py"], cwd=root)
+    run(
+        [
+            sys.executable,
+            "tools/semantic_validate.py",
+            "backend/shared_domain/semantic_manifest.example.json",
+        ],
+        cwd=root,
+    )
     run([sys.executable, "-m", "pytest"], cwd=root)
     run([sys.executable, "tools/migration_check.py"], cwd=root)
     run([sys.executable, "tools/secrets_hygiene_check.py"], cwd=root)
@@ -47,6 +58,7 @@ def main() -> int:
     run([sys.executable, "tools/backup_restore_drill.py"], cwd=root)
     run([sys.executable, "tools/messybench_harness.py", "--regression"], cwd=root)
     run([sys.executable, "tools/e2e_golden_path.py", "--smoke"], cwd=root)
+    run([sys.executable, "tools/ai_eval_harness.py", "--smoke"], cwd=root)
     run([sys.executable, "tools/perf_harness.py"], cwd=root)
     run([sys.executable, "tools/ssot_verify.py"], cwd=root)
     run([sys.executable, "tools/verify_manifest.py"], cwd=root)

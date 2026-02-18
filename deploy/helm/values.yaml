@@ -1,0 +1,38 @@
+namespace: schemapilot
+
+imagePullPolicy: IfNotPresent
+
+controlPlane:
+  image: ghcr.io/example/schemapilot-control-plane:latest
+  replicas: 1
+
+gateway:
+  image: ghcr.io/example/schemapilot-gateway:latest
+  replicas: 1
+
+worker:
+  image: ghcr.io/example/schemapilot-worker:latest
+  replicas: 1
+
+ui:
+  image: ghcr.io/example/schemapilot-ui:latest
+  replicas: 1
+
+aiService:
+  image: ghcr.io/example/schemapilot-ai-service:latest
+  replicas: 1
+  enabled: false
+
+service:
+  controlPlanePort: 8000
+  gatewayPort: 8001
+  uiPort: 5173
+  aiServicePort: 8002
+
+env:
+  profile: team
+  bindAddress: 0.0.0.0
+  requireAuthForNonLocal: "true"
+
+secrets:
+  name: schemapilot-secrets

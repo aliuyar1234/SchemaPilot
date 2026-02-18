@@ -245,5 +245,16 @@ evidence: checks/CHECKS_INDEX.md :: CHK-EVIDENCE-POINTER-FORMAT
 - 2026-02-18 — Completed PR-030 and PR-031: introduced provenance schema v1 + deterministic audit export and added approval-gated policy-pack lifecycle controls with rollback support and gateway visibility.
 - 2026-02-18 — Completed PR-032 through PR-034: hardened plugin allowlist/isolated execution, added OpenAPI compatibility checks with committed baselines, and wired deterministic golden-path + regression harness gating.
 - 2026-02-18 — Completed PR-035 and PR-036: added optional gateway Trino engine adapter with DuckDB fallback, finalized runbook/security documentation, and marked the execution board complete while keeping UI intentionally minimal.
+- 2026-02-18 — Started next-wave board execution: completed `NW-0001` and `NW-0002` by adding semantic manifest schema validation/checksum tooling and review-gated control-plane semantic lifecycle endpoints with rollback.
+- 2026-02-18 — Completed `NW-0003`: added deterministic worker `semantic_bootstrap` run processing, semantic candidate evidence/review artifact generation, and fail-closed/idempotency regression coverage.
+- 2026-02-18 — Completed `NW-0004`: added gateway semantic resolver and AI-only semantic-query enforcement with dataset entitlement/workspace isolation checks over resolved semantic datasets.
+- 2026-02-18 — Completed `NW-0005`: added deterministic gold template packs (`invoices`, `crm`, `support`) and CLI generation commands (`templates list/apply`) with regression coverage.
+- 2026-02-18 — Hardened ULID monotonicity for same-millisecond ID generation to stabilize run queue ordering and avoid flaky semantic bootstrap sequencing.
+- 2026-02-18 — Completed `NW-0006`: added document connector discovery for PDF/EML/MBOX and confidence-scored extraction evidence with fail-closed invalid-signature handling.
+- 2026-02-18 — Completed `NW-0007`: added optional OpenSearch retrieval backend wiring in gateway (disabled-by-default fail-closed), boundary-safe worker indexer helpers, internal-only compose service profile, and regression tests for disabled/enabled/unavailable paths.
+- 2026-02-18 — Completed `NW-0008`: added optional Qdrant vector retrieval/indexing path with explicit embeddings provider loader (disabled-by-default), fail-closed gateway deny reasons, internal-only compose profile, and deterministic vector adapter/indexer tests.
+- 2026-02-18 — Completed `NW-0009`: aligned retrieval policy enforcement with SQL ABAC parity by enforcing metadata-bound row filters, snippet masking, and ABAC deny paths across filesystem/OpenSearch/Qdrant retrieval backends.
+- 2026-02-18 — Completed `NW-0010` through `NW-0025`: optional AI service and SQL agent baseline, AI eval harness, hardened Helm/K8s no-bypass assets, secrets-store integration, plugin scaffold/reference connectors, catalog export/import, scheduling/fairness controls, cost budgets, audit sinks, policy simulation, policy-pack tests, semantic drift, lineage SQL export, and source SLA evaluation.
+- 2026-02-18 — Completed `NW-0026` through `NW-0034` and AI track `AI-0101`..`AI-0115`: first-hour demo generator, docs wave, pack registry linting, Trino retry/cancel hardening, compaction/anomaly/ERv2/locale parsing modules, typed SDK generation gate, and full AI endpoint surface including metric-first and eval-generator flows.
 
 

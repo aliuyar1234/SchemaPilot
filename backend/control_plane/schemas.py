@@ -22,6 +22,7 @@ class SourceCreateRequest(BaseModel):
     source_type: str
     scope: dict[str, object]
     display_name: str
+    credentials: dict[str, str] | None = None
 
 
 class SourceResponse(BaseModel):
@@ -31,6 +32,7 @@ class SourceResponse(BaseModel):
     scope: dict[str, object]
     display_name: str
     status: str
+    credentials_ref: str | None = None
 
 
 class RunCreateRequest(BaseModel):

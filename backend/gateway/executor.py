@@ -111,15 +111,18 @@ def execute_sql(
         from backend.gateway.executor_trino import execute_sql_trino
 
         started_at = perf_counter()
-        columns, trino_rows = execute_sql_trino(
-            query=query,
-            max_rows=capped_rows,
-            timeout_ms=budget_ms,
-            trino_url=trino_url,
-            trino_user=trino_user,
-            trino_catalog=trino_catalog,
-            trino_schema=trino_schema,
-        )
+        try:
+            columns, trino_rows = execute_sql_trino(
+                query=query,
+                max_rows=capped_rows,
+                timeout_ms=budget_ms,
+                trino_url=trino_url,
+                trino_user=trino_user,
+                trino_catalog=trino_catalog,
+                trino_schema=trino_schema,
+            )
+        except TimeoutError as exc:
+            raise QueryTimeoutError("query_timeout_exceeded") from exc
         elapsed_ms = (perf_counter() - started_at) * 1000.0
         if elapsed_ms > float(budget_ms):
             raise QueryTimeoutError("query_timeout_exceeded")

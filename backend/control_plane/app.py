@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -11,6 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.control_plane import db_models
+from backend.control_plane.catalog_snapshot import (
+    export_catalog_snapshot,
+    import_catalog_snapshot,
+)
 from backend.control_plane.decision_engine import build_recommendation_report
 from backend.control_plane.deletion import (
     approve_deletion_request,
@@ -61,6 +66,17 @@ from backend.control_plane.schemas import (
     SourceCreateRequest,
     WorkspaceCreateRequest,
 )
+from backend.control_plane.semantic_manifest_service import (
+    decide_semantic_manifest_change,
+    get_effective_semantic_manifest,
+    request_semantic_manifest_change,
+    rollback_semantic_manifest,
+)
+from backend.control_plane.source_health import (
+    configure_source_sla,
+    evaluate_source_slas,
+    list_source_slas,
+)
 from backend.shared_domain.auth import (
     actor_has_any_role,
     authenticated_actor_from_request,
@@ -84,14 +100,23 @@ from backend.shared_domain.observability import (
     render_metrics,
     set_review_queue_backlog,
 )
+from backend.shared_domain.audit_sinks import AuditSinkError, load_audit_sink
 from backend.shared_domain.plugin_loader import load_connector_plugin_specs
 from backend.shared_domain.policy_packs import list_policy_pack_summaries
+from backend.shared_domain.secrets_store import load_secrets_store
+from backend.shared_domain.scheduling import (
+    create_run_schedule,
+    list_run_schedules,
+)
+from backend.shared_domain.lineage_sql import derive_column_lineage
 
 
 def create_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
     """Create control-plane application instance."""
     settings = settings_factory()
     settings.validate()
+    secrets_store = load_secrets_store(settings)
+    audit_sink = load_audit_sink(settings)
     auth_tokens = load_local_auth_tokens()
     if settings.database_url.startswith("sqlite:///"):
         sqlite_path = settings.database_url.removeprefix("sqlite:///")
@@ -195,7 +220,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         correlation_id: str,
     ) -> dict[str, object]:
         try:
-            return _append_audit_event(
+            event = _append_audit_event(
                 session,
                 workspace_id=workspace_id,
                 actor_id=actor_id,
@@ -203,6 +228,18 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 event_json=event_json,
                 correlation_id=correlation_id,
             )
+            audit_sink.emit(event)
+            return event
+        except AuditSinkError as exc:
+            increment_audit_write_failure(
+                workspace_id=workspace_id or "unknown",
+                service="control_plane",
+                operation=f"{event_type}:audit_sink",
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "audit_sink_unavailable", "operation": event_type},
+            ) from exc
         except Exception as exc:
             increment_audit_write_failure(
                 workspace_id=workspace_id or "unknown",
@@ -406,6 +443,110 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return result
 
+    @app.get("/api/v1/workspaces/{workspace_id}/semantic-manifest")
+    async def api_get_effective_semantic_manifest(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        semantic_manifest = get_effective_semantic_manifest(
+            session, workspace_id=workspace_id
+        )
+        if semantic_manifest is not None:
+            return semantic_manifest
+        return not_found_response(
+            request=request,
+            message="Effective semantic manifest not found.",
+            details={"workspace_id": workspace_id},
+        )  # type: ignore[return-value]
+
+    @app.post("/api/v1/workspaces/{workspace_id}/semantic-manifest/change-request")
+    async def api_request_semantic_manifest_change(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        manifest_raw = payload.get("semantic_manifest", {})
+        if not isinstance(manifest_raw, dict):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_semantic_manifest"},
+            )
+        change_request = request_semantic_manifest_change(
+            session,
+            workspace_id=workspace_id,
+            requester_actor_id=str(actor.get("actor_id", "unknown")),
+            semantic_manifest=manifest_raw,
+            storage_root=settings.storage_root,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="semantic_manifest.change_requested",
+            event_json=change_request,
+            correlation_id=request.state.request_id,
+        )
+        return change_request
+
+    @app.post(
+        "/api/v1/workspaces/{workspace_id}/semantic-manifest/change-requests/{change_request_id}/decision"
+    )
+    async def api_decide_semantic_manifest_change(
+        workspace_id: str,
+        change_request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        decision = str(payload.get("decision", "defer"))
+        reason = str(payload.get("decision_reason", ""))
+        result = decide_semantic_manifest_change(
+            session,
+            workspace_id=workspace_id,
+            change_request_id=change_request_id,
+            approver_actor_id=str(actor.get("actor_id", "unknown")),
+            decision=decision,
+            reason=reason,
+        )
+        if result is None:
+            return not_found_response(
+                request=request,
+                message="Semantic manifest change request not found.",
+                details={"workspace_id": workspace_id, "change_request_id": change_request_id},
+            )  # type: ignore[return-value]
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="semantic_manifest.change_decided",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/semantic-manifest/rollback")
+    async def api_rollback_semantic_manifest(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=platform_admin_roles)
+        result = rollback_semantic_manifest(session, workspace_id=workspace_id)
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="semantic_manifest.rolled_back",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
     @app.get("/api/v1/workspaces")
     async def api_list_workspaces(
         session: Session = Depends(get_session),
@@ -547,12 +688,20 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                         "source_type": payload.source_type,
                     },
                 )
+        credentials_ref: str | None = None
+        if payload.credentials:
+            credentials_ref = secrets_store.put_secret(
+                scope=f"workspace/{workspace_id}/source/{payload.source_type}",
+                key="credentials_bundle",
+                value=json_dumps_sorted(payload.credentials),
+            )
         source = create_source(
             session,
             workspace_id=workspace_id,
             source_type=payload.source_type,
             scope=payload.scope,
             display_name=payload.display_name,
+            credentials_ref=credentials_ref,
         )
         append_audit_event(
             session,
@@ -579,11 +728,20 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
+        patch = dict(payload)
+        credentials_raw = patch.pop("credentials", None)
+        if isinstance(credentials_raw, dict) and credentials_raw:
+            source_type_for_scope = str(patch.get("source_type", "custom"))
+            patch["credentials_ref"] = secrets_store.put_secret(
+                scope=f"workspace/{workspace_id}/source/{source_type_for_scope}",
+                key=f"credentials_bundle_{source_id}",
+                value=json_dumps_sorted({str(k): str(v) for k, v in credentials_raw.items()}),
+            )
         source = update_source(
             session,
             workspace_id=workspace_id,
             source_id=source_id,
-            patch=payload,
+            patch=patch,
         )
         if source is None:
             return not_found_response(
@@ -622,6 +780,137 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             message="Dataset not found.",
             details={"workspace_id": workspace_id, "dataset_id": dataset_id},
         )  # type: ignore[return-value]
+
+    @app.get("/api/v1/workspaces/{workspace_id}/catalog/export")
+    async def api_export_catalog(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        try:
+            snapshot = export_catalog_snapshot(session, workspace_id=workspace_id)
+        except ValueError:
+            return not_found_response(
+                request=request,
+                message="Workspace not found.",
+                details={"workspace_id": workspace_id},
+            )  # type: ignore[return-value]
+        return snapshot
+
+    @app.post("/api/v1/workspaces/{workspace_id}/catalog/import")
+    async def api_import_catalog(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        snapshot_raw = payload.get("snapshot", payload)
+        snapshot = snapshot_raw if isinstance(snapshot_raw, dict) else {}
+        try:
+            result = import_catalog_snapshot(
+                session,
+                workspace_id=workspace_id,
+                snapshot=snapshot,
+            )
+        except ValueError as exc:
+            reason = str(exc)
+            if reason == "workspace_not_found":
+                return not_found_response(
+                    request=request,
+                    message="Workspace not found.",
+                    details={"workspace_id": workspace_id},
+                )  # type: ignore[return-value]
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason},
+            ) from exc
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="catalog.imported",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return {"workspace_id": workspace_id, **result}
+
+    @app.get("/api/v1/workspaces/{workspace_id}/source-slas")
+    async def api_list_source_slas(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        return list_source_slas(session, workspace_id=workspace_id)
+
+    @app.post("/api/v1/workspaces/{workspace_id}/source-slas")
+    async def api_configure_source_sla(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        dataset_id = str(payload.get("dataset_id", "")).strip()
+        freshness_seconds_raw = payload.get("freshness_seconds", 86400)
+        freshness_seconds = (
+            int(freshness_seconds_raw)
+            if isinstance(freshness_seconds_raw, (int, float, str))
+            else 86400
+        )
+        enabled = bool(payload.get("enabled", True))
+        if not dataset_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_dataset_id"},
+            )
+        try:
+            sla = configure_source_sla(
+                session,
+                workspace_id=workspace_id,
+                dataset_id=dataset_id,
+                freshness_seconds=freshness_seconds,
+                enabled=enabled,
+                actor_id=str(actor.get("actor_id", "unknown")),
+            )
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": str(exc)},
+            ) from exc
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="source_sla.configured",
+            event_json=sla,
+            correlation_id=request.state.request_id,
+        )
+        return sla
+
+    @app.post("/api/v1/workspaces/{workspace_id}/source-slas/evaluate")
+    async def api_evaluate_source_slas(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = evaluate_source_slas(
+            session,
+            workspace_id=workspace_id,
+            storage_root=settings.storage_root,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="source_sla.evaluated",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
 
     @app.get("/api/v1/workspaces/{workspace_id}/evidence/{evidence_id}")
     async def api_get_evidence_bundle(
@@ -680,6 +969,55 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 details={"workspace_id": workspace_id, "run_id": run_id},
             )  # type: ignore[return-value]
         return run
+
+    @app.get("/api/v1/workspaces/{workspace_id}/run-schedules")
+    async def api_list_run_schedules(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        return list_run_schedules(session, workspace_id=workspace_id)
+
+    @app.post("/api/v1/workspaces/{workspace_id}/run-schedules")
+    async def api_create_run_schedule(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        run_type = str(payload.get("run_type", "discover")).strip()
+        schedule_expression = str(payload.get("schedule_expression", "")).strip()
+        enabled = bool(payload.get("enabled", True))
+        if not run_type or not schedule_expression:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_schedule_fields"},
+            )
+        try:
+            schedule = create_run_schedule(
+                session,
+                workspace_id=workspace_id,
+                run_type=run_type,
+                schedule_expression=schedule_expression,
+                enabled=enabled,
+                actor_id=str(actor.get("actor_id", "unknown")),
+            )
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": str(exc)},
+            ) from exc
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="run.schedule_created",
+            event_json=schedule,
+            correlation_id=request.state.request_id,
+        )
+        return schedule
 
     @app.get("/api/v1/workspaces/{workspace_id}/review_tasks")
     async def api_list_review_tasks(
@@ -872,6 +1210,27 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             "approval_required": report["approval_required"],
             "approval_reasons": report["approval_reasons"],
             "intent": payload.intent,
+        }
+
+    @app.post("/api/v1/workspaces/{workspace_id}/lineage/sql")
+    async def api_derive_sql_lineage(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        sql_text = str(payload.get("sql_text", "")).strip()
+        if not sql_text:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_sql_text"},
+            )
+        lineage = derive_column_lineage(sql_text)
+        return {
+            "workspace_id": workspace_id,
+            "lineage_version": "v1",
+            "lineage": lineage,
+            "lineage_available": bool(lineage),
         }
 
     @app.get("/api/v1/workspaces/{workspace_id}/recommendations/{report_id}")
@@ -1141,3 +1500,8 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         return result
 
     return app
+
+
+def json_dumps_sorted(payload: dict[str, object]) -> str:
+    """Serialize JSON payload deterministically for secret storage."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))

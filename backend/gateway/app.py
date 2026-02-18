@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from time import perf_counter
 
@@ -15,12 +16,34 @@ from sqlalchemy.orm import Session
 from backend.gateway.abac import apply_mask, evaluate_abac
 from backend.gateway.executor import QueryTimeoutError, UnsafeSqlError, execute_sql
 from backend.gateway.policy import AccessDecision, evaluate_access
+from backend.gateway.retrieval_opensearch import (
+    OpenSearchUnavailableError,
+    search_opensearch_documents,
+)
+from backend.gateway.retrieval_qdrant import QdrantUnavailableError, search_qdrant_documents
+from backend.gateway.semantic_binding import SemanticQueryBinding, bind_semantic_query
 from backend.shared_domain.audit_models import AccessDecision as AccessDecisionRow
 from backend.shared_domain.audit_models import AuditEvent
+from backend.shared_domain.audit_sinks import (
+    AuditSink,
+    AuditSinkError,
+    DisabledAuditSink,
+    load_audit_sink,
+)
+from backend.shared_domain.costing import (
+    enforce_budget,
+    estimate_query_cost_bytes,
+    estimate_retrieval_cost_bytes,
+)
 from backend.shared_domain.auth import authenticated_actor_from_request, load_local_auth_tokens
 from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.db import get_session_factory, prepare_database
-from backend.shared_domain.errors import PolicyDeniedError, SchemaPilotError
+from backend.shared_domain.embeddings_provider import load_embeddings_provider
+from backend.shared_domain.errors import (
+    DisabledIntegrationError,
+    PolicyDeniedError,
+    SchemaPilotError,
+)
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import CatalogDataset, GovernancePolicy
 from backend.shared_domain.observability import (
@@ -35,11 +58,19 @@ from backend.shared_domain.provenance import build_provenance_v1
 from backend.shared_domain.rate_limit import InMemoryActorRateLimiter
 from backend.shared_domain.retrieval import load_retrieval_corpus, retrieve_documents
 
+_ACTIVE_AUDIT_SINK: AuditSink = DisabledAuditSink()
+
 
 def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings) -> FastAPI:
     """Create gateway app with deny-by-default behavior."""
     settings = settings_factory()
     settings.validate()
+    global _ACTIVE_AUDIT_SINK  # noqa: PLW0603
+    _ACTIVE_AUDIT_SINK = load_audit_sink(settings)
+    embeddings_provider = load_embeddings_provider(
+        provider_name=settings.embeddings_provider,
+        dimensions=settings.embeddings_dimensions,
+    )
     session_factory = get_session_factory(settings.database_url)
     prepare_database(settings)
     auth_tokens = load_local_auth_tokens()
@@ -204,10 +235,17 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
         resource_attributes = payload.get("resource_attributes", {})
         resource_attrs = resource_attributes if isinstance(resource_attributes, dict) else {}
-        if str(actor_dict.get("actor_type", "human")) == "ai":
-            dataset_id = str(resource_attrs.get("dataset_id", "")).strip()
-            if not dataset_id:
-                reason = "missing_dataset_context"
+        actor_type = str(actor_dict.get("actor_type", "human")).lower()
+        semantic_binding: SemanticQueryBinding | None = None
+        datasets_used: list[str] = []
+        query_payload = payload.get("query", {})
+        query_text = ""
+        if isinstance(query_payload, dict):
+            query_text = str(query_payload.get("text", ""))
+        if actor_type == "ai":
+            semantic_payload_raw = payload.get("semantic_query")
+            if not isinstance(semantic_payload_raw, dict) or not semantic_payload_raw:
+                reason = "semantic_query_required"
                 _record_access_decision(
                     session_factory(),
                     workspace_id=workspace_id,
@@ -233,11 +271,60 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     "Access denied by policy",
                     details={"reason": reason, "policy_decision_id": policy_decision_id},
                 )
-            if _dataset_belongs_to_other_workspace(
-                session_factory=session_factory,
-                workspace_id=workspace_id,
-                dataset_id=dataset_id,
-            ):
+            semantic_payload = semantic_payload_raw
+            try:
+                semantic_binding = bind_semantic_query(
+                    session_factory=session_factory,
+                    workspace_id=workspace_id,
+                    semantic_query=semantic_payload,
+                )
+            except ValueError as exc:
+                reason = str(exc) if str(exc).startswith("semantic_") else "semantic_query_invalid"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={"endpoint": "query"},
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.query",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="sql",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": reason,
+                        "policy_decision_id": policy_decision_id,
+                        "error": str(exc),
+                    },
+                ) from exc
+            query_text = semantic_binding.sql_text
+            datasets_used = list(semantic_binding.dataset_ids)
+            allowed_raw = actor_attributes.get("allowed_dataset_ids", [])
+            allowed = (
+                {str(item) for item in allowed_raw} if isinstance(allowed_raw, list) else set()
+            )
+            cross_workspace_dataset_ids = sorted(
+                dataset_id
+                for dataset_id in datasets_used
+                if _dataset_belongs_to_other_workspace(
+                    session_factory=session_factory,
+                    workspace_id=workspace_id,
+                    dataset_id=dataset_id,
+                )
+            )
+            if cross_workspace_dataset_ids:
                 reason = "dataset_workspace_mismatch"
                 _record_access_decision(
                     session_factory(),
@@ -246,7 +333,11 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     result="deny",
                     reason=reason,
                     request_context=request_context,
-                    resources={"endpoint": "query", "dataset_id": dataset_id},
+                    resources={
+                        "endpoint": "query",
+                        "dataset_ids": datasets_used,
+                        "cross_workspace_dataset_ids": cross_workspace_dataset_ids,
+                    },
                     applied_filters={},
                     applied_masks={},
                     policy_decision_id=policy_decision_id,
@@ -264,11 +355,10 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     "Access denied by policy",
                     details={"reason": reason, "policy_decision_id": policy_decision_id},
                 )
-            allowed_raw = actor_attributes.get("allowed_dataset_ids", [])
-            allowed = (
-                {str(item) for item in allowed_raw} if isinstance(allowed_raw, list) else set()
+            denied_dataset_ids = sorted(
+                dataset_id for dataset_id in datasets_used if dataset_id not in allowed
             )
-            if dataset_id not in allowed:
+            if denied_dataset_ids:
                 reason = "dataset_not_allowed"
                 _record_access_decision(
                     session_factory(),
@@ -277,7 +367,11 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     result="deny",
                     reason=reason,
                     request_context=request_context,
-                    resources={"endpoint": "query", "dataset_id": dataset_id},
+                    resources={
+                        "endpoint": "query",
+                        "dataset_ids": datasets_used,
+                        "denied_dataset_ids": denied_dataset_ids,
+                    },
                     applied_filters={},
                     applied_masks={},
                     policy_decision_id=policy_decision_id,
@@ -295,6 +389,10 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     "Access denied by policy",
                     details={"reason": reason, "policy_decision_id": policy_decision_id},
                 )
+        else:
+            dataset_ref = resource_attrs.get("dataset_id")
+            if dataset_ref is not None:
+                datasets_used.append(str(dataset_ref))
         abac_mode = str(payload.get("abac_mode", "internal"))
         abac = evaluate_abac(actor=actor_dict, resource_attributes=resource_attrs, mode=abac_mode)
         if not abac.allow:
@@ -324,10 +422,6 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 details={"reason": abac.reason, "policy_decision_id": policy_decision_id},
             )
 
-        query_payload = payload.get("query", {})
-        query_text = ""
-        if isinstance(query_payload, dict):
-            query_text = str(query_payload.get("text", ""))
         constraints = payload.get("constraints", {})
         max_rows = 1000
         timeout_ms = 5000
@@ -470,11 +564,50 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 mask_mode = abac.masks.get(column_name)
                 masked_row.append(apply_mask(value, mask_mode) if mask_mode else value)
             masked_rows.append(masked_row)
-
-        datasets_used = []
-        dataset_ref = resource_attrs.get("dataset_id")
-        if dataset_ref is not None:
-            datasets_used.append(str(dataset_ref))
+        estimated_query_bytes = estimate_query_cost_bytes(
+            query_text=query_text,
+            row_count=len(masked_rows),
+            column_count=len(result_set.columns),
+        )
+        if not enforce_budget(
+            estimated_bytes=estimated_query_bytes,
+            budget_bytes=settings.query_max_bytes,
+        ):
+            reason = "query_budget_exceeded"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={
+                    "endpoint": "query",
+                    "estimated_query_bytes": estimated_query_bytes,
+                    "query_budget_bytes": settings.query_max_bytes,
+                },
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="sql",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": reason,
+                    "policy_decision_id": policy_decision_id,
+                    "estimated_query_bytes": estimated_query_bytes,
+                    "query_budget_bytes": settings.query_max_bytes,
+                },
+            )
 
         build_id = new_ulid()
         query_id = new_ulid()
@@ -534,6 +667,17 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "endpoint": "query",
                 "query_text": query_text,
                 "dataset_ids": datasets_used,
+                "semantic_metric_id": (
+                    semantic_binding.metric_id if semantic_binding is not None else None
+                ),
+                "semantic_group_by": (
+                    semantic_binding.group_by if semantic_binding is not None else []
+                ),
+                "semantic_manifest_checksum": (
+                    semantic_binding.manifest_checksum
+                    if semantic_binding is not None
+                    else None
+                ),
                 "policy_pack": effective_policy_pack,
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
@@ -549,7 +693,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             latency_ms=(perf_counter() - started_at) * 1000.0,
         )
 
-        return {
+        response_payload = {
             "result": {
                 "columns": result_set.columns,
                 "rows": masked_rows,
@@ -557,6 +701,134 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             },
             "provenance": provenance,
             "audit_event_id": new_ulid(),
+            "request_id": request.state.request_id,
+        }
+        if semantic_binding is not None:
+            response_payload["semantic"] = {
+                "metric_id": semantic_binding.metric_id,
+                "group_by": semantic_binding.group_by,
+                "manifest_checksum": semantic_binding.manifest_checksum,
+            }
+        return response_payload
+
+    @app.post("/api/v1/gateway/policy/simulate")
+    async def policy_simulate(payload: dict[str, object], request: Request) -> dict[str, object]:
+        started_at = perf_counter()
+        workspace_id = str(payload.get("workspace_id", "unknown"))
+        request_context = _request_context(payload)
+        policy_decision_id = new_ulid()
+        actor_dict = authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        if actor_dict is None:
+            reason = "missing_or_invalid_auth_token"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id="unknown",
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "policy_simulate"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.policy_simulate",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+
+        caller_roles_raw = actor_dict.get("roles", [])
+        caller_roles = (
+            {str(item) for item in caller_roles_raw}
+            if isinstance(caller_roles_raw, list)
+            else set()
+        )
+        if not caller_roles.intersection({"data_steward", "platform_admin"}):
+            reason = "simulation_forbidden"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "policy_simulate"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.policy_simulate",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+
+        actor_preview_raw = payload.get("actor", actor_dict)
+        actor_preview = actor_preview_raw if isinstance(actor_preview_raw, dict) else actor_dict
+        resource_attributes_raw = payload.get("resource_attributes", {})
+        resource_attributes = (
+            resource_attributes_raw if isinstance(resource_attributes_raw, dict) else {}
+        )
+        allowlisted_ai = bool(
+            isinstance(actor_preview.get("attributes"), dict)
+            and actor_preview.get("attributes", {}).get("ai_allowlisted", False)
+        )
+        access = evaluate_access(actor_preview, allow_ai=allowlisted_ai)
+        abac_mode = str(payload.get("abac_mode", "internal"))
+        abac = evaluate_abac(
+            actor=actor_preview,
+            resource_attributes=resource_attributes,
+            mode=abac_mode,
+        )
+        result = "allow" if access.result == "allow" and abac.allow else "deny"
+        reason = "allow"
+        if result == "deny":
+            reason = abac.reason if access.result == "allow" else access.reason
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+        _record_access_decision(
+            session_factory(),
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+            result=result,
+            reason=reason,
+            request_context=request_context,
+            resources={
+                "endpoint": "policy_simulate",
+                "action": str(payload.get("action", "query")),
+                "actor_preview": {
+                    "actor_type": str(actor_preview.get("actor_type", "human")),
+                    "roles": actor_preview.get("roles", []),
+                },
+            },
+            applied_filters=_serialize_row_filter(abac.row_filter),
+            applied_masks=abac.masks,
+            policy_decision_id=policy_decision_id,
+            event_type="gateway.policy_simulate",
+            correlation_id=request.state.request_id,
+        )
+        observe_query_latency(
+            workspace_id=workspace_id,
+            engine="policy",
+            result=result,
+            latency_ms=(perf_counter() - started_at) * 1000.0,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "action": str(payload.get("action", "query")),
+            "result": result,
+            "reason": reason,
+            "applied_filters": _serialize_row_filter(abac.row_filter),
+            "applied_masks": abac.masks,
+            "policy_decision_id": policy_decision_id,
             "request_id": request.state.request_id,
         }
 
@@ -738,19 +1010,317 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 details={"reason": reason, "policy_decision_id": policy_decision_id},
             )
 
-        try:
-            corpus = load_retrieval_corpus(
-                storage_root=settings.storage_root,
+        resource_attributes = payload.get("resource_attributes", {})
+        resource_attrs = resource_attributes if isinstance(resource_attributes, dict) else {}
+        abac_mode = str(payload.get("abac_mode", "internal"))
+        abac = evaluate_abac(actor=actor_dict, resource_attributes=resource_attrs, mode=abac_mode)
+        if not abac.allow:
+            _record_access_decision(
+                session_factory(),
                 workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=abac.reason,
+                request_context=request_context,
+                resources={"endpoint": "retrieve"},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.retrieve",
+                correlation_id=request.state.request_id,
             )
-            query_text = str(payload.get("query_text", ""))
-            results = retrieve_documents(
-                query_text=query_text,
-                corpus=corpus,
-                allowed_dataset_ids=allowed_dataset_ids,
+            increment_policy_denial(workspace_id=workspace_id, reason=abac.reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="retrieve",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
             )
+            raise PolicyDeniedError(
+                "Access denied by ABAC",
+                details={"reason": abac.reason, "policy_decision_id": policy_decision_id},
+            )
+
+        query_text = str(payload.get("query_text", ""))
+        try:
+            if settings.retrieval_backend == "filesystem":
+                corpus = load_retrieval_corpus(
+                    storage_root=settings.storage_root,
+                    workspace_id=workspace_id,
+                )
+                results = retrieve_documents(
+                    query_text=query_text,
+                    corpus=corpus,
+                    allowed_dataset_ids=allowed_dataset_ids,
+                )
+            elif settings.retrieval_backend == "opensearch":
+                if not settings.opensearch_enabled:
+                    reason = "module_disabled"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={
+                            "endpoint": "retrieve",
+                            "retrieval_backend": settings.retrieval_backend,
+                        },
+                        applied_filters={},
+                        applied_masks={},
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.retrieve",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="retrieve",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={"reason": reason, "policy_decision_id": policy_decision_id},
+                    )
+                try:
+                    results = search_opensearch_documents(
+                        query_text=query_text,
+                        workspace_id=workspace_id,
+                        allowed_dataset_ids=allowed_dataset_ids,
+                        base_url=settings.opensearch_url,
+                        index_name=settings.opensearch_index,
+                        timeout_ms=settings.opensearch_timeout_ms,
+                    )
+                except OpenSearchUnavailableError as exc:
+                    reason = str(exc).strip() or "retrieval_backend_unavailable"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={
+                            "endpoint": "retrieve",
+                            "retrieval_backend": settings.retrieval_backend,
+                        },
+                        applied_filters={},
+                        applied_masks={},
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.retrieve",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="retrieve",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={
+                            "reason": reason,
+                            "policy_decision_id": policy_decision_id,
+                        },
+                    ) from exc
+            elif settings.retrieval_backend == "qdrant":
+                if not settings.qdrant_enabled:
+                    reason = "module_disabled"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={
+                            "endpoint": "retrieve",
+                            "retrieval_backend": settings.retrieval_backend,
+                        },
+                        applied_filters={},
+                        applied_masks={},
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.retrieve",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="retrieve",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={"reason": reason, "policy_decision_id": policy_decision_id},
+                    )
+                try:
+                    query_vector = embeddings_provider.embed(query_text)
+                    results = search_qdrant_documents(
+                        query_vector=query_vector,
+                        workspace_id=workspace_id,
+                        allowed_dataset_ids=allowed_dataset_ids,
+                        base_url=settings.qdrant_url,
+                        collection_name=settings.qdrant_collection,
+                        timeout_ms=settings.qdrant_timeout_ms,
+                    )
+                except DisabledIntegrationError as exc:
+                    reason = "embedding_provider_disabled"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={
+                            "endpoint": "retrieve",
+                            "retrieval_backend": settings.retrieval_backend,
+                        },
+                        applied_filters={},
+                        applied_masks={},
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.retrieve",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="retrieve",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={
+                            "reason": reason,
+                            "policy_decision_id": policy_decision_id,
+                            "error": str(exc),
+                        },
+                    ) from exc
+                except QdrantUnavailableError as exc:
+                    reason = str(exc).strip() or "retrieval_backend_unavailable"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={
+                            "endpoint": "retrieve",
+                            "retrieval_backend": settings.retrieval_backend,
+                        },
+                        applied_filters={},
+                        applied_masks={},
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.retrieve",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="retrieve",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={
+                            "reason": reason,
+                            "policy_decision_id": policy_decision_id,
+                        },
+                    ) from exc
+            else:
+                reason = "retrieval_backend_unsupported"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={
+                        "endpoint": "retrieve",
+                        "retrieval_backend": settings.retrieval_backend,
+                    },
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.retrieve",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="retrieve",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={"reason": reason, "policy_decision_id": policy_decision_id},
+                )
         finally:
             rate_limiter.release(actor_id)
+
+        dataset_summaries = _load_dataset_sensitivity_summaries(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            dataset_ids={str(item.get("dataset_id", "")) for item in results},
+        )
+        results = _apply_retrieval_row_filter(
+            results=results,
+            row_filter=abac.row_filter,
+            dataset_summaries=dataset_summaries,
+        )
+        results = _apply_retrieval_masks(results=results, masks=abac.masks)
+        estimated_retrieval_bytes = estimate_retrieval_cost_bytes(
+            query_text=query_text,
+            result_count=len(results),
+        )
+        if not enforce_budget(
+            estimated_bytes=estimated_retrieval_bytes,
+            budget_bytes=settings.retrieval_max_bytes,
+        ):
+            reason = "retrieval_budget_exceeded"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={
+                    "endpoint": "retrieve",
+                    "estimated_retrieval_bytes": estimated_retrieval_bytes,
+                    "retrieval_budget_bytes": settings.retrieval_max_bytes,
+                },
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.retrieve",
+                correlation_id=request.state.request_id,
+            )
+            increment_policy_denial(workspace_id=workspace_id, reason=reason)
+            observe_query_latency(
+                workspace_id=workspace_id,
+                engine="retrieve",
+                result="deny",
+                latency_ms=(perf_counter() - started_at) * 1000.0,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": reason,
+                    "policy_decision_id": policy_decision_id,
+                    "estimated_retrieval_bytes": estimated_retrieval_bytes,
+                    "retrieval_budget_bytes": settings.retrieval_max_bytes,
+                },
+            )
         increment_cost_bytes_scanned(
             workspace_id=workspace_id,
             engine="retrieve",
@@ -774,8 +1344,8 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 datasets_used=dataset_ids,
                 snapshots=[],
                 decision_reason="allow",
-                applied_filters={},
-                applied_masks={},
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
                 citations=citations,
                 allowed_dataset_ids=sorted(allowed_dataset_ids),
                 policy_pack=effective_policy_pack,
@@ -823,10 +1393,11 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "query_text": query_text,
                 "allowed_dataset_ids": sorted(allowed_dataset_ids),
                 "datasets_used": dataset_ids,
+                "retrieval_backend": settings.retrieval_backend,
                 "policy_pack": effective_policy_pack,
             },
-            applied_filters={},
-            applied_masks={},
+            applied_filters=_serialize_row_filter(abac.row_filter),
+            applied_masks=abac.masks,
             policy_decision_id=policy_decision_id,
             event_type="gateway.retrieve",
             correlation_id=request.state.request_id,
@@ -849,6 +1420,81 @@ def _serialize_row_filter(row_filter: tuple[str, str] | None) -> dict[str, objec
     if row_filter is None:
         return {}
     return {"row_filter": {"column": row_filter[0], "value": row_filter[1]}}
+
+
+EMAIL_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _load_dataset_sensitivity_summaries(
+    *,
+    session_factory: Callable[[], Session],
+    workspace_id: str,
+    dataset_ids: set[str],
+) -> dict[str, dict[str, object]]:
+    if not dataset_ids:
+        return {}
+    session = session_factory()
+    try:
+        rows = session.execute(
+            select(CatalogDataset.dataset_id, CatalogDataset.sensitivity_summary_json).where(
+                CatalogDataset.workspace_id == workspace_id,
+                CatalogDataset.dataset_id.in_(sorted(dataset_ids)),
+            )
+        ).all()
+    finally:
+        session.close()
+    summaries: dict[str, dict[str, object]] = {}
+    for dataset_id, summary in rows:
+        if isinstance(summary, dict):
+            summaries[str(dataset_id)] = summary
+    return summaries
+
+
+def _apply_retrieval_row_filter(
+    *,
+    results: list[dict[str, object]],
+    row_filter: tuple[str, str] | None,
+    dataset_summaries: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    if row_filter is None:
+        return results
+    filter_key, filter_value = row_filter
+    filtered: list[dict[str, object]] = []
+    for row in results:
+        dataset_id = str(row.get("dataset_id", ""))
+        summary = dataset_summaries.get(dataset_id, {})
+        candidate = summary.get(filter_key)
+        if candidate is None:
+            continue
+        if str(candidate) == filter_value:
+            filtered.append(row)
+    return filtered
+
+
+def _apply_retrieval_masks(
+    *, results: list[dict[str, object]], masks: Mapping[str, object]
+) -> list[dict[str, object]]:
+    if not masks:
+        return results
+    masked: list[dict[str, object]] = []
+    email_mask_mode_raw = masks.get("email")
+    email_mask_mode = str(email_mask_mode_raw) if email_mask_mode_raw else ""
+    snippet_mask_mode_raw = masks.get("snippet")
+    snippet_mask_mode = str(snippet_mask_mode_raw) if snippet_mask_mode_raw else ""
+    for row in results:
+        updated = dict(row)
+        snippet = str(updated.get("snippet", ""))
+        if snippet and email_mask_mode:
+            snippet = _mask_email_tokens(text=snippet, mode=email_mask_mode)
+        if snippet and snippet_mask_mode:
+            snippet = str(apply_mask(snippet, snippet_mask_mode))
+        updated["snippet"] = snippet
+        masked.append(updated)
+    return masked
+
+
+def _mask_email_tokens(*, text: str, mode: str) -> str:
+    return EMAIL_TOKEN_PATTERN.sub(lambda match: str(apply_mask(match.group(0), mode)), text)
 
 
 def _record_access_decision(
@@ -889,7 +1535,41 @@ def _record_access_decision(
             audit_event_id=event.audit_event_id,
         )
         session.add(decision)
+        _ACTIVE_AUDIT_SINK.emit(
+            {
+                "audit_event_id": event.audit_event_id,
+                "workspace_id": workspace_id,
+                "actor_id": actor_id,
+                "event_type": event_type,
+                "event_json": event.event_json,
+                "correlation_id": correlation_id,
+                "decision_id": policy_decision_id,
+                "result": result,
+                "reason": reason,
+            }
+        )
         session.commit()
+    except AuditSinkError as exc:
+        session.rollback()
+        increment_audit_write_failure(
+            workspace_id=workspace_id,
+            service="gateway",
+            operation=f"{event_type}:audit_sink",
+        )
+        log_structured_event(
+            level="error",
+            msg="audit.sink_failed",
+            service="gateway",
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            event_type="audit.sink_failed",
+            extra={"operation": event_type, "error": str(exc)},
+        )
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "audit_sink_unavailable", "operation": event_type},
+        ) from exc
     except Exception as exc:
         session.rollback()
         increment_audit_write_failure(

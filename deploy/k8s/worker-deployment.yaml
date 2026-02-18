@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-worker
+  namespace: schemapilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-worker
+  template:
+    metadata:
+      labels:
+        app: schemapilot-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/example/schemapilot-worker:latest
+          envFrom:
+            - secretRef:
+                name: schemapilot-secrets
+          env:
+            - name: SCHEMAPILOT_PROFILE
+              value: "team"
+            - name: SCHEMAPILOT_WORKER_MAX_ACTIVE_PER_WORKSPACE
+              value: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

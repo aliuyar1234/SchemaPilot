@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.workers.iceberg_ops import run_iceberg_maintenance_hooks
+
 
 @dataclass(frozen=True)
 class GoldBuildResult:
@@ -15,6 +17,7 @@ class GoldBuildResult:
     data_path: str
     semantic_manifest_path: str
     published_pointer_path: str
+    maintenance_report_path: str | None = None
 
 
 def build_gold_snapshot(
@@ -26,6 +29,7 @@ def build_gold_snapshot(
     output_root: str,
     snapshot_id: str,
     allow_publish: bool,
+    run_maintenance_hooks_enabled: bool = False,
 ) -> GoldBuildResult:
     """Build a simple semantic aggregate and publish pointer fail-closed."""
     total = 0.0
@@ -68,9 +72,17 @@ def build_gold_snapshot(
             encoding="utf-8",
         )
 
+    maintenance_report_path = run_iceberg_maintenance_hooks(
+        workspace_id=workspace_id,
+        snapshot_id=snapshot_id,
+        output_root=output_root,
+        enabled=run_maintenance_hooks_enabled,
+    )
+
     return GoldBuildResult(
         snapshot_id=snapshot_id,
         data_path=data_path.as_posix(),
         semantic_manifest_path=semantic_manifest_path.as_posix(),
         published_pointer_path=published_pointer.as_posix(),
+        maintenance_report_path=maintenance_report_path,
     )

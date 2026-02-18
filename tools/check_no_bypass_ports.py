@@ -30,6 +30,16 @@ def validate_no_bypass_ports(root: Path) -> list[str]:
                 errors.append(
                     f"{file.as_posix()}: direct bypass service port detected ({port})"
                 )
+    helm_root = root / "deploy" / "helm" / "templates"
+    if helm_root.exists():
+        for file in sorted(helm_root.glob("*.yaml")):
+            content = file.read_text(encoding="utf-8")
+            for match in PORT_PATTERN.finditer(content):
+                port = int(match.group(1))
+                if port in BYPASS_PORTS:
+                    errors.append(
+                        f"{file.as_posix()}: direct bypass service port detected ({port})"
+                    )
     return errors
 
 

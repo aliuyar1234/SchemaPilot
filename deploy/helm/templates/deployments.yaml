@@ -1,0 +1,205 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-control-plane
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-control-plane
+  template:
+    metadata:
+      labels:
+        app: schemapilot-control-plane
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-plane
+          image: {{ .Values.controlPlane.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.name }}
+          env:
+            - name: SCHEMAPILOT_PROFILE
+              value: {{ .Values.env.profile | quote }}
+            - name: SCHEMAPILOT_BIND_ADDRESS
+              value: {{ .Values.env.bindAddress | quote }}
+            - name: SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL
+              value: {{ .Values.env.requireAuthForNonLocal | quote }}
+          ports:
+            - containerPort: {{ .Values.service.controlPlanePort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-gateway
+  template:
+    metadata:
+      labels:
+        app: schemapilot-gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.name }}
+          env:
+            - name: SCHEMAPILOT_PROFILE
+              value: {{ .Values.env.profile | quote }}
+            - name: SCHEMAPILOT_BIND_ADDRESS
+              value: {{ .Values.env.bindAddress | quote }}
+            - name: SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL
+              value: {{ .Values.env.requireAuthForNonLocal | quote }}
+          ports:
+            - containerPort: {{ .Values.service.gatewayPort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-worker
+  template:
+    metadata:
+      labels:
+        app: schemapilot-worker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: {{ .Values.worker.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.name }}
+          env:
+            - name: SCHEMAPILOT_PROFILE
+              value: {{ .Values.env.profile | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ui
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-ui
+  template:
+    metadata:
+      labels:
+        app: schemapilot-ui
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: {{ .Values.ui.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: VITE_CONTROL_PLANE_URL
+              value: "http://{{ .Release.Name }}-control-plane:{{ .Values.service.controlPlanePort }}"
+            - name: VITE_GATEWAY_URL
+              value: "http://{{ .Release.Name }}-gateway:{{ .Values.service.gatewayPort }}"
+          ports:
+            - containerPort: {{ .Values.service.uiPort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- if .Values.aiService.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ai-service
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.aiService.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-ai-service
+  template:
+    metadata:
+      labels:
+        app: schemapilot-ai-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ai-service
+          image: {{ .Values.aiService.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.name }}
+          env:
+            - name: SCHEMAPILOT_AI_SERVICE_ENABLED
+              value: "true"
+            - name: SCHEMAPILOT_AI_GATEWAY_URL
+              value: "http://{{ .Release.Name }}-gateway:{{ .Values.service.gatewayPort }}"
+            - name: SCHEMAPILOT_AI_CONTROL_PLANE_URL
+              value: "http://{{ .Release.Name }}-control-plane:{{ .Values.service.controlPlanePort }}"
+          ports:
+            - containerPort: {{ .Values.service.aiServicePort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

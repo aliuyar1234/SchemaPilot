@@ -1,0 +1,28 @@
+{
+  "pack_id": "starter-invoices",
+  "version": "1.0.0",
+  "semantic_manifest": {
+    "manifest_version": "1.0.0",
+    "entities": [
+      {
+        "entity_id": "invoice",
+        "dataset_id": "dataset-invoices"
+      }
+    ],
+    "dimensions": [
+      {
+        "dimension_id": "region",
+        "entity_id": "invoice",
+        "expression": "region"
+      }
+    ],
+    "metrics": [
+      {
+        "metric_id": "invoice_count",
+        "entity_id": "invoice",
+        "expression": "count(*)"
+      }
+    ],
+    "joins": []
+  }
+}

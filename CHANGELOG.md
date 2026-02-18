@@ -330,6 +330,135 @@
   - evidence: spec/12_RUNBOOK.md :: Contract and regression gates
   - evidence: README.md :: Implemented Safe Defaults (Current)
 
+## v1.0.32
+- Next-wave semantic foundation kickoff:
+  - added semantic manifest schema normalization/validation and deterministic checksum utilities
+  - added semantic manifest validation tool and wired it into tooling baseline checks
+  - implemented control-plane semantic manifest lifecycle (change request, review-gated decision/apply, rollback)
+  - added regression tests for semantic schema and semantic lifecycle role/approval/rollback behavior
+  - evidence: DECISIONS.md :: D-0051 Semantic manifest foundation baseline (schema validator + review-gated control-plane lifecycle + rollback)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0001 Semantic Manifest Schema + Validator (v1)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0002 Control Plane Semantic Manifest Lifecycle (request/approve/publish/rollback)
+  - evidence: tests/test_semantic_schema.py :: test_validate_semantic_manifest_normalizes_and_hashes_deterministically
+  - evidence: tests/test_semantic_manifest_lifecycle.py :: test_semantic_manifest_is_approval_gated_and_rollbackable
+
+## v1.0.33
+- Next-wave semantic worker bootstrap update:
+  - added worker run-type `semantic_bootstrap` and deterministic run-processor dispatch/output refs
+  - integrated semantic candidate generation into worker orchestration with immutable evidence bundle linkage
+  - added regression tests for semantic bootstrap success, idempotent reruns, and fail-closed empty-catalog behavior
+  - evidence: DECISIONS.md :: D-0052 Semantic bootstrap worker-run baseline (deterministic candidate generation with evidence-backed review artifacts)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0003 Worker Semantic Builder (bootstrap manifest from gold/silver + evidence)
+  - evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+  - evidence: tests/test_worker_runner.py :: test_worker_runner_fails_semantic_bootstrap_without_catalog
+
+## v1.0.34
+- Next-wave gateway semantic enforcement update:
+  - added gateway semantic binding resolver for active semantic manifests (`semantic_query` -> SQL + dataset bindings)
+  - enforced AI-only semantic query requirement and denied raw AI SQL requests by default
+  - applied dataset entitlement and workspace-isolation checks over semantic-bound dataset sets
+  - added regression coverage for missing manifest, unknown metric, entitlement denial, and semantic-mode workspace mismatch
+  - evidence: DECISIONS.md :: D-0053 Gateway semantic-bound AI query baseline (semantic resolver + AI-only semantic-query enforcement)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0004 Gateway Semantic Resolver + semantic-bound AI query mode
+  - evidence: tests/test_gateway_dataset_entitlements.py :: test_gateway_denies_ai_semantic_query_without_manifest
+  - evidence: tests/test_gateway_workspace_isolation.py :: test_gateway_query_denies_ai_dataset_from_other_workspace
+
+## v1.0.35
+- Next-wave template-pack adoption update:
+  - added deterministic gold template pack registry (`invoices`, `crm`, `support`) with semantic starter manifests
+  - added CLI commands `schemapilot templates list` and `schemapilot templates apply`
+  - added regression coverage for deterministic bundle generation and CLI output paths
+  - evidence: DECISIONS.md :: D-0054 Gold template pack baseline (invoices/crm/support packs + deterministic CLI bundle generation)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0005 Gold Template Packs (Invoices/CRM/Support) + CLI generator
+  - evidence: tests/test_gold_templates.py :: test_generate_gold_template_bundle_is_deterministic
+  - evidence: tests/test_cli_commands.py :: test_templates_apply_generates_bundle
+
+## v1.0.36
+- Determinism hardening update:
+  - replaced randomized ULID suffix generation with lock-protected monotonic counters
+  - stabilized same-millisecond run ordering for worker queue processing and semantic bootstrap sequencing
+  - evidence: DECISIONS.md :: D-0055 Monotonic ULID generation baseline (per-process ordered ULIDs for deterministic queue execution)
+  - evidence: backend/shared_domain/ids.py :: new_ulid
+  - evidence: tests/test_worker_runner.py :: test_worker_runner_processes_semantic_bootstrap_run
+
+## v1.0.37
+- Document ingestion coverage update:
+  - added read-only document discovery connector for `PDF/EML/MBOX` sources
+  - added extraction-method aware parsing with confidence scoring and evidence labels
+  - enforced fail-closed invalid PDF handling while preserving raw artifacts
+  - evidence: DECISIONS.md :: D-0056 Document connector extraction baseline (PDF/EML/MBOX discovery + confidence-scored evidence)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0006 Document Connectors v1 (PDF/EML/MBOX) with extraction evidence scoring
+  - evidence: tests/test_documents_extraction_quality.py :: test_ingest_eml_extracts_subject_and_body_with_confidence
+  - evidence: tests/test_documents_extraction_quality.py :: test_ingest_pdf_fails_closed_on_invalid_signature
+
+## v1.0.38
+- Optional OpenSearch retrieval/index module update:
+  - wired gateway retrieval backend switching for `filesystem|opensearch`
+  - enforced fail-closed `module_disabled` behavior when OpenSearch backend is not explicitly enabled
+  - added boundary-safe worker OpenSearch indexer helpers (no `workers -> gateway` imports)
+  - added optional internal-only OpenSearch compose service profile with no bypass port exposure
+  - added regression coverage for OpenSearch retrieval and indexer deterministic/error paths
+  - evidence: DECISIONS.md :: D-0057 OpenSearch retrieval module baseline (optional gateway backend + internal-only indexing helpers)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0007 Optional OpenSearch Index Module (behind gateway)
+  - evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_opensearch_module_disabled_fail_closed
+  - evidence: tests/test_retrieval_opensearch.py :: test_search_opensearch_documents_filters_by_allowed_datasets
+  - evidence: tests/test_opensearch_indexer.py :: test_build_bulk_payload_is_deterministic_and_sorted
+
+## v1.0.39
+- Optional Qdrant vector module update:
+  - added shared embeddings-provider loader with fail-closed defaults (`disabled`, optional deterministic `hash`)
+  - wired gateway retrieval backend switching for `qdrant` with explicit deny reasons (`module_disabled`, `embedding_provider_disabled`)
+  - added worker-side deterministic Qdrant indexing helpers with boundary-safe imports
+  - added optional internal-only Qdrant compose service profile with no bypass port exposure
+  - added regression coverage for embeddings provider, Qdrant retrieval adapter, and Qdrant indexer deterministic/error paths
+  - evidence: DECISIONS.md :: D-0058 Qdrant vector retrieval baseline (optional embeddings provider + internal-only vector index module)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0008 Optional Qdrant Vector Index Module + Embedding Provider Interface
+  - evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_qdrant_backend_returns_results
+  - evidence: tests/test_embeddings_provider.py :: test_hash_embeddings_provider_is_deterministic
+  - evidence: tests/test_retrieval_qdrant.py :: test_search_qdrant_documents_filters_by_allowed_datasets
+  - evidence: tests/test_qdrant_indexer.py :: test_build_points_payload_is_deterministic_and_sorted
+
+## v1.0.40
+- Retrieval policy parity update:
+  - enforced ABAC checks on retrieval requests (`resource_attributes` + mode) across all retrieval backends
+  - applied metadata-bound row filtering using server-side dataset sensitivity summaries
+  - added retrieval snippet masking parity, including email token masking when email masks are active
+  - included applied retrieval filters/masks in provenance/access-decision records for audit parity
+  - added regression coverage for ABAC deny and metadata-filter + masking behavior on retrieval outputs
+  - evidence: DECISIONS.md :: D-0059 Retrieval ABAC parity baseline (metadata-bound row filters + snippet masking across retrieval backends)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0009 Retrieval Policy Binding Enhancements (metadata-bound filters + masking)
+  - evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_denies_abac_region_mismatch
+  - evidence: tests/test_gateway_retrieve.py :: test_gateway_retrieval_applies_metadata_row_filter_and_email_mask
+
+## v1.0.41
+- Next-wave governance and operability completion update:
+  - completed `NW-0010` through `NW-0025` with optional AI service baseline, semantic SQL agent path, deterministic AI eval harness, policy simulation endpoint, query/retrieval budget guards, run scheduling and workspace fairness controls
+  - wired secrets-store abstraction into control-plane source credential handling and retained fail-closed behavior
+  - completed audit sink plugin wiring and policy-pack invariant test harness integration
+  - completed catalog export/import and source SLA endpoints with regression coverage
+  - evidence: DECISIONS.md :: D-0060 AI/ops extension baseline (optional AI service + policy simulation + catalog/scheduling/fairness + audit sinks + secrets + Helm hardening)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0010 Optional AI Service Skeleton (provider plugins, disabled-by-default)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0025 Source Health + Freshness SLAs + Alerts
+  - evidence: tests/test_ai_eval_harness.py :: test_ai_eval_harness_smoke_passes_and_writes_report
+  - evidence: tests/test_gateway_policy_simulation.py :: test_policy_simulation_allows_steward_role
+
+## v1.0.42
+- Next-wave completion + AI track closure update:
+  - completed `NW-0026` through `NW-0034` and marked AI track `AI-0101`..`AI-0115` complete
+  - added first-hour deterministic demo generator (`schemapilot demo-generate` + `tools/demo_scenario_generator.py`)
+  - added docs wave (`docs/quickstart/FIRST_HOUR.md`, `docs/security/SECURITY_MODEL.md`, `docs/connectors/CONNECTOR_GUIDE.md`)
+  - added pack registry artifacts and lint gate (`packs/registry.json`, `tools/pack_lint.py`)
+  - hardened Trino path with retries and cancellation hooks; added maintenance/compaction/anomaly/ERv2/locale-hardening modules
+  - added generated Python SDK endpoint artifact + generation check gate (`tools/generate_clients.py --check`)
+  - evidence: DECISIONS.md :: D-0061 Completion baseline for NW-0026..NW-0034 and AI track (demo generator, docs wave, pack registry, Trino hardening, compaction, anomaly/ERv2, locale parsing, typed SDK)
+  - evidence: TASKLIST_NEXT.md :: [x] NW-0034 Typed client SDKs (Python) generated from OpenAPI + stability gate
+  - evidence: TASKLIST_NEXT.md :: [x] AI-0115 AI evaluation generator
+  - evidence: tests/test_demo_scenario_generator.py :: test_generate_demo_scenario_writes_expected_files
+  - evidence: tests/test_pack_lint.py :: test_validate_pack_registry_passes_for_repo_default
+  - evidence: tests/test_gateway_trino_adapter.py :: test_execute_sql_trino_cancels_query_on_timeout
+  - evidence: tests/test_anomaly_detection.py :: test_discover_run_creates_anomaly_blocking_task
+  - evidence: tests/test_generate_clients.py :: test_render_generated_endpoints_contains_core_paths
+
 ## Notes
 - This changelog records changes to the SSOT documents in this ZIP, not changes to the implemented repository.
 

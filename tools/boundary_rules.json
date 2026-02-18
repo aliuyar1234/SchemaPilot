@@ -2,6 +2,7 @@
   "modules": [
     "control_plane",
     "gateway",
+    "ai_service",
     "workers",
     "shared_domain",
     "cli"
@@ -9,6 +10,7 @@
   "python_module_roots": {
     "control_plane": "backend/control_plane",
     "gateway": "backend/gateway",
+    "ai_service": "backend/ai_service",
     "workers": "backend/workers",
     "shared_domain": "backend/shared_domain",
     "cli": "cli/schemapilot_cli"
@@ -24,6 +26,7 @@
   "allowed_module_imports": {
     "control_plane": ["shared_domain"],
     "gateway": ["shared_domain"],
+    "ai_service": ["shared_domain"],
     "workers": ["shared_domain"],
     "shared_domain": [],
     "cli": ["shared_domain"]

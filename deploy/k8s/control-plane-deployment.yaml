@@ -13,8 +13,27 @@ spec:
       labels:
         app: schemapilot-control-plane
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: control-plane
           image: ghcr.io/example/schemapilot-control-plane:latest
+          envFrom:
+            - secretRef:
+                name: schemapilot-secrets
+          env:
+            - name: SCHEMAPILOT_BIND_ADDRESS
+              value: "0.0.0.0"
+            - name: SCHEMAPILOT_REQUIRE_AUTH_FOR_NON_LOCAL
+              value: "true"
+            - name: SCHEMAPILOT_PROFILE
+              value: "team"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8000

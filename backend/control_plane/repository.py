@@ -67,6 +67,7 @@ def create_source(
     source_type: str,
     scope: dict[str, object],
     display_name: str,
+    credentials_ref: str | None = None,
 ) -> dict[str, object]:
     workspace = session.get(Workspace, workspace_id)
     if workspace is None:
@@ -79,7 +80,7 @@ def create_source(
         workspace_id=workspace_id,
         source_type=source_type,
         scope_json=scope,
-        credentials_ref=None,
+        credentials_ref=credentials_ref,
         status="active",
         display_name=display_name,
     )
@@ -92,6 +93,7 @@ def create_source(
         "scope": source.scope_json,
         "display_name": source.display_name,
         "status": source.status,
+        "credentials_ref": source.credentials_ref,
     }
 
 
@@ -107,6 +109,7 @@ def list_sources(session: Session, workspace_id: str) -> list[dict[str, object]]
             "scope": row.scope_json,
             "display_name": row.display_name,
             "status": row.status,
+            "credentials_ref": row.credentials_ref,
         }
         for row in rows
     ]
@@ -129,6 +132,11 @@ def update_source(
         source.scope_json = patch["scope"]
     if "display_name" in patch:
         source.display_name = str(patch["display_name"])
+    if "credentials_ref" in patch:
+        credentials_ref_raw = patch.get("credentials_ref")
+        source.credentials_ref = (
+            str(credentials_ref_raw) if credentials_ref_raw is not None else None
+        )
     session.flush()
     return {
         "source_id": source.source_id,
@@ -137,6 +145,7 @@ def update_source(
         "scope": source.scope_json,
         "display_name": source.display_name,
         "status": source.status,
+        "credentials_ref": source.credentials_ref,
     }
 
 

@@ -18,6 +18,7 @@ from backend.shared_domain.errors import NotFoundError, PolicyDeniedError
 from backend.shared_domain.evidence_store import store_evidence_bundle
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import GovernancePolicy, Workspace
+from backend.shared_domain.policy_pack_tests import evaluate_policy_pack_invariants
 from backend.shared_domain.policy_packs import load_policy_packs
 
 
@@ -134,11 +135,23 @@ def decide_policy_pack_change(
 
     active_row = _get_active_policy_pack_row(session, workspace_id=workspace_id)
     active = _load_definition(active_row.definition_ref) if active_row is not None else {}
+    requested_pack_id = str(staged.get("requested_pack_id", "")).strip()
+    requested_pack = _load_policy_pack(requested_pack_id)
+    invariant_failures = evaluate_policy_pack_invariants(requested_pack)
+    if invariant_failures:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={
+                "reason": "policy_pack_test_failed",
+                "pack_id": requested_pack_id,
+                "failures": invariant_failures,
+            },
+        )
     current_version = int(active.get("version", 0))
     next_version = current_version + 1
     next_state = {
         "workspace_id": workspace_id,
-        "pack_id": str(staged.get("requested_pack_id", "")),
+        "pack_id": requested_pack_id,
         "pack_checksum": str(staged.get("requested_pack_checksum", "")),
         "version": next_version,
         "previous_pack_id": str(active.get("pack_id", "")),
