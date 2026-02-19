@@ -718,6 +718,96 @@ def test_first_hour_command_bootstraps_demo_workspace(monkeypatch, tmp_path: Pat
     assert calls[0][1] == "http://cp/api/v1/workspaces"
 
 
+def test_init_preset_dropzone_bootstraps_workspace_source_and_run(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-preset"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-preset", "scope": payload.get("scope", {})}
+        if url.endswith("/runs"):
+            return {"run_id": "r-preset", "status": "queued"}
+        if "/runs/" in url:
+            return {"run_id": "r-preset", "status": "succeeded"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "init-preset",
+            "--preset",
+            "dropzone-team",
+            "--api-base-url",
+            "http://cp",
+            "--output-root",
+            (tmp_path / "demo").as_posix(),
+            "--wait-for-run",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["workspace_id"] == "w-preset"
+    assert payload["source"]["source_id"] == "s-preset"
+    assert payload["run_observed"]["status"] == "succeeded"
+    assert calls[1][2] is not None
+    scope = calls[1][2]["scope"]  # type: ignore[index]
+    assert scope["root_path"]
+    assert isinstance(scope.get("required_files"), list)
+
+
+def test_init_preset_sharepoint_uses_sharepoint_source_type(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-sharepoint"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-sharepoint", "scope": payload.get("scope", {})}
+        if url.endswith("/runs"):
+            return {"run_id": "r-sharepoint", "status": "queued"}
+        if "/runs/" in url:
+            return {"run_id": "r-sharepoint", "status": "succeeded"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "init-preset",
+            "--preset",
+            "sharepoint-team",
+            "--api-base-url",
+            "http://cp",
+            "--source-root",
+            "/sites/team/shared-documents",
+            "--wait-for-run",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["workspace_id"] == "w-sharepoint"
+    assert payload["source"]["source_id"] == "s-sharepoint"
+    assert payload["run_observed"]["status"] == "succeeded"
+    assert calls[1][2] is not None
+    source_payload = calls[1][2]
+    assert source_payload["source_type"] == "sharepoint"  # type: ignore[index]
+    assert source_payload["scope"]["root_path"] == "/sites/team/shared-documents"  # type: ignore[index]
+
+
+def test_init_preset_rejects_unknown_preset() -> None:
+    result = runner.invoke(app, ["init-preset", "--preset", "unknown-preset"])
+    assert result.exit_code == 1
+    assert "Unsupported preset" in (result.stdout + result.stderr)
+
+
 def test_review_batch_requires_confirmation(monkeypatch) -> None:
     def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
         _ = (method, url, payload, auth_token)
@@ -829,6 +919,51 @@ def test_query_command_formats_output_and_exports_json(monkeypatch, tmp_path: Pa
     assert exported["provenance"]["provenance_version"] == "1"
 
 
+def test_query_templates_command_lists_templates() -> None:
+    result = runner.invoke(app, ["query-templates"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    template_ids = [item["template_id"] for item in payload["templates"]]
+    assert "invoice_count" in template_ids
+
+
+def test_query_template_run_renders_and_executes(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        captured["auth_token"] = auth_token
+        return {
+            "result": {"columns": [{"name": "invoice_count", "type": "INTEGER"}], "rows": [[1]]},
+            "provenance": {"provenance_version": "1"},
+            "request_id": "req-template",
+        }
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "query-template-run",
+            "--workspace",
+            "w1",
+            "--template-id",
+            "invoice_count",
+            "--params-json",
+            '{"table_name":"silver.invoice"}',
+            "--gateway-base-url",
+            "http://gw",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://gw/api/v1/gateway/query"
+    query_payload = captured["payload"]
+    assert query_payload["template_id"] == "invoice_count"
+    assert "silver.invoice" in query_payload["query"]["text"]
+
+
 def test_policy_simulate_calls_gateway_endpoint(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -903,3 +1038,63 @@ def test_policy_audit_report_generates_output_file(monkeypatch, tmp_path: Path) 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["scenario_count"] == 1
     assert report["scenarios"][0]["id"] == "scenario-1"
+
+
+def test_policy_diff_command_generates_deterministic_output(tmp_path: Path) -> None:
+    before_path = tmp_path / "before.json"
+    after_path = tmp_path / "after.json"
+    before_path.write_text(
+        json.dumps(
+            {
+                "workspace_id": "w1",
+                "scenario_count": 1,
+                "scenarios": [
+                    {
+                        "id": "scenario-1",
+                        "result": "allow",
+                        "reason": "allow",
+                        "applied_masks": {"email": "hash"},
+                        "applied_filters": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    after_path.write_text(
+        json.dumps(
+            {
+                "workspace_id": "w1",
+                "scenario_count": 1,
+                "scenarios": [
+                    {
+                        "id": "scenario-1",
+                        "result": "deny",
+                        "reason": "policy_denied",
+                        "applied_masks": {"email": "redact"},
+                        "applied_filters": {"workspace_id": "w1"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "policy_diff.json"
+    result = runner.invoke(
+        app,
+        [
+            "policy-diff",
+            "--before",
+            before_path.as_posix(),
+            "--after",
+            after_path.as_posix(),
+            "--output",
+            output_path.as_posix(),
+        ],
+    )
+    assert result.exit_code == 0
+    assert output_path.exists()
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["status"] == "changed"
+    assert report["summary"]["result_change_count"] == 1
+    assert report["summary"]["mask_change_count"] == 1

@@ -5,7 +5,10 @@ from pathlib import Path
 from plugins.examples.google_drive_connector import discover as discover_google_drive
 from plugins.examples.hubspot_export_connector import discover as discover_hubspot
 from plugins.examples.imap_connector import discover as discover_imap
+from plugins.examples.jira_connector import discover as discover_jira
 from plugins.examples.sftp_connector import discover as discover_sftp
+from plugins.examples.sharepoint_connector import discover as discover_sharepoint
+from plugins.examples.smb_connector import discover as discover_smb
 from plugins.examples.zendesk_export_connector import discover as discover_zendesk
 
 
@@ -56,3 +59,33 @@ def test_imap_reference_connector_supports_cursor_incrementality(tmp_path: Path)
     assert len(incremental_rows) <= 1
     if incremental_rows:
         assert incremental_rows[0]["path"].endswith("imap_mailbox_0002.eml")
+
+
+def test_sharepoint_reference_connector_supports_delta_cursor(tmp_path: Path) -> None:
+    first = tmp_path / "sp_invoice_001.csv"
+    second = tmp_path / "sp_invoice_002.csv"
+    first.write_text("id,amount\n1,10\n", encoding="utf-8")
+    second.write_text("id,amount\n2,20\n", encoding="utf-8")
+    all_rows = discover_sharepoint({"root_path": tmp_path.as_posix()})
+    assert len(all_rows) == 2
+    cursor = f"{float(first.stat().st_mtime):020.3f}:{first.as_posix()}"
+    incremental_rows = discover_sharepoint(
+        {"root_path": tmp_path.as_posix(), "cursor_state": {"delta_cursor": cursor}}
+    )
+    assert len(incremental_rows) <= 1
+    if incremental_rows:
+        assert incremental_rows[0]["path"].endswith("sp_invoice_002.csv")
+
+
+def test_smb_reference_connector_discovers_files(tmp_path: Path) -> None:
+    (tmp_path / "smb_customers.csv").write_text("id,name\n1,Alice\n", encoding="utf-8")
+    rows = discover_smb({"root_path": tmp_path.as_posix(), "include_globs": ["**/*.csv"]})
+    assert len(rows) == 1
+    assert rows[0]["dataset_family"] == "smb"
+
+
+def test_jira_reference_connector_discovers_exports(tmp_path: Path) -> None:
+    (tmp_path / "jira_issues.csv").write_text("id,summary\nSP-1,Investigate\n", encoding="utf-8")
+    rows = discover_jira({"root_path": tmp_path.as_posix()})
+    assert len(rows) == 1
+    assert rows[0]["dataset_family"] == "jira"

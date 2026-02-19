@@ -77,6 +77,10 @@ def test_discover_run_populates_catalog_and_evidence_deterministically(tmp_path:
         assert isinstance(output_refs, dict)
         assert output_refs["dataset_count"] == 2
         assert sorted(str(item) for item in output_refs["dataset_ids"]) == dataset_ids_after_first
+        first_snapshots = output_refs.get("source_snapshot_manifests", [])
+        assert isinstance(first_snapshots, list)
+        assert len(first_snapshots) == 1
+        assert str(first_snapshots[0]["snapshot_uri"]).startswith("source-mirror://")
         for evidence in output_refs["evidence_bundles"]:
             resolved = resolve_evidence_uri(
                 str(evidence["evidence_bundle_uri"]),
@@ -126,3 +130,9 @@ def test_discover_run_populates_catalog_and_evidence_deterministically(tmp_path:
         assert isinstance(output_refs, dict)
         assert sorted(str(item) for item in output_refs["dataset_ids"]) == dataset_ids_after_second
         assert str(source["source_id"]) in output_refs.get("source_ids", [])
+        second_snapshots = output_refs.get("source_snapshot_manifests", [])
+        assert isinstance(second_snapshots, list)
+        assert len(second_snapshots) == 1
+        assert str(first_snapshots[0]["snapshot_checksum"]) == str(
+            second_snapshots[0]["snapshot_checksum"]
+        )

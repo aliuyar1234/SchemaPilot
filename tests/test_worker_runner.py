@@ -62,6 +62,10 @@ def test_worker_runner_processes_queued_run_with_status_transition(tmp_path: Pat
         output_refs = run_state["output_refs"]
         assert isinstance(output_refs, dict)
         assert output_refs["dataset_count"] == 1
+        manifests = output_refs.get("source_snapshot_manifests", [])
+        assert isinstance(manifests, list)
+        assert len(manifests) == 1
+        assert str(manifests[0]["snapshot_uri"]).startswith("source-mirror://")
 
     processed_again = process_queued_runs_once(
         session_factory=session_factory,
@@ -190,6 +194,12 @@ def test_worker_service_config_allows_explicit_non_strict_override(monkeypatch) 
     monkeypatch.setenv("SCHEMAPILOT_INGEST_STRICT", "false")
     config = load_worker_service_config()
     assert config.strict_ingest is False
+
+
+def test_worker_service_config_enables_source_watcher_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("SCHEMAPILOT_SOURCE_WATCHER_ENABLED", "true")
+    config = load_worker_service_config()
+    assert config.source_watcher_enabled is True
 
 
 def test_worker_runner_processes_semantic_bootstrap_run(tmp_path: Path) -> None:

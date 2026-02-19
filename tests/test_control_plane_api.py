@@ -64,6 +64,76 @@ def test_workspace_source_run_flow() -> None:
     assert isinstance(run_steps_response.json(), list)
 
 
+def test_workspace_accepts_dropzone_source_type() -> None:
+    client = TestClient(create_app(settings_factory=_safe_settings))
+    workspace_response = client.post(
+        "/api/v1/workspaces",
+        json={"name": "Dropzone Workspace", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
+    )
+    workspace_id = workspace_response.json()["workspace_id"]
+    source_response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/sources",
+        json={
+            "source_type": "dropzone",
+            "scope": {"root_path": "/tmp/dropzone", "required_files": ["invoices.csv"]},
+            "display_name": "Dropzone",
+        },
+        headers=_admin_headers(),
+    )
+    assert source_response.status_code == 200
+    body = source_response.json()
+    assert body["source_type"] == "dropzone"
+
+
+def test_workspace_accepts_sharepoint_source_type() -> None:
+    client = TestClient(create_app(settings_factory=_safe_settings))
+    workspace_response = client.post(
+        "/api/v1/workspaces",
+        json={
+            "name": "SharePoint Workspace",
+            "profile": "starter",
+            "security_baseline": "standard",
+        },
+        headers=_admin_headers(),
+    )
+    workspace_id = workspace_response.json()["workspace_id"]
+    source_response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/sources",
+        json={
+            "source_type": "sharepoint",
+            "scope": {"root_path": "/sites/team/shared-documents"},
+            "display_name": "SharePoint Exports",
+        },
+        headers=_admin_headers(),
+    )
+    assert source_response.status_code == 200
+    body = source_response.json()
+    assert body["source_type"] == "sharepoint"
+
+
+def test_workspace_accepts_smb_source_type() -> None:
+    client = TestClient(create_app(settings_factory=_safe_settings))
+    workspace_response = client.post(
+        "/api/v1/workspaces",
+        json={"name": "SMB Workspace", "profile": "starter", "security_baseline": "standard"},
+        headers=_admin_headers(),
+    )
+    workspace_id = workspace_response.json()["workspace_id"]
+    source_response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/sources",
+        json={
+            "source_type": "smb",
+            "scope": {"root_path": "/mnt/smb/team-share"},
+            "display_name": "SMB Share",
+        },
+        headers=_admin_headers(),
+    )
+    assert source_response.status_code == 200
+    body = source_response.json()
+    assert body["source_type"] == "smb"
+
+
 def test_control_plane_not_found_responses_follow_error_contract() -> None:
     client = TestClient(create_app(settings_factory=_safe_settings))
     response = client.get("/api/v1/workspaces/missing-workspace")

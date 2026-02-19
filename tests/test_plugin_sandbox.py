@@ -63,3 +63,20 @@ def test_plugin_runner_blocks_network_when_disabled(tmp_path: Path, monkeypatch)
             plugin_spec=spec,
             scope={"root_path": allowed_root.as_posix()},
         )
+
+
+def test_plugin_runner_enforces_row_limit(monkeypatch) -> None:
+    monkeypatch.setenv("SCHEMAPILOT_PLUGIN_MAX_ROWS", "1")
+    spec = ConnectorPluginSpec(
+        name="sandbox-row-limit",
+        plugin=lambda scope: [  # type: ignore[no-untyped-def]
+            {"path": "a.csv", "dataset_family": "d", "size_bytes": 1, "mtime_epoch": 1.0},
+            {"path": "b.csv", "dataset_family": "d", "size_bytes": 1, "mtime_epoch": 1.0},
+        ],
+        entrypoint=None,
+    )
+    with pytest.raises(ValueError, match="plugin_row_limit_exceeded"):
+        execute_connector_plugin(
+            plugin_spec=spec,
+            scope={"root_path": "."},
+        )
