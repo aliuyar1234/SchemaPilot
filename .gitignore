@@ -44,3 +44,26 @@ temp/
 
 .DS_Store
 Thumbs.db
+
+# Internal planning / strategy artifacts (do not track on master)
+AGENTS.md
+**/AGENTS.md
+CONSTITUTION.md
+ASSUMPTIONS.md
+DECISIONS.md
+PROGRESS.md
+AUDIT_REPORT.md
+ENTERPRISE_RELEASE_CHECKLIST.md
+
+TASKLIST.md
+TASKLIST_*.md
+*TASKLIST*.md
+ROADMAP.md
+ROADMAP_*.md
+*ROADMAP*.md
+
+docs/GPT_PRO_*.md
+*GPT_PRO*.md
+*CHANGELOG*.md
+
+checks/QUESTIONS_FOR_USER.md
