@@ -1,0 +1,24 @@
+{
+  "pack_id": "crm-export",
+  "schema_version": "v2",
+  "version": "1.0.0",
+  "compatibility": {
+    "max_runtime_version": "0.x",
+    "min_runtime_version": "0.1.0",
+    "semantic_manifest_version": "1"
+  },
+  "template_models": [
+    "crm_pipeline_stage_counts",
+    "crm_mrr_by_account",
+    "crm_open_opportunities"
+  ],
+  "validators": {
+    "required_exports": [
+      "hubspot_contacts.csv",
+      "hubspot_deals.csv"
+    ],
+    "strict_completeness": true
+  },
+  "template_type": "gold"
+}
+
