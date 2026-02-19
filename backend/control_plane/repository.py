@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.shared_domain.audit_models import AuditEvent
 from backend.shared_domain.errors import NotFoundError, PolicyDeniedError
+from backend.shared_domain.failure_codes import resolve_failure_metadata
 from backend.shared_domain.ids import new_ulid, new_uuid
 from backend.shared_domain.metadata_models import (
     CatalogDataset,
@@ -586,6 +587,16 @@ def list_run_steps(session: Session, *, workspace_id: str, run_id: str) -> list[
 
 
 def _serialize_run_step(row: RunStepRecord) -> dict[str, object]:
+    details = dict(row.details_json) if isinstance(row.details_json, dict) else {}
+    failure_message = None
+    raw_error = details.get("error")
+    if raw_error is not None:
+        failure_message = str(raw_error)
+    failure_metadata = resolve_failure_metadata(
+        details=details,
+        legacy_error_code=row.error_code,
+        message=failure_message,
+    )
     return {
         "run_step_id": row.run_step_id,
         "run_id": row.run_id,
@@ -600,8 +611,20 @@ def _serialize_run_step(row: RunStepRecord) -> dict[str, object]:
         "duration_ms": row.duration_ms,
         "attempt_count": row.attempt_count,
         "error_code": row.error_code,
+        "failure_code": (
+            failure_metadata["failure_code"] if failure_metadata is not None else None
+        ),
+        "failure_category": (
+            failure_metadata["failure_category"] if failure_metadata is not None else None
+        ),
+        "operator_hint_ref": (
+            failure_metadata["operator_hint_ref"] if failure_metadata is not None else None
+        ),
+        "failure_code_version": (
+            failure_metadata["failure_code_version"] if failure_metadata is not None else None
+        ),
         "evidence_bundle_uri": row.evidence_bundle_uri,
-        "details": dict(row.details_json),
+        "details": details,
     }
 
 

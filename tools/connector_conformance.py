@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -20,10 +21,21 @@ REQUIRED_FIELDS = {"path", "dataset_family", "size_bytes", "mtime_epoch", "conte
 
 
 @dataclass(frozen=True)
+class ConnectorDefinition:
+    """Static connector metadata for conformance gating."""
+
+    connector_id: str
+    module_name: str
+    tier: str
+
+
+@dataclass(frozen=True)
 class CertificationResult:
     """Certification result payload for one connector."""
 
     connector_id: str
+    tier: str
+    required_for_gate: bool
     status: str
     errors: list[str]
     row_count: int
@@ -31,14 +43,28 @@ class CertificationResult:
     def to_dict(self) -> dict[str, object]:
         return {
             "connector_id": self.connector_id,
+            "tier": self.tier,
+            "required_for_gate": self.required_for_gate,
             "status": self.status,
             "errors": list(self.errors),
             "row_count": self.row_count,
         }
 
 
+class LoadedConnector(TypedDict):
+    """Connector callable and trust tier metadata."""
+
+    discover: ConnectorFn
+    tier: str
+
+
 def certify_connector(
-    *, connector_id: str, connector: ConnectorFn, scope: dict[str, object]
+    *,
+    connector_id: str,
+    connector: ConnectorFn,
+    scope: dict[str, object],
+    tier: str,
+    strict_tier: str,
 ) -> CertificationResult:
     """Run deterministic connector contract checks."""
     errors: list[str] = []
@@ -59,23 +85,30 @@ def certify_connector(
             errors.append(f"empty_path:{index}")
     return CertificationResult(
         connector_id=connector_id,
+        tier=tier,
+        required_for_gate=tier == strict_tier or strict_tier == "all",
         status="pass" if not errors else "fail",
         errors=errors,
         row_count=len(rows),
     )
 
 
-def certify_default_connectors(*, root_path: str) -> list[CertificationResult]:
+def certify_default_connectors(
+    *, root_path: str, strict_tier: str = "recommended"
+) -> list[CertificationResult]:
     """Certify bundled reference connectors against one export root."""
     scope: dict[str, object] = {"root_path": root_path}
     connectors = _load_reference_connectors()
     results: list[CertificationResult] = []
     for connector_id in sorted(connectors):
+        definition = connectors[connector_id]
         results.append(
             certify_connector(
                 connector_id=connector_id,
-                connector=connectors[connector_id],
+                connector=definition["discover"],
                 scope=scope,
+                tier=str(definition["tier"]),
+                strict_tier=strict_tier,
             )
         )
     return results
@@ -110,27 +143,75 @@ def _safe_discover(
     )
 
 
-def _load_reference_connectors() -> dict[str, ConnectorFn]:
-    """Load bundled connector entry points lazily to keep import ordering compliant."""
-    connector_modules = {
-        "hubspot_export": "plugins.examples.hubspot_export_connector",
-        "zendesk_export": "plugins.examples.zendesk_export_connector",
-        "jira": "plugins.examples.jira_connector",
-        "sftp": "plugins.examples.sftp_connector",
-        "smb": "plugins.examples.smb_connector",
-        "google_drive": "plugins.examples.google_drive_connector",
-        "sharepoint": "plugins.examples.sharepoint_connector",
-        "imap": "plugins.examples.imap_connector",
-        "postgres_cdc": "plugins.examples.postgres_cdc_connector",
-        "mysql_cdc": "plugins.examples.mysql_cdc_connector",
+def _connector_definitions() -> dict[str, ConnectorDefinition]:
+    return {
+        "hubspot_export": ConnectorDefinition(
+            connector_id="hubspot_export",
+            module_name="plugins.examples.hubspot_export_connector",
+            tier="community",
+        ),
+        "zendesk_export": ConnectorDefinition(
+            connector_id="zendesk_export",
+            module_name="plugins.examples.zendesk_export_connector",
+            tier="recommended",
+        ),
+        "jira": ConnectorDefinition(
+            connector_id="jira",
+            module_name="plugins.examples.jira_connector",
+            tier="recommended",
+        ),
+        "sftp": ConnectorDefinition(
+            connector_id="sftp",
+            module_name="plugins.examples.sftp_connector",
+            tier="recommended",
+        ),
+        "smb": ConnectorDefinition(
+            connector_id="smb",
+            module_name="plugins.examples.smb_connector",
+            tier="recommended",
+        ),
+        "google_drive": ConnectorDefinition(
+            connector_id="google_drive",
+            module_name="plugins.examples.google_drive_connector",
+            tier="recommended",
+        ),
+        "sharepoint": ConnectorDefinition(
+            connector_id="sharepoint",
+            module_name="plugins.examples.sharepoint_connector",
+            tier="recommended",
+        ),
+        "imap": ConnectorDefinition(
+            connector_id="imap",
+            module_name="plugins.examples.imap_connector",
+            tier="community",
+        ),
+        "postgres_cdc": ConnectorDefinition(
+            connector_id="postgres_cdc",
+            module_name="plugins.examples.postgres_cdc_connector",
+            tier="community",
+        ),
+        "mysql_cdc": ConnectorDefinition(
+            connector_id="mysql_cdc",
+            module_name="plugins.examples.mysql_cdc_connector",
+            tier="community",
+        ),
     }
-    connectors: dict[str, ConnectorFn] = {}
-    for connector_id, module_name in connector_modules.items():
-        module = importlib.import_module(module_name)
+
+
+def _load_reference_connectors() -> dict[str, LoadedConnector]:
+    """Load bundled connector entry points lazily to keep import ordering compliant."""
+    connectors: dict[str, LoadedConnector] = {}
+    for connector_id, definition in _connector_definitions().items():
+        module = importlib.import_module(definition.module_name)
         discover = getattr(module, "discover", None)
         if not callable(discover):
-            raise RuntimeError(f"connector module missing callable discover: {module_name}")
-        connectors[connector_id] = discover
+            raise RuntimeError(
+                f"connector module missing callable discover: {definition.module_name}"
+            )
+        connectors[connector_id] = {
+            "discover": discover,
+            "tier": definition.tier,
+        }
     return connectors
 
 
@@ -168,6 +249,12 @@ def parse_args() -> argparse.Namespace:
         default="runtime/connector_conformance/report.json",
         help="Output report path.",
     )
+    parser.add_argument(
+        "--strict-tier",
+        choices=("recommended", "all"),
+        default="recommended",
+        help="Connector tier required to pass release gate.",
+    )
     return parser.parse_args()
 
 
@@ -176,9 +263,12 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     fixture_root = root / args.root
     _create_fixture_exports(fixture_root)
-    results = certify_default_connectors(root_path=fixture_root.as_posix())
+    strict_tier = str(args.strict_tier)
+    results = certify_default_connectors(root_path=fixture_root.as_posix(), strict_tier=strict_tier)
+    gate_results = [item for item in results if item.required_for_gate]
     report = {
-        "status": "pass" if all(item.status == "pass" for item in results) else "fail",
+        "status": "pass" if all(item.status == "pass" for item in gate_results) else "fail",
+        "strict_tier": strict_tier,
         "results": [item.to_dict() for item in results],
     }
     output_path = root / args.output

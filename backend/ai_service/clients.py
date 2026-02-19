@@ -6,6 +6,8 @@ import json
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+from backend.ai_service.tools_registry import validate_tool_endpoint
+
 
 class ServiceClientError(RuntimeError):
     """Raised when upstream service call fails."""
@@ -17,8 +19,20 @@ def request_json(
     url: str,
     payload: dict[str, object] | None = None,
     bearer_token: str | None = None,
+    gateway_base_url: str | None = None,
+    control_plane_base_url: str | None = None,
 ) -> dict[str, object]:
     """Execute JSON HTTP request and parse JSON response."""
+    if gateway_base_url is not None and control_plane_base_url is not None:
+        try:
+            validate_tool_endpoint(
+                method=method,
+                url=url,
+                gateway_base_url=gateway_base_url,
+                control_plane_base_url=control_plane_base_url,
+            )
+        except ValueError as exc:
+            raise ServiceClientError(str(exc)) from exc
     body = json.dumps(payload, sort_keys=True).encode("utf-8") if payload is not None else None
     headers = {"Accept": "application/json"}
     if payload is not None:

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+
+from backend.shared_domain.streaming_io import sample_sha256
 
 
 @dataclass(frozen=True)
@@ -61,10 +62,7 @@ def discover_files(
 
 
 def _sample_hash(file_path: Path, sample_bytes: int = 8192) -> str:
-    hasher = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        hasher.update(handle.read(sample_bytes))
-    return hasher.hexdigest()
+    return sample_sha256(file_path, sample_bytes=sample_bytes)
 
 
 def _infer_dataset_family(filename: str) -> str:

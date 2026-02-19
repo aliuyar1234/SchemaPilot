@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.shared_domain.config import load_settings
 from backend.shared_domain.errors import StartupConfigurationError
 
@@ -68,6 +70,7 @@ def test_settings_redaction_hides_sensitive_values(tmp_path: Path) -> None:
                 "secrets_master_key": "super-secret",
                 "vault_token": "vault-token",
                 "audit_sink_target": "https://sink.example?token=abc",
+                "plugin_signing_key": "plugin-secret-key",
             }
         ),
         encoding="utf-8",
@@ -78,3 +81,14 @@ def test_settings_redaction_hides_sensitive_values(tmp_path: Path) -> None:
     assert redacted["secrets_master_key"] == "<redacted>"
     assert redacted["vault_token"] == "<redacted>"
     assert redacted["audit_sink_target"] == "<redacted>"
+    assert redacted["plugin_signing_key"] == "<redacted>"
+
+
+def test_load_settings_rejects_direct_ai_engine_env_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCHEMAPILOT_AI_TRINO_URL", "http://trino:8080")
+    with pytest.raises(StartupConfigurationError) as exc_info:
+        load_settings()
+    assert exc_info.value.details.get("reason") == "ai_direct_engine_config_present"
+    assert "SCHEMAPILOT_AI_TRINO_URL" in list(exc_info.value.details.get("keys", []))

@@ -121,4 +121,10 @@ def test_run_step_failure_records_evidence_for_strict_completeness(tmp_path: Pat
     )
     assert failed_step["status"] == "failed"
     assert failed_step["error_code"] == "strict_ingest_completeness_failed"
+    assert failed_step["failure_code"] == "FC-0003_STRICT_COMPLETENESS"
+    assert failed_step["failure_category"] == "strict_completeness"
+    assert (
+        failed_step["operator_hint_ref"]
+        == "docs/runbook/FAILURE_CODES.md#fc-0003_strict_completeness"
+    )
     assert str(failed_step["evidence_bundle_uri"]).startswith("evidence://")

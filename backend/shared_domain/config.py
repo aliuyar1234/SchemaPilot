@@ -8,6 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from backend.shared_domain.errors import StartupConfigurationError
 
@@ -15,10 +16,19 @@ LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
 SUPPORTED_AUTH_MODES = {"local", "oidc", "oidc_trusted_proxy", "oidc_jwt"}
 SUPPORTED_QUERY_ENGINES = {"duckdb", "trino", "target_db"}
 SUPPORTED_RETRIEVAL_BACKENDS = {"filesystem", "opensearch", "qdrant"}
-SUPPORTED_SECRETS_BACKENDS = {"local_encrypted", "vault"}
+SUPPORTED_SECRETS_BACKENDS = {"local_encrypted", "vault", "file", "k8s_secret"}
 SUPPORTED_AUDIT_SINK_TYPES = {"disabled", "jsonl", "webhook"}
 SUPPORTED_AUDIT_SINK_MODES = {"outbox", "inline"}
 SUPPORTED_AI_PROVIDERS = {"disabled", "mock"}
+AI_DIRECT_BYPASS_PORTS = {5432, 6333, 8080, 8083, 9200}
+AI_DIRECT_CONFIG_ENV_KEYS = (
+    "SCHEMAPILOT_AI_TRINO_URL",
+    "SCHEMAPILOT_AI_DUCKDB_PATH",
+    "SCHEMAPILOT_AI_OPENSEARCH_URL",
+    "SCHEMAPILOT_AI_QDRANT_URL",
+    "SCHEMAPILOT_AI_DB_URL",
+    "SCHEMAPILOT_AI_INDEX_URL",
+)
 BOOL_FIELDS = {
     "require_auth_for_non_local",
     "oidc_trusted_proxy",
@@ -29,10 +39,14 @@ BOOL_FIELDS = {
     "gateway_query_cache_enabled",
     "tracing_enabled",
     "plugin_network_enabled",
+    "plugin_verify_enforce_non_enterprise",
+    "promotion_require_policy_reports_non_enterprise",
     "artifact_encryption_enabled",
     "materialized_refresh_enabled",
     "policy_pack_canary_enabled",
     "target_db_rls_enabled",
+    "target_db_shadow_cutover_enabled",
+    "pack_verify_enforce_non_enterprise",
 }
 INT_FIELDS = {
     "oidc_jwks_cache_ttl_seconds",
@@ -67,6 +81,9 @@ SECRET_FIELDS = {
     "secrets_master_key",
     "vault_token",
     "audit_sink_target",
+    "pack_signing_key",
+    "plugin_signing_key",
+    "promotion_signing_key",
 }
 
 
@@ -147,6 +164,12 @@ class Settings:
     audit_sink_mode: str = "outbox"
     audit_outbox_dispatch_batch_size: int = 100
     audit_outbox_max_attempts: int = 5
+    pack_registry_path: str = "packs/registry.json"
+    pack_matrix_path: str = "packs/compatibility_matrix.json"
+    pack_signing_key: str = "schemapilot-pack-signing-key-dev-v1"
+    pack_verify_enforce_non_enterprise: bool = False
+    promotion_signing_key: str = "schemapilot-promotion-signing-key-dev-v1"
+    promotion_require_policy_reports_non_enterprise: bool = False
     worker_max_active_per_workspace: int = 1
     gateway_query_cache_enabled: bool = False
     gateway_query_cache_ttl_seconds: int = 60
@@ -159,11 +182,15 @@ class Settings:
     plugin_network_enabled: bool = False
     plugin_max_runtime_seconds: int = 30
     plugin_allowed_root: str | None = None
+    plugin_registry_path: str = "plugins/registry.json"
+    plugin_signing_key: str = "schemapilot-plugin-signing-key-dev-v1"
+    plugin_verify_enforce_non_enterprise: bool = False
     artifact_encryption_enabled: bool = False
     artifact_encryption_key_id: str = "v1"
     artifact_rotation_keep_previous_keys: int = 1
     policy_pack_canary_enabled: bool = False
     target_db_rls_enabled: bool = False
+    target_db_shadow_cutover_enabled: bool = False
 
     @property
     def is_local_bind(self) -> bool:
@@ -271,6 +298,18 @@ class Settings:
                     "supported_secrets_store_backends": sorted(SUPPORTED_SECRETS_BACKENDS),
                 },
             )
+        if (
+            self.secrets_store_backend in {"file", "k8s_secret"}
+            and not self.is_local_bind
+        ):
+            raise StartupConfigurationError(
+                "File-based secrets backends are local-only by default.",
+                details={
+                    "secrets_store_backend": self.secrets_store_backend,
+                    "bind_address": self.bind_address,
+                    "reason": "non_local_file_based_secrets_backend",
+                },
+            )
         if self.audit_sink_type not in SUPPORTED_AUDIT_SINK_TYPES:
             raise StartupConfigurationError(
                 "Unsupported audit sink type.",
@@ -305,6 +344,21 @@ class Settings:
                     "supported_ai_providers": sorted(SUPPORTED_AI_PROVIDERS),
                 },
             )
+        for field, value in (
+            ("ai_gateway_url", self.ai_gateway_url),
+            ("ai_control_plane_url", self.ai_control_plane_url),
+        ):
+            parsed_port = _extract_url_port(value)
+            if parsed_port in AI_DIRECT_BYPASS_PORTS:
+                raise StartupConfigurationError(
+                    "AI service routing must target gateway/control-plane APIs only.",
+                    details={
+                        "reason": "ai_direct_engine_endpoint_configured",
+                        "field": field,
+                        "url": _redact_url_credentials(value),
+                        "port": parsed_port,
+                    },
+                )
         if self.worker_max_active_per_workspace <= 0:
             raise StartupConfigurationError(
                 "Worker per-workspace active limit must be positive.",
@@ -335,6 +389,26 @@ class Settings:
                 "Plugin max runtime seconds must be positive.",
                 details={"plugin_max_runtime_seconds": self.plugin_max_runtime_seconds},
             )
+        plugin_enforcement_enabled = (
+            self.profile.strip().lower() == "enterprise"
+            or self.plugin_verify_enforce_non_enterprise
+        )
+        if plugin_enforcement_enabled and not self.plugin_registry_path.strip():
+            raise StartupConfigurationError(
+                (
+                    "Plugin registry path must not be empty when plugin verification "
+                    "enforcement is enabled."
+                ),
+                details={"plugin_registry_path": self.plugin_registry_path},
+            )
+        if plugin_enforcement_enabled and not self.plugin_signing_key.strip():
+            raise StartupConfigurationError(
+                (
+                    "Plugin signing key must not be empty when plugin verification "
+                    "enforcement is enabled."
+                ),
+                details={"plugin_signing_key": "<empty>"},
+            )
         if self.artifact_rotation_keep_previous_keys < 0:
             raise StartupConfigurationError(
                 "Artifact rotation keep count must be non-negative.",
@@ -343,6 +417,21 @@ class Settings:
                         self.artifact_rotation_keep_previous_keys
                     )
                 },
+            )
+        if not self.pack_registry_path.strip():
+            raise StartupConfigurationError(
+                "Pack registry path must not be empty.",
+                details={"pack_registry_path": self.pack_registry_path},
+            )
+        if not self.pack_signing_key.strip():
+            raise StartupConfigurationError(
+                "Pack signing key must not be empty.",
+                details={"pack_signing_key": "<empty>"},
+            )
+        if not self.promotion_signing_key.strip():
+            raise StartupConfigurationError(
+                "Promotion signing key must not be empty.",
+                details={"promotion_signing_key": "<empty>"},
             )
 
     def to_redacted_dict(self) -> dict[str, object]:
@@ -370,6 +459,14 @@ def _redact_url_credentials(value: str) -> str:
         return value
     _, host = rest.rsplit("@", 1)
     return f"{scheme}://<redacted>@{host}"
+
+
+def _extract_url_port(value: str) -> int | None:
+    parsed = urlsplit(value.strip())
+    try:
+        return parsed.port
+    except ValueError:
+        return None
 
 
 def _load_config_overrides(config_path: str | None) -> dict[str, object]:
@@ -506,6 +603,17 @@ def _coerce_config_override(field_name: str, value: object) -> object:
 
 def load_settings(config_path: str | None = None) -> Settings:
     """Load settings from environment with safe defaults."""
+    disallowed_ai_config_keys = sorted(
+        key for key in AI_DIRECT_CONFIG_ENV_KEYS if os.getenv(key, "").strip()
+    )
+    if disallowed_ai_config_keys:
+        raise StartupConfigurationError(
+            "AI service must not be configured with direct engine/index credentials.",
+            details={
+                "reason": "ai_direct_engine_config_present",
+                "keys": disallowed_ai_config_keys,
+            },
+        )
     settings_data: dict[str, Any] = {
         "profile": os.getenv("SCHEMAPILOT_PROFILE", "starter"),
         "bind_address": os.getenv("SCHEMAPILOT_BIND_ADDRESS", "127.0.0.1"),
@@ -593,6 +701,27 @@ def load_settings(config_path: str | None = None) -> Settings:
         "audit_outbox_max_attempts": _parse_int(
             os.getenv("SCHEMAPILOT_AUDIT_OUTBOX_MAX_ATTEMPTS"), default=5
         ),
+        "pack_registry_path": os.getenv("SCHEMAPILOT_PACK_REGISTRY_PATH", "packs/registry.json"),
+        "pack_matrix_path": os.getenv(
+            "SCHEMAPILOT_PACK_MATRIX_PATH",
+            "packs/compatibility_matrix.json",
+        ),
+        "pack_signing_key": os.getenv(
+            "SCHEMAPILOT_PACK_SIGNING_KEY",
+            "schemapilot-pack-signing-key-dev-v1",
+        ),
+        "pack_verify_enforce_non_enterprise": _parse_bool(
+            os.getenv("SCHEMAPILOT_PACK_VERIFY_ENFORCE_NON_ENTERPRISE"),
+            default=False,
+        ),
+        "promotion_signing_key": os.getenv(
+            "SCHEMAPILOT_PROMOTION_SIGNING_KEY",
+            "schemapilot-promotion-signing-key-dev-v1",
+        ),
+        "promotion_require_policy_reports_non_enterprise": _parse_bool(
+            os.getenv("SCHEMAPILOT_PROMOTION_REQUIRE_POLICY_REPORTS_NON_ENTERPRISE"),
+            default=False,
+        ),
         "worker_max_active_per_workspace": _parse_int(
             os.getenv("SCHEMAPILOT_WORKER_MAX_ACTIVE_PER_WORKSPACE"), default=1
         ),
@@ -623,6 +752,18 @@ def load_settings(config_path: str | None = None) -> Settings:
             os.getenv("SCHEMAPILOT_PLUGIN_MAX_RUNTIME_SECONDS"), default=30
         ),
         "plugin_allowed_root": os.getenv("SCHEMAPILOT_PLUGIN_ALLOWED_ROOT"),
+        "plugin_registry_path": os.getenv(
+            "SCHEMAPILOT_PLUGIN_REGISTRY_PATH",
+            "plugins/registry.json",
+        ),
+        "plugin_signing_key": os.getenv(
+            "SCHEMAPILOT_PLUGIN_SIGNING_KEY",
+            "schemapilot-plugin-signing-key-dev-v1",
+        ),
+        "plugin_verify_enforce_non_enterprise": _parse_bool(
+            os.getenv("SCHEMAPILOT_PLUGIN_VERIFY_ENFORCE_NON_ENTERPRISE"),
+            default=False,
+        ),
         "artifact_encryption_enabled": _parse_bool(
             os.getenv("SCHEMAPILOT_ARTIFACT_ENCRYPTION_ENABLED"), default=False
         ),
@@ -635,6 +776,9 @@ def load_settings(config_path: str | None = None) -> Settings:
         ),
         "target_db_rls_enabled": _parse_bool(
             os.getenv("SCHEMAPILOT_TARGET_DB_RLS_ENABLED"), default=False
+        ),
+        "target_db_shadow_cutover_enabled": _parse_bool(
+            os.getenv("SCHEMAPILOT_TARGET_DB_SHADOW_CUTOVER_ENABLED"), default=False
         ),
     }
     overrides = _load_config_overrides(config_path)

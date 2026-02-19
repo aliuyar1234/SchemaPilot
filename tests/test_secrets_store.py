@@ -9,8 +9,11 @@ from backend.control_plane.app import create_app
 from backend.shared_domain.config import Settings
 from backend.shared_domain.errors import StartupConfigurationError
 from backend.shared_domain.secrets_store import (
+    FileSecretsStore,
+    KubernetesSecretFileStore,
     LocalEncryptedSecretsStore,
     load_secrets_store,
+    rotation_hook_for_reference,
 )
 
 
@@ -48,6 +51,44 @@ def test_vault_secrets_backend_requires_url_and_token(tmp_path: Path) -> None:
         assert exc.details["secrets_store_backend"] == "vault"
     else:  # pragma: no cover
         raise AssertionError("expected StartupConfigurationError")
+
+
+def test_file_secrets_store_roundtrip(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, secrets_store_backend="file")
+    store = load_secrets_store(settings)
+    assert isinstance(store, FileSecretsStore)
+    ref = store.put_secret(scope="workspace/w1/source/sharepoint", key="oauth", value="token-1")
+    assert ref.startswith("secret://file/")
+    assert store.get_secret(ref) == "token-1"
+
+
+def test_k8s_secret_store_roundtrip(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, secrets_store_backend="k8s_secret")
+    store = load_secrets_store(settings)
+    assert isinstance(store, KubernetesSecretFileStore)
+    ref = store.put_secret(scope="workspace/w1/source/smb", key="service", value="svc-secret")
+    assert ref.startswith("secret://k8s/")
+    assert store.get_secret(ref) == "svc-secret"
+
+
+def test_file_based_secrets_backends_are_local_only(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, secrets_store_backend="file", bind_address="0.0.0.0")
+    try:
+        settings.validate()
+    except StartupConfigurationError as exc:
+        assert exc.details["reason"] == "non_local_file_based_secrets_backend"
+    else:  # pragma: no cover
+        raise AssertionError("expected StartupConfigurationError")
+
+
+def test_rotation_hook_mapping_is_deterministic() -> None:
+    local_backend = rotation_hook_for_reference(reference="secret://local/a/b/c")[
+        "backend"
+    ]
+    assert local_backend == "local_encrypted"
+    assert rotation_hook_for_reference(reference="secret://file/a/b/c")["backend"] == "file"
+    assert rotation_hook_for_reference(reference="secret://k8s/a/b/c")["backend"] == "k8s_secret"
+    assert rotation_hook_for_reference(reference="secret://vault/a/b/c")["backend"] == "vault"
 
 
 def test_control_plane_source_create_stores_credentials_ref(tmp_path: Path) -> None:

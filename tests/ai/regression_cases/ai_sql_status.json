@@ -1,0 +1,7 @@
+{
+  "case_id": "AI-SQL-STATUS-200",
+  "description": "SQL assistant endpoint must succeed in regression fixtures.",
+  "path": "checks.ask_sql_status",
+  "op": "equals",
+  "expected": 200
+}

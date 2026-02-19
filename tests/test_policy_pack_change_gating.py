@@ -61,7 +61,9 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
         headers=_headers("local-data-steward-token"),
     )
     assert first_request.status_code == 200
-    first_change_id = str(first_request.json()["change_request_id"])
+    first_payload = first_request.json()
+    first_change_id = str(first_payload["change_request_id"])
+    first_policy_diff_checksum = str(first_payload["policy_diff_checksum"])
 
     review_tasks = client.get(f"/api/v1/workspaces/{workspace_id}/review_tasks")
     assert review_tasks.status_code == 200
@@ -74,7 +76,11 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
 
     first_decision = client.post(
         f"/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{first_change_id}/decision",
-        json={"decision": "approve", "decision_reason": "approved for rollout"},
+        json={
+            "decision": "approve",
+            "decision_reason": "approved for rollout",
+            "expected_policy_diff_checksum": first_policy_diff_checksum,
+        },
         headers=_headers("local-platform-admin-token"),
     )
     assert first_decision.status_code == 200
@@ -93,10 +99,16 @@ def test_policy_pack_change_is_approval_gated_and_rollbackable(tmp_path: Path) -
         headers=_headers("local-data-steward-token"),
     )
     assert second_request.status_code == 200
-    second_change_id = str(second_request.json()["change_request_id"])
+    second_payload = second_request.json()
+    second_change_id = str(second_payload["change_request_id"])
+    second_policy_diff_checksum = str(second_payload["policy_diff_checksum"])
     second_decision = client.post(
         f"/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{second_change_id}/decision",
-        json={"decision": "approve", "decision_reason": "rollback test seed"},
+        json={
+            "decision": "approve",
+            "decision_reason": "rollback test seed",
+            "expected_policy_diff_checksum": second_policy_diff_checksum,
+        },
         headers=_headers("local-platform-admin-token"),
     )
     assert second_decision.status_code == 200
@@ -158,10 +170,16 @@ def test_policy_pack_canary_requires_promotion_before_apply(tmp_path: Path) -> N
         headers=_headers("local-data-steward-token"),
     )
     assert change_request.status_code == 200
-    change_id = str(change_request.json()["change_request_id"])
+    change_payload = change_request.json()
+    change_id = str(change_payload["change_request_id"])
+    canary_policy_diff_checksum = str(change_payload["policy_diff_checksum"])
     decision = client.post(
         f"/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_id}/decision",
-        json={"decision": "approve", "decision_reason": "start canary"},
+        json={
+            "decision": "approve",
+            "decision_reason": "start canary",
+            "expected_policy_diff_checksum": canary_policy_diff_checksum,
+        },
         headers=_headers("local-platform-admin-token"),
     )
     assert decision.status_code == 200
@@ -184,3 +202,22 @@ def test_policy_pack_canary_requires_promotion_before_apply(tmp_path: Path) -> N
     )
     assert effective.status_code == 200
     assert effective.json()["pack_id"] == "enterprise_ai_assistant"
+
+
+def test_policy_pack_apply_requires_policy_diff_checksum(tmp_path: Path) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
+    workspace_id = _create_workspace(client, name="Policy Checksum Guard")
+    request_response = client.post(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/change-request",
+        json={"pack_id": "enterprise_ai_assistant"},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert request_response.status_code == 200
+    change_id = str(request_response.json()["change_request_id"])
+    decision = client.post(
+        f"/api/v1/workspaces/{workspace_id}/policy-pack/change-requests/{change_id}/decision",
+        json={"decision": "approve", "decision_reason": "missing diff checksum"},
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert decision.status_code == 403
+    assert decision.json()["error"]["details"]["reason"] == "policy_diff_checksum_required"

@@ -1,0 +1,20 @@
+{
+  "rules": {
+    "deterministic_rebuild_pass_rate": {
+      "allow_null": true,
+      "min": 0.0
+    },
+    "run_success_rate": {
+      "allow_null": true,
+      "min": 0.0
+    },
+    "security_regression_count": {
+      "allow_null": false,
+      "max": 0.0
+    },
+    "time_to_first_safe_answer_minutes": {
+      "allow_null": true,
+      "max": 120.0
+    }
+  }
+}

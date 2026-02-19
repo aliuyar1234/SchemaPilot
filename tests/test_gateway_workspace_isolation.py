@@ -160,7 +160,11 @@ def test_gateway_retrieve_denies_cross_workspace_dataset_entitlement(
 
     response = client.post(
         "/api/v1/gateway/retrieve",
-        json={"workspace_id": "workspace-a", "query_text": "invoice total"},
+        json={
+            "workspace_id": "workspace-a",
+            "query_text": "invoice total",
+            "dataset_ids": ["dataset-cross-workspace"],
+        },
         headers=_auth_headers("ai-cross-workspace-token"),
     )
     assert response.status_code == 403

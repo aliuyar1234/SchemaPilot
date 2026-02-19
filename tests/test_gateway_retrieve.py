@@ -102,6 +102,7 @@ def test_gateway_retrieval_for_allowlisted_ai_identity(tmp_path: Path) -> None:
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
             "corpus": [
                 {
                     "artifact_id": "spoofed",
@@ -136,6 +137,39 @@ def test_gateway_retrieval_denies_non_allowlisted_ai(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+def test_gateway_retrieval_ai_requires_dataset_ids(tmp_path: Path) -> None:
+    _seed_document_corpus(tmp_path)
+    client = TestClient(create_gateway_app(settings_factory=lambda: _settings(tmp_path)))
+    response = client.post(
+        "/api/v1/gateway/retrieve",
+        json={
+            "workspace_id": "w1",
+            "query_text": "invoice",
+        },
+        headers=_auth_headers("local-ai-reader-token"),
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["reason"] == "retrieval_dataset_ids_required"
+
+
+def test_gateway_retrieval_ai_rejects_unauthorized_dataset_ids(tmp_path: Path) -> None:
+    _seed_document_corpus(tmp_path)
+    client = TestClient(create_gateway_app(settings_factory=lambda: _settings(tmp_path)))
+    response = client.post(
+        "/api/v1/gateway/retrieve",
+        json={
+            "workspace_id": "w1",
+            "query_text": "invoice",
+            "dataset_ids": ["dataset-2"],
+        },
+        headers=_auth_headers("local-ai-reader-token"),
+    )
+    assert response.status_code == 403
+    details = response.json()["error"]["details"]
+    assert details["reason"] == "dataset_not_allowed"
+    assert details["unauthorized_dataset_ids"] == ["dataset-2"]
+
+
 def test_gateway_retrieval_opensearch_module_disabled_fail_closed(tmp_path: Path) -> None:
     client = TestClient(
         create_gateway_app(
@@ -151,6 +185,7 @@ def test_gateway_retrieval_opensearch_module_disabled_fail_closed(tmp_path: Path
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -187,6 +222,7 @@ def test_gateway_retrieval_opensearch_backend_returns_results(monkeypatch, tmp_p
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -218,6 +254,7 @@ def test_gateway_retrieval_opensearch_unavailable_denies(monkeypatch, tmp_path: 
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -240,6 +277,7 @@ def test_gateway_retrieval_qdrant_module_disabled_fail_closed(tmp_path: Path) ->
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -263,6 +301,7 @@ def test_gateway_retrieval_qdrant_denies_when_embedding_provider_disabled(tmp_pa
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -300,6 +339,7 @@ def test_gateway_retrieval_qdrant_backend_returns_results(monkeypatch, tmp_path:
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
         },
         headers=_auth_headers("local-ai-reader-token"),
     )
@@ -340,6 +380,7 @@ def test_gateway_retrieval_denies_abac_region_mismatch(monkeypatch, tmp_path: Pa
         json={
             "workspace_id": "w1",
             "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
             "resource_attributes": {"region": "us"},
         },
         headers=_auth_headers("local-ai-region-reader-token"),

@@ -730,10 +730,27 @@ def test_init_preset_dropzone_bootstraps_workspace_source_and_run(
             return {"workspace_id": "w-preset"}
         if url.endswith("/sources"):
             return {"source_id": "s-preset", "scope": payload.get("scope", {})}
+        if url.endswith("/onboarding/events"):
+            return {"status": "recorded"}
+        if url.endswith("/review_tasks/summary"):
+            return {"blocking_open_tasks": 0}
+        if url.endswith("/review_tasks"):
+            return []
+        if url.endswith("/target-dbs"):
+            return {"target_db": {"target_db_id": "tdb-preset"}}
+        if url.endswith("/provision/plan"):
+            return {
+                "run_id": "r-preset-plan",
+                "plan": {"plan_id": "plan-preset", "plan_checksum": "sha256:plan-preset"},
+            }
+        if url.endswith("/provision/apply"):
+            return {"run_id": "r-preset-apply"}
         if url.endswith("/runs"):
             return {"run_id": "r-preset", "status": "queued"}
         if "/runs/" in url:
             return {"run_id": "r-preset", "status": "succeeded"}
+        if "/api/v1/gateway/query" in url:
+            return {"result": {"rows": [[1]]}, "provenance": {"provenance_version": "1"}}
         return {}
 
     monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
@@ -755,6 +772,7 @@ def test_init_preset_dropzone_bootstraps_workspace_source_and_run(
     assert payload["workspace_id"] == "w-preset"
     assert payload["source"]["source_id"] == "s-preset"
     assert payload["run_observed"]["status"] == "succeeded"
+    assert payload["status"] == "ok"
     assert calls[1][2] is not None
     scope = calls[1][2]["scope"]  # type: ignore[index]
     assert scope["root_path"]
@@ -771,10 +789,27 @@ def test_init_preset_sharepoint_uses_sharepoint_source_type(monkeypatch) -> None
             return {"workspace_id": "w-sharepoint"}
         if url.endswith("/sources"):
             return {"source_id": "s-sharepoint", "scope": payload.get("scope", {})}
+        if url.endswith("/onboarding/events"):
+            return {"status": "recorded"}
+        if url.endswith("/review_tasks/summary"):
+            return {"blocking_open_tasks": 0}
+        if url.endswith("/review_tasks"):
+            return []
+        if url.endswith("/target-dbs"):
+            return {"target_db": {"target_db_id": "tdb-sharepoint"}}
+        if url.endswith("/provision/plan"):
+            return {
+                "run_id": "r-sp-plan",
+                "plan": {"plan_id": "plan-sharepoint", "plan_checksum": "sha256:plan-sharepoint"},
+            }
+        if url.endswith("/provision/apply"):
+            return {"run_id": "r-sp-apply"}
         if url.endswith("/runs"):
             return {"run_id": "r-sharepoint", "status": "queued"}
         if "/runs/" in url:
             return {"run_id": "r-sharepoint", "status": "succeeded"}
+        if "/api/v1/gateway/query" in url:
+            return {"result": {"rows": [[1]]}, "provenance": {"provenance_version": "1"}}
         return {}
 
     monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
@@ -788,6 +823,8 @@ def test_init_preset_sharepoint_uses_sharepoint_source_type(monkeypatch) -> None
             "http://cp",
             "--source-root",
             "/sites/team/shared-documents",
+            "--connector-secret-ref",
+            "secret://vault/sharepoint",
             "--wait-for-run",
         ],
     )
@@ -802,10 +839,136 @@ def test_init_preset_sharepoint_uses_sharepoint_source_type(monkeypatch) -> None
     assert source_payload["scope"]["root_path"] == "/sites/team/shared-documents"  # type: ignore[index]
 
 
+def test_init_preset_blocks_when_blocking_tasks_exist(monkeypatch, tmp_path: Path) -> None:
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-blocked"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-blocked"}
+        if url.endswith("/onboarding/events"):
+            return {"status": "recorded"}
+        if url.endswith("/runs"):
+            return {"run_id": "r-blocked", "status": "queued"}
+        if "/runs/" in url:
+            return {"run_id": "r-blocked", "status": "succeeded"}
+        if url.endswith("/review_tasks/summary"):
+            return {"blocking_open_tasks": 1}
+        if url.endswith("/review_tasks"):
+            return [{"task_id": "t-blocking-1", "blocking": True, "status": "open"}]
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "init-preset",
+            "--preset",
+            "dropzone-team",
+            "--api-base-url",
+            "http://cp",
+            "--output-root",
+            (tmp_path / "demo").as_posix(),
+            "--wait-for-run",
+        ],
+    )
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["blocking_task_ids"] == ["t-blocking-1"]
+
+
+def test_init_command_supports_preset_alias(monkeypatch, tmp_path: Path) -> None:
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        if url.endswith("/api/v1/workspaces"):
+            return {"workspace_id": "w-init-preset"}
+        if url.endswith("/sources"):
+            return {"source_id": "s-init-preset"}
+        if url.endswith("/onboarding/events"):
+            return {"status": "recorded"}
+        if url.endswith("/runs"):
+            return {"run_id": "r-init-preset", "status": "queued"}
+        if "/runs/" in url:
+            return {"run_id": "r-init-preset", "status": "succeeded"}
+        if url.endswith("/review_tasks/summary"):
+            return {"blocking_open_tasks": 0}
+        if url.endswith("/review_tasks"):
+            return []
+        if url.endswith("/target-dbs"):
+            return {"target_db": {"target_db_id": "tdb-init-preset"}}
+        if url.endswith("/provision/plan"):
+            return {
+                "run_id": "r-init-plan",
+                "plan": {"plan_id": "plan-init", "plan_checksum": "sha256:plan-init"},
+            }
+        if url.endswith("/provision/apply"):
+            return {"run_id": "r-init-apply"}
+        if "/api/v1/gateway/query" in url:
+            return {"result": {"rows": [[1]]}, "provenance": {"provenance_version": "1"}}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--preset",
+            "dropzone-team",
+            "--api-base-url",
+            "http://cp",
+            "--output-root",
+            (tmp_path / "demo").as_posix(),
+        ],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["workspace_id"] == "w-init-preset"
+    assert payload["status"] == "ok"
+
+
 def test_init_preset_rejects_unknown_preset() -> None:
     result = runner.invoke(app, ["init-preset", "--preset", "unknown-preset"])
     assert result.exit_code == 1
     assert "Unsupported preset" in (result.stdout + result.stderr)
+
+
+def test_init_preset_sharepoint_requires_connector_secret_ref() -> None:
+    result = runner.invoke(app, ["init-preset", "--preset", "sharepoint-team"])
+    assert result.exit_code == 1
+    assert "missing secrets" in (result.stdout + result.stderr)
+
+
+def test_remediate_command_unknown_id_fails() -> None:
+    result = runner.invoke(app, ["remediate", "DR-9999"])
+    assert result.exit_code == 1
+    assert "Unknown remediation ID" in (result.stdout + result.stderr)
+
+
+def test_remediate_command_applies_storage_fix(tmp_path: Path) -> None:
+    storage_root = tmp_path / "storage"
+    config_path = tmp_path / "doctor-remediate.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "profile": "starter",
+                "bind_address": "127.0.0.1",
+                "auth_mode": "local",
+                "database_url": f"sqlite:///{(tmp_path / 'doctor.db').as_posix()}",
+                "storage_root": storage_root.as_posix(),
+                "secrets_store_backend": "local_encrypted",
+                "secrets_store_root": (tmp_path / "secrets").as_posix(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        ["remediate", "DR-0002", "--config", config_path.as_posix()],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["remediation_id"] == "DR-0002"
 
 
 def test_review_batch_requires_confirmation(monkeypatch) -> None:

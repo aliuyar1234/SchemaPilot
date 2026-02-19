@@ -21,6 +21,7 @@ from backend.shared_domain.connector_state import (
     save_connector_state,
 )
 from backend.shared_domain.evidence_store import store_evidence_bundle
+from backend.shared_domain.failure_codes import attach_failure_metadata
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import (
     CatalogDataset,
@@ -30,6 +31,7 @@ from backend.shared_domain.metadata_models import (
     ReviewTask,
     RunRecord,
     RunStepRecord,
+    Workspace,
 )
 from backend.shared_domain.observability import observe_worker_step_duration
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
@@ -44,6 +46,7 @@ from backend.workers.connectors.dropzone import discover_dropzone_files
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
 from backend.workers.connectors.jira_exports import discover_jira_exports
 from backend.workers.connectors.plugin_runner import execute_connector_plugin
+from backend.workers.connectors.wrapper import execute_connector_discovery
 from backend.workers.connectors.zendesk_exports import discover_zendesk_exports
 from backend.workers.drift import detect_schema_drift
 from backend.workers.pii import detect_pii_proposals
@@ -663,7 +666,16 @@ def _fail_step(
     row.duration_ms = max((finished_epoch - started_epoch) * 1000, 0)
     row.error_code = error_code
     row.evidence_bundle_uri = evidence_bundle_uri
-    row.details_json = dict(details or {})
+    failure_message = None
+    if isinstance(details, dict):
+        raw_error = details.get("error")
+        if raw_error is not None:
+            failure_message = str(raw_error)
+    row.details_json = attach_failure_metadata(
+        details=details,
+        legacy_error_code=error_code,
+        message=failure_message,
+    )
     observe_worker_step_duration(
         workspace_id=row.workspace_id,
         run_type=row.run_type,
@@ -842,99 +854,138 @@ def _process_discover_run(
     drift_blocking_tasks_created = 0
     semantic_drift_blocking_tasks_created = 0
     anomaly_blocking_tasks_created = 0
-    connector_plugins = load_connector_plugin_specs()
+    workspace = session.get(Workspace, run.workspace_id)
+    workspace_profile = (
+        str(workspace.profile).strip().lower()
+        if workspace is not None
+        else "team"
+    )
+    connector_plugins = load_connector_plugin_specs(workspace_profile=workspace_profile)
 
     for source in sources:
         scope = _json_dict(source.scope_json)
+        _validate_connector_scope_secret_refs(scope=scope, source_type=source.source_type)
         state = load_connector_state(
             storage_root=storage_root,
             workspace_id=run.workspace_id,
             source_id=source.source_id,
         )
+        root_path = ""
+        discovery_metadata: dict[str, object] = {}
         try:
-            if source.source_type == "filesystem":
-                root_path = str(scope.get("root_path", "")).strip()
-                if not root_path:
-                    raise ValueError(f"Filesystem source {source.source_id} is missing root_path.")
-                include_globs = _string_list(
-                    scope.get("include_globs"),
-                    default=DEFAULT_INCLUDE_GLOBS,
-                )
-                exclude_globs = _string_list(scope.get("exclude_globs"), default=[])
-                discovered_files = discover_files(
-                    root_path=root_path,
-                    include_globs=include_globs,
-                    exclude_globs=exclude_globs,
-                )
-            elif source.source_type == "dropzone":
-                root_path = str(scope.get("root_path", "")).strip()
-                if not root_path:
-                    raise ValueError(f"Dropzone source {source.source_id} is missing root_path.")
-                include_globs = _string_list(scope.get("include_globs"), default=[])
-                exclude_globs = _string_list(scope.get("exclude_globs"), default=[])
-                required_files = _string_list(scope.get("required_files"), default=[])
-                discovered_files = discover_dropzone_files(
-                    root_path=root_path,
-                    include_globs=include_globs or None,
-                    exclude_globs=exclude_globs or None,
-                    required_files=required_files or None,
-                )
-            elif source.source_type == "db_dump":
-                root_path = str(scope.get("root_path", "")).strip()
-                if not root_path:
-                    raise ValueError(f"DB dump source {source.source_id} is missing root_path.")
-                discovered_files = [
-                    DiscoveredFile(
-                        path=str(row.get("path", "")),
-                        dataset_family=str(row.get("dataset_family", "db_dump")),
-                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
-                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
-                        content_hash_sample=str(row.get("content_hash_sample", "")),
+            def _discover_once(
+                current_source=source,
+                current_scope=scope,
+                current_state=state,
+            ) -> list[DiscoveredFile]:
+                nonlocal root_path
+                source_type = current_source.source_type
+                source_id = current_source.source_id
+                if source_type == "filesystem":
+                    root_path = str(current_scope.get("root_path", "")).strip()
+                    if not root_path:
+                        raise ValueError(
+                            f"Filesystem source {source_id} is missing root_path."
+                        )
+                    include_globs = _string_list(
+                        current_scope.get("include_globs"),
+                        default=DEFAULT_INCLUDE_GLOBS,
                     )
-                    for row in discover_db_dumps(scope)
-                ]
-            elif source.source_type == "jira":
-                root_path = str(scope.get("root_path", "")).strip()
-                if not root_path:
-                    raise ValueError(f"Jira source {source.source_id} is missing root_path.")
-                discovered_files = [
-                    DiscoveredFile(
-                        path=str(row.get("path", "")),
-                        dataset_family=str(row.get("dataset_family", "jira")),
-                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
-                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
-                        content_hash_sample=str(row.get("content_hash_sample", "")),
+                    exclude_globs = _string_list(
+                        current_scope.get("exclude_globs"), default=[]
                     )
-                    for row in discover_jira_exports(scope)
-                ]
-            elif source.source_type == "zendesk":
-                root_path = str(scope.get("root_path", "")).strip()
-                if not root_path:
-                    raise ValueError(f"Zendesk source {source.source_id} is missing root_path.")
-                discovered_files = [
-                    DiscoveredFile(
-                        path=str(row.get("path", "")),
-                        dataset_family=str(row.get("dataset_family", "zendesk")),
-                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
-                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
-                        content_hash_sample=str(row.get("content_hash_sample", "")),
+                    return discover_files(
+                        root_path=root_path,
+                        include_globs=include_globs,
+                        exclude_globs=exclude_globs,
                     )
-                    for row in discover_zendesk_exports(scope)
-                ]
-            else:
-                plugin = connector_plugins.get(source.source_type)
+                if source_type == "dropzone":
+                    root_path = str(current_scope.get("root_path", "")).strip()
+                    if not root_path:
+                        raise ValueError(
+                            f"Dropzone source {source_id} is missing root_path."
+                        )
+                    include_globs = _string_list(
+                        current_scope.get("include_globs"), default=[]
+                    )
+                    exclude_globs = _string_list(
+                        current_scope.get("exclude_globs"), default=[]
+                    )
+                    required_files = _string_list(
+                        current_scope.get("required_files"), default=[]
+                    )
+                    return discover_dropzone_files(
+                        root_path=root_path,
+                        include_globs=include_globs or None,
+                        exclude_globs=exclude_globs or None,
+                        required_files=required_files or None,
+                    )
+                if source_type == "db_dump":
+                    root_path = str(current_scope.get("root_path", "")).strip()
+                    if not root_path:
+                        raise ValueError(
+                            f"DB dump source {source_id} is missing root_path."
+                        )
+                    return [
+                        DiscoveredFile(
+                            path=str(row.get("path", "")),
+                            dataset_family=str(row.get("dataset_family", "db_dump")),
+                            size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                            mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                            content_hash_sample=str(row.get("content_hash_sample", "")),
+                        )
+                        for row in discover_db_dumps(current_scope)
+                    ]
+                if source_type == "jira":
+                    root_path = str(current_scope.get("root_path", "")).strip()
+                    if not root_path:
+                        raise ValueError(
+                            f"Jira source {source_id} is missing root_path."
+                        )
+                    return [
+                        DiscoveredFile(
+                            path=str(row.get("path", "")),
+                            dataset_family=str(row.get("dataset_family", "jira")),
+                            size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                            mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                            content_hash_sample=str(row.get("content_hash_sample", "")),
+                        )
+                        for row in discover_jira_exports(current_scope)
+                    ]
+                if source_type == "zendesk":
+                    root_path = str(current_scope.get("root_path", "")).strip()
+                    if not root_path:
+                        raise ValueError(
+                            f"Zendesk source {source_id} is missing root_path."
+                        )
+                    return [
+                        DiscoveredFile(
+                            path=str(row.get("path", "")),
+                            dataset_family=str(row.get("dataset_family", "zendesk")),
+                            size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                            mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                            content_hash_sample=str(row.get("content_hash_sample", "")),
+                        )
+                        for row in discover_zendesk_exports(current_scope)
+                    ]
+                plugin = connector_plugins.get(source_type)
                 if plugin is None:
                     raise ValueError(
-                        f"Unsupported source_type for discover run: {source.source_type}"
+                        f"Unsupported source_type for discover run: {source_type}"
                     )
-                root_path = str(scope.get("root_path", "")).strip() or "."
-                plugin_scope = dict(scope)
-                plugin_scope["cursor_state"] = state
-                discovered_files = _discover_files_via_plugin(
+                root_path = str(current_scope.get("root_path", "")).strip() or "."
+                plugin_scope = dict(current_scope)
+                plugin_scope["cursor_state"] = current_state
+                return _discover_files_via_plugin(
                     plugin,
                     scope=plugin_scope,
-                    source_type=source.source_type,
+                    source_type=source_type,
                 )
+
+            discovered_files, discovery_metadata = execute_connector_discovery(
+                _discover_once,
+                source_type=source.source_type,
+            )
         except Exception as exc:
             completeness_failures.append(
                 {
@@ -979,6 +1030,7 @@ def _process_discover_run(
                 "snapshot_checksum": source_snapshot_materialized["snapshot_checksum"],
                 "snapshot_uri": source_snapshot_materialized["snapshot_uri"],
                 "entry_count": _coerce_int(source_snapshot.get("entry_count"), default=0),
+                "retry": discovery_metadata,
             }
         )
         if len(discovered_files) > _worker_step_max_items():
@@ -1360,6 +1412,26 @@ def _discover_files_via_plugin(
             )
         )
     return sorted(discovered, key=lambda item: item.path)
+
+
+def _validate_connector_scope_secret_refs(*, scope: dict[str, object], source_type: str) -> None:
+    forbidden_keys: list[str] = []
+    for raw_key, raw_value in scope.items():
+        key = str(raw_key).strip()
+        normalized = key.lower()
+        if not normalized:
+            continue
+        if any(token in normalized for token in ("password", "token", "secret", "api_key")):
+            if normalized.endswith("_ref") or normalized.endswith("_refs"):
+                continue
+            value_text = str(raw_value).strip()
+            if value_text:
+                forbidden_keys.append(key)
+    if forbidden_keys:
+        raise ValueError(
+            "connector_secret_ref_required:"
+            f"{source_type}:{','.join(sorted(set(forbidden_keys)))}"
+        )
 
 
 def _create_pii_review_tasks_from_csv(

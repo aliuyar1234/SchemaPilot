@@ -41,11 +41,20 @@ def request_policy_pack_change(
         )
 
     requested_checksum = _pack_checksum(requested_pack)
+    current_pack_id = str(current.get("pack_id", "")) if current else ""
+    current_pack_checksum = str(current.get("pack_checksum", "")) if current else ""
+    policy_diff_checksum = _policy_diff_checksum(
+        current_pack_id=current_pack_id,
+        current_pack_checksum=current_pack_checksum,
+        requested_pack_id=requested_pack_id,
+        requested_pack_checksum=requested_checksum,
+    )
     evidence_payload: dict[str, object] = {
         "workspace_id": workspace_id,
         "requested_pack_id": requested_pack_id,
         "requested_pack_checksum": requested_checksum,
         "current_pack": current,
+        "policy_diff_checksum": policy_diff_checksum,
     }
     stored = store_evidence_bundle(
         workspace_id=workspace_id,
@@ -74,6 +83,7 @@ def request_policy_pack_change(
         "requested_pack_id": requested_pack_id,
         "requested_pack_checksum": requested_checksum,
         "requester_actor_id": requester_actor_id,
+        "policy_diff_checksum": policy_diff_checksum,
         "proposal_id": str(proposal["proposal_id"]),
         "review_task_id": str(review_task["task_id"]),
         "status": "staged",
@@ -99,6 +109,7 @@ def decide_policy_pack_change(
     approver_actor_id: str,
     decision: str,
     reason: str,
+    expected_policy_diff_checksum: str | None = None,
     canary_enabled: bool = False,
 ) -> dict[str, object] | None:
     """Approve/reject/defer staged policy-pack changes and apply when approved."""
@@ -138,6 +149,46 @@ def decide_policy_pack_change(
     active = _load_definition(active_row.definition_ref) if active_row is not None else {}
     requested_pack_id = str(staged.get("requested_pack_id", "")).strip()
     requested_pack = _load_policy_pack(requested_pack_id)
+    requested_pack_checksum = _pack_checksum(requested_pack)
+    staged_requested_pack_checksum = str(staged.get("requested_pack_checksum", "")).strip()
+    if not staged_requested_pack_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "requested_pack_checksum_missing"},
+        )
+    if staged_requested_pack_checksum != requested_pack_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "requested_pack_checksum_mismatch"},
+        )
+    recomputed_policy_diff_checksum = _policy_diff_checksum(
+        current_pack_id=str(active.get("pack_id", "")),
+        current_pack_checksum=str(active.get("pack_checksum", "")),
+        requested_pack_id=requested_pack_id,
+        requested_pack_checksum=requested_pack_checksum,
+    )
+    staged_policy_diff_checksum = str(staged.get("policy_diff_checksum", "")).strip()
+    if not staged_policy_diff_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "policy_diff_checksum_missing"},
+        )
+    if staged_policy_diff_checksum != recomputed_policy_diff_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "policy_diff_checksum_mismatch"},
+        )
+    expected_checksum = str(expected_policy_diff_checksum or "").strip()
+    if not expected_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "policy_diff_checksum_required"},
+        )
+    if expected_checksum != recomputed_policy_diff_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "policy_diff_checksum_mismatch"},
+        )
     invariant_failures = evaluate_policy_pack_invariants(requested_pack)
     if invariant_failures:
         raise PolicyDeniedError(
@@ -343,6 +394,29 @@ def get_effective_policy_pack(session: Session, *, workspace_id: str) -> dict[st
     }
 
 
+def get_policy_pack_change_request(
+    session: Session,
+    *,
+    workspace_id: str,
+    change_request_id: str,
+) -> dict[str, object] | None:
+    """Return staged policy-pack change request payload."""
+
+    row = _get_change_request_row(
+        session,
+        workspace_id=workspace_id,
+        change_request_id=change_request_id,
+    )
+    if row is None:
+        return None
+    payload = _load_definition(row.definition_ref)
+    if not payload:
+        return None
+    payload.setdefault("change_request_id", change_request_id)
+    payload.setdefault("workspace_id", workspace_id)
+    return payload
+
+
 def _load_policy_pack(pack_id: str) -> dict[str, object]:
     for pack in load_policy_packs():
         if str(pack.get("id", "")) == pack_id:
@@ -352,6 +426,23 @@ def _load_policy_pack(pack_id: str) -> dict[str, object]:
 
 def _pack_checksum(pack: dict[str, object]) -> str:
     canonical = json.dumps(pack, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _policy_diff_checksum(
+    *,
+    current_pack_id: str,
+    current_pack_checksum: str,
+    requested_pack_id: str,
+    requested_pack_checksum: str,
+) -> str:
+    payload = {
+        "current_pack_id": current_pack_id,
+        "current_pack_checksum": current_pack_checksum,
+        "requested_pack_id": requested_pack_id,
+        "requested_pack_checksum": requested_pack_checksum,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

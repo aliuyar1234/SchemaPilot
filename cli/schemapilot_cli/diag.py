@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import zipfile
@@ -13,7 +14,9 @@ from sqlalchemy.orm import Session
 from backend.shared_domain.audit_models import AccessDecision, AuditEvent
 from backend.shared_domain.config import load_settings
 from backend.shared_domain.db import get_session_factory
+from backend.shared_domain.failure_codes import resolve_failure_metadata
 from backend.shared_domain.metadata_models import RunRecord, RunStepRecord
+from backend.shared_domain.policy_packs import load_policy_packs
 from backend.shared_domain.secrets import redact_secrets
 from cli.schemapilot_cli.analyze import analyze_workspace
 
@@ -94,6 +97,8 @@ def generate_diag_bundle(
                     "audit_events": len(events),
                     "access_decisions": len(decisions),
                 },
+                "pack_versions": _collect_pack_versions(),
+                "manifest_hashes": _collect_manifest_hashes(),
             }
         ),
         "config/settings_redacted.json": _json_bytes(settings.to_redacted_dict()),
@@ -112,24 +117,7 @@ def generate_diag_bundle(
             ]
         ),
         "runs/recent_run_steps.json": _json_bytes(
-            [
-                {
-                    "run_step_id": row.run_step_id,
-                    "run_id": row.run_id,
-                    "step_key": row.step_key,
-                    "step_order": row.step_order,
-                    "status": row.status,
-                    "attempt_count": row.attempt_count,
-                    "error_code": row.error_code,
-                    "evidence_bundle_uri": row.evidence_bundle_uri,
-                    "started_epoch": row.started_epoch,
-                    "finished_epoch": row.finished_epoch,
-                    "duration_ms": row.duration_ms,
-                    "depends_on": row.depends_on_json,
-                    "details": row.details_json,
-                }
-                for row in run_steps
-            ]
+            [_serialize_run_step(row) for row in run_steps]
         ),
         "audit/audit_excerpt.json": _json_bytes(
             {
@@ -176,3 +164,63 @@ def _json_bytes(payload: object) -> bytes:
     serialized = json.dumps(payload, indent=2, sort_keys=True, default=str)
     redacted = redact_secrets(serialized)
     return (redacted + "\n").encode("utf-8")
+
+
+def _serialize_run_step(row: RunStepRecord) -> dict[str, object]:
+    details = dict(row.details_json) if isinstance(row.details_json, dict) else {}
+    failure_message = str(details.get("error")) if details.get("error") is not None else None
+    metadata = resolve_failure_metadata(
+        details=details,
+        legacy_error_code=row.error_code,
+        message=failure_message,
+    )
+    return {
+        "run_step_id": row.run_step_id,
+        "run_id": row.run_id,
+        "step_key": row.step_key,
+        "step_order": row.step_order,
+        "status": row.status,
+        "attempt_count": row.attempt_count,
+        "error_code": row.error_code,
+        "failure_code": metadata["failure_code"] if metadata is not None else None,
+        "failure_category": metadata["failure_category"] if metadata is not None else None,
+        "operator_hint_ref": metadata["operator_hint_ref"] if metadata is not None else None,
+        "failure_code_version": metadata["failure_code_version"] if metadata is not None else None,
+        "evidence_bundle_uri": row.evidence_bundle_uri,
+        "started_epoch": row.started_epoch,
+        "finished_epoch": row.finished_epoch,
+        "duration_ms": row.duration_ms,
+        "depends_on": row.depends_on_json,
+        "details": details,
+    }
+
+
+def _collect_pack_versions() -> list[dict[str, str]]:
+    versions: list[dict[str, str]] = []
+    for pack in load_policy_packs():
+        pack_id = str(pack.get("id", "")).strip()
+        if not pack_id:
+            continue
+        versions.append(
+            {
+                "pack_type": "policy_pack",
+                "pack_id": pack_id,
+                "version": str(pack.get("version", "unknown")),
+            }
+        )
+    return sorted(versions, key=lambda row: (row["pack_type"], row["pack_id"]))
+
+
+def _collect_manifest_hashes() -> dict[str, object]:
+    root = Path(__file__).resolve().parents[2]
+    manifest_path = root / "MANIFEST.sha256"
+    if not manifest_path.exists():
+        return {"status": "missing"}
+    content = manifest_path.read_text(encoding="utf-8")
+    entries = [line.strip() for line in content.splitlines() if line.strip()]
+    return {
+        "status": "ok",
+        "manifest_file_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "entry_count": len(entries),
+        "sample_entries": entries[:20],
+    }

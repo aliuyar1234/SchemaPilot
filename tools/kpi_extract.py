@@ -30,6 +30,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--week", default=_current_week(), help="ISO week identifier.")
     parser.add_argument("--output-root", default="runtime/kpi", help="KPI output folder.")
+    parser.add_argument(
+        "--baseline",
+        default="tools/kpi_baseline.json",
+        help="KPI baseline policy file.",
+    )
+    parser.add_argument(
+        "--enforce-baseline",
+        action="store_true",
+        help="Fail when extracted KPIs violate baseline policy.",
+    )
     return parser.parse_args()
 
 
@@ -176,8 +186,69 @@ def main() -> int:
     finally:
         session.close()
     path = write_kpi_extract(week=args.week, output_root=args.output_root, payload=payload)
+    baseline_path = Path(str(args.baseline))
+    baseline = _load_baseline(baseline_path)
+    violations = _evaluate_baseline_violations(payload=payload, baseline=baseline)
+    if violations:
+        print("WARN KPI baseline violations detected:")
+        for violation in violations:
+            print("-", violation)
+    if args.enforce_baseline and violations:
+        print(f"FAIL KPI baseline regression gate: {path.as_posix()}")
+        return 1
     print(f"PASS KPI extract generated: {path.as_posix()}")
     return 0
+
+
+def _load_baseline(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def _evaluate_baseline_violations(
+    *,
+    payload: dict[str, object],
+    baseline: dict[str, object],
+) -> list[str]:
+    rules_raw = baseline.get("rules", {})
+    if not isinstance(rules_raw, dict):
+        return []
+    violations: list[str] = []
+    for metric, rule_raw in sorted(rules_raw.items()):
+        if not isinstance(rule_raw, dict):
+            continue
+        value = payload.get(metric)
+        allow_null = bool(rule_raw.get("allow_null", False))
+        if value is None:
+            if not allow_null:
+                violations.append(f"{metric}:value_missing")
+            continue
+        try:
+            numeric_value = _to_float(value)
+        except (TypeError, ValueError):
+            violations.append(f"{metric}:not_numeric")
+            continue
+        if "min" in rule_raw:
+            min_threshold = _to_float(rule_raw["min"])
+            if numeric_value < min_threshold:
+                violations.append(f"{metric}:below_min:{numeric_value:.6f}<{min_threshold:.6f}")
+        if "max" in rule_raw:
+            max_threshold = _to_float(rule_raw["max"])
+            if numeric_value > max_threshold:
+                violations.append(f"{metric}:above_max:{numeric_value:.6f}>{max_threshold:.6f}")
+    return violations
+
+
+def _to_float(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return float(value)
+    raise TypeError("value_is_not_numeric")
 
 
 if __name__ == "__main__":

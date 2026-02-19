@@ -134,7 +134,7 @@ def test_worker_runner_uses_connector_plugin_for_non_filesystem_source(
     monkeypatch.setattr(
         run_processor,
         "load_connector_plugin_specs",
-        lambda: {
+        lambda **kwargs: {
             "custom": ConnectorPluginSpec(
                 name="custom",
                 plugin=plugin,

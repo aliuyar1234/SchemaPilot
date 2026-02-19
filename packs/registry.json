@@ -22,37 +22,46 @@
   "policy_packs": [
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "analyst-readonly",
       "path": "packs/policy/analyst-readonly.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "8cf1d70c00a4d93906abe951f2326a4f704fa9c1f75e5db9306bf89f83dc766b"
+        "value": "54dd28182d323ed593e8cbc00ffe7e5380b8e46a6f08c401ad32f5939b053539"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "baseline-team",
       "path": "packs/policy/baseline-team.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "acca2f5efbd732c679eeacd796270277ca443825c9cdfded9aba14ef5ed2608e"
+        "value": "c2abd8e4ba221fc689014d88180cf033596dc575d497e7d802b8faab4da35938"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "steward-governed",
       "path": "packs/policy/steward-governed.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "a8f2717921bd50f61d9c4421136cf0104fdbd918245e210d327df6f46a10f344"
+        "value": "c0f77b6ec7d89ea191d68e8350d089cbf9cae78323e4e59ede5adea28f12016c"
       },
       "version": "1.0.0"
     }
@@ -61,37 +70,46 @@
   "semantic_packs": [
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "starter-crm",
       "path": "packs/semantic/starter-crm.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "0aebf017c61f9b41b2ec827e061bb1d64de8a42a7dca96acb4db7b89d241b235"
+        "value": "7e1dd6d56d6a23e780324092f8a01c0a1effc7fd6fbf7aae6a57c8483743331d"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "starter-invoices",
       "path": "packs/semantic/starter-invoices.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "6337bd6400cbb174415965b63598124026a13c18c5b20d0ae17c546c554b04de"
+        "value": "f04d3a3cdcb73c25269529d8d1600c86e5469861d909e5d4bcfd8a707da9a69f"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "starter-support",
       "path": "packs/semantic/starter-support.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "1412d2abaf9daee652bc9488a506395b6c16ea5c81948c0d799d7f2f55ab3c9b"
+        "value": "ca1cade9b6c70376a3d11c42ec48dfac8b2c15b0892a99ca34000f873dd65bcb"
       },
       "version": "1.0.0"
     }
@@ -99,49 +117,61 @@
   "template_packs": [
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "crm-export",
       "path": "packs/templates/crm-export.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "0b9bd9f146702dc468dce96e9f9e5a300eae64dd9acbc7623cf02d31f88a6d82"
+        "value": "f7478c0847cb658a55dd30dc4942dd0e5db9c6fd19c05e3099f0b4549e75b074"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "crm",
       "path": "packs/templates/crm.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "159f516db52b9ef6fb678769a129d621326d913e7eb800448a6315dec5123b8e"
+        "value": "0d8a392ab238329cacdbff64b085aa54681ab296b4c98e76fc4a954464ebf007"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "invoices",
       "path": "packs/templates/invoices.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "f4ce3ed4e753db978a1ec14045c2a3fbd4709042fbcc51118479e037dcb0bcad"
+        "value": "9b033fedcbfbff374438f1e0607ca0754a56bfa78c10fa133fb6292231e920b5"
       },
       "version": "1.0.0"
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "compat_range": ">=0.1.0,<1.0.0",
+      "migration_available": false,
       "pack_id": "support",
       "path": "packs/templates/support.json",
       "schema_version": "v2",
+      "semantic_schema_version": "v2",
       "signature": {
         "algorithm": "hmac-sha256",
         "key_id": "local-dev-v1",
-        "value": "ff35e3207a7d5bfe1f2ce3ef4369365d24c8d2e3057fb86ac4eb1bd231f22a63"
+        "value": "293cd66ccf5669b203232d3a15131c2d59d8d516ffd25a3ce47c4be8b4e9675c"
       },
       "version": "1.0.0"
     }

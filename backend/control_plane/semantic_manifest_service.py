@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -42,12 +43,18 @@ def request_semantic_manifest_change(
             "Access denied by policy",
             details={"reason": "semantic_manifest_already_active"},
         )
+    current_manifest_checksum = str(current.get("manifest_checksum", "")) if current else ""
+    migration_plan_checksum = _migration_plan_checksum(
+        current_manifest_checksum=current_manifest_checksum,
+        requested_manifest_checksum=manifest_checksum,
+    )
 
     evidence_payload: dict[str, object] = {
         "workspace_id": workspace_id,
         "requested_manifest": normalized_manifest,
         "requested_manifest_checksum": manifest_checksum,
         "current_manifest": current,
+        "migration_plan_checksum": migration_plan_checksum,
     }
     stored = store_evidence_bundle(
         workspace_id=workspace_id,
@@ -78,6 +85,7 @@ def request_semantic_manifest_change(
         "proposal_id": str(proposal["proposal_id"]),
         "review_task_id": str(review_task["task_id"]),
         "semantic_manifest": normalized_manifest,
+        "migration_plan_checksum": migration_plan_checksum,
         "status": "staged",
     }
     session.add(
@@ -101,6 +109,7 @@ def decide_semantic_manifest_change(
     approver_actor_id: str,
     decision: str,
     reason: str,
+    expected_migration_plan_checksum: str | None = None,
 ) -> dict[str, object] | None:
     """Apply approval decision to staged semantic manifest change."""
     staged_row = _get_change_request_row(
@@ -147,6 +156,39 @@ def decide_semantic_manifest_change(
     manifest_checksum = semantic_manifest_checksum(normalized_manifest)
     active_row = _get_active_semantic_manifest_row(session, workspace_id=workspace_id)
     active_state = _load_definition(active_row.definition_ref) if active_row is not None else {}
+    staged_manifest_checksum = str(staged.get("manifest_checksum", "")).strip()
+    if staged_manifest_checksum and staged_manifest_checksum != manifest_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "semantic_manifest_checksum_mismatch"},
+        )
+    current_manifest_checksum = str(active_state.get("manifest_checksum", "")).strip()
+    recomputed_migration_plan_checksum = _migration_plan_checksum(
+        current_manifest_checksum=current_manifest_checksum,
+        requested_manifest_checksum=manifest_checksum,
+    )
+    staged_migration_plan_checksum = str(staged.get("migration_plan_checksum", "")).strip()
+    if not staged_migration_plan_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "migration_plan_checksum_missing"},
+        )
+    if staged_migration_plan_checksum != recomputed_migration_plan_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "migration_plan_checksum_mismatch"},
+        )
+    expected_checksum = str(expected_migration_plan_checksum or "").strip()
+    if not expected_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "migration_plan_checksum_required"},
+        )
+    if expected_checksum != recomputed_migration_plan_checksum:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "migration_plan_checksum_mismatch"},
+        )
     next_version = _coerce_int(active_state.get("version"), default=0) + 1
     next_state: dict[str, object] = {
         "workspace_id": workspace_id,
@@ -288,6 +330,17 @@ def _coerce_int(value: object, *, default: int) -> int:
         except ValueError:
             return default
     return default
+
+
+def _migration_plan_checksum(
+    *, current_manifest_checksum: str, requested_manifest_checksum: str
+) -> str:
+    payload = {
+        "current_manifest_checksum": current_manifest_checksum,
+        "requested_manifest_checksum": requested_manifest_checksum,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _validated_manifest(

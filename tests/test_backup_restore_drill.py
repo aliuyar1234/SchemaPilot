@@ -22,3 +22,7 @@ def test_backup_restore_drill_passes() -> None:
     )
     assert report["status"] == "pass"
     assert report["gateway_query_value"] == 42
+    assert report["mask_applied"] is True
+    assert report["provenance_ok"] is True
+    assert report["artifact_pointer_checksum"]
+    assert report["packs_registry_checksum"]

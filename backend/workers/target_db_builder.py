@@ -32,6 +32,7 @@ from backend.workers.db_builder.provision_postgres import (
     managed_postgres_identifiers,
     provision_managed_postgres_secret_refs,
 )
+from backend.workers.db_builder.rotate_creds import rotate_target_db_credentials
 from backend.workers.db_builder.validate_external_db import validate_external_target_db_profile
 
 TARGET_DB_PLAN_RUN_TYPES = {
@@ -539,13 +540,20 @@ def process_target_db_run(
         }
 
     if run_type in TARGET_DB_ROTATION_RUN_TYPES:
-        previous_refs = dict(profile.credential_refs_json)
-        rotated_refs = _rotate_target_db_credentials(
+        settings = load_settings()
+        secrets_store = load_secrets_store(settings)
+        rotation_window_seconds = _as_int(
+            input_refs.get("dual_validity_window_seconds"),
+            default=300,
+        )
+        rotation = rotate_target_db_credentials(
             workspace_id=workspace_id,
             target_db_id=target_db_id,
             profile=profile,
+            secrets_store=secrets_store,
+            dual_validity_window_seconds=rotation_window_seconds,
         )
-        profile.credential_refs_json = rotated_refs
+        profile.credential_refs_json = dict(rotation.rotated_refs)
         profile.disabled = False
         state.health_status = "healthy"
         state.last_error_evidence_bundle_uri = None
@@ -557,16 +565,20 @@ def process_target_db_run(
                 "workspace_id": workspace_id,
                 "target_db_id": target_db_id,
                 "run_id": run_id,
-                "previous_credential_refs": previous_refs,
-                "rotated_credential_refs": rotated_refs,
+                "previous_credential_refs": rotation.previous_refs,
+                "rotated_credential_refs": rotation.rotated_refs,
+                "revoked_credential_refs": rotation.revoked_refs,
+                "dual_validity_window_seconds": rotation.dual_validity_window_seconds,
             },
         )
         session.flush()
         return {
             "target_db_id": target_db_id,
             "status": "credentials_rotated",
-            "previous_credential_refs": previous_refs,
-            "rotated_credential_refs": rotated_refs,
+            "previous_credential_refs": rotation.previous_refs,
+            "rotated_credential_refs": rotation.rotated_refs,
+            "revoked_credential_refs": rotation.revoked_refs,
+            "dual_validity_window_seconds": rotation.dual_validity_window_seconds,
             "evidence_bundle_uri": evidence.evidence_bundle_uri,
         }
 
@@ -1169,33 +1181,3 @@ def _materialize_sqlite_build_file(
     return build_path.as_posix()
 
 
-def _rotate_target_db_credentials(
-    *,
-    workspace_id: str,
-    target_db_id: str,
-    profile: TargetDbProfile,
-) -> dict[str, object]:
-    settings = load_settings()
-    secrets_store = load_secrets_store(settings)
-    if profile.db_type == "postgres" and profile.mode == "managed":
-        host = str(profile.connection_json.get("host", "postgres"))
-        port = _as_int(profile.connection_json.get("port"), default=5432)
-        identifiers = managed_postgres_identifiers(workspace_id=workspace_id)
-        return provision_managed_postgres_secret_refs(
-            secrets_store=secrets_store,
-            workspace_id=workspace_id,
-            target_db_id=target_db_id,
-            host=host,
-            port=port,
-            identifiers=identifiers,
-        )
-    rotated: dict[str, object] = {}
-    stamp = str(int(time.time()))
-    for key in sorted(profile.credential_refs_json):
-        ref = str(profile.credential_refs_json.get(key, "")).strip()
-        if not ref:
-            continue
-        rotated[str(key)] = f"{ref}#rotated-{stamp}"
-    if not rotated:
-        rotated = {"reader": f"secret://workspace/{workspace_id}/target_db/{target_db_id}/reader#{stamp}"}
-    return rotated

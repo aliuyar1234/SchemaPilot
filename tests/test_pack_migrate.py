@@ -104,7 +104,11 @@ def test_migrate_registry_packs_updates_schema_and_signatures(tmp_path: Path) ->
         write=True,
     )
     assert errors == []
-    assert any(item["status"] == "migrated" for item in report)
+    migrated_items = [item for item in report if item["status"] == "migrated"]
+    assert migrated_items
+    assert migrated_items[0]["artifact_before_checksum"]
+    assert migrated_items[0]["artifact_after_checksum"]
+    assert migrated_items[0]["diff_checksum"]
 
     migrated_payload = json.loads(policy_pack.read_text(encoding="utf-8"))
     assert migrated_payload["schema_version"] == "v2"

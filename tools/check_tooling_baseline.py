@@ -42,6 +42,8 @@ def main() -> int:
     run([sys.executable, "tools/check_openapi_compat.py"], cwd=root)
     run([sys.executable, "tools/generate_clients.py", "--check"], cwd=root)
     run([sys.executable, "tools/pack_lint.py"], cwd=root)
+    run([sys.executable, "tools/plugin_verify.py"], cwd=root)
+    run([sys.executable, "tools/connector_conformance.py"], cwd=root)
     run([sys.executable, "tools/policy_pack_test.py"], cwd=root)
     run([sys.executable, "tools/semantic_test.py"], cwd=root)
     run(
@@ -55,7 +57,8 @@ def main() -> int:
     run([sys.executable, "-m", "pytest"], cwd=root)
     run([sys.executable, "tools/migration_check.py"], cwd=root)
     run([sys.executable, "tools/secrets_hygiene_check.py"], cwd=root)
-    run([sys.executable, "tools/secrets_rotation_drill.py"], cwd=root)
+    run([sys.executable, "tools/rotation_drill.py"], cwd=root)
+    run([sys.executable, "tools/breakglass_drill.py"], cwd=root)
     run([sys.executable, "tools/backup_restore_drill.py"], cwd=root)
     run([sys.executable, "tools/messybench_harness.py", "--regression"], cwd=root)
     run([sys.executable, "tools/e2e_golden_path.py", "--smoke"], cwd=root)

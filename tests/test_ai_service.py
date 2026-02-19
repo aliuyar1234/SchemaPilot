@@ -91,12 +91,30 @@ def test_ai_service_ask_sql_returns_plan_and_provenance(tmp_path: Path) -> None:
         url: str,
         payload: dict[str, object] | None = None,
         bearer_token: str | None = None,
+        gateway_base_url: str | None = None,
+        control_plane_base_url: str | None = None,
     ) -> dict[str, object]:
-        _ = (method, payload, bearer_token)
+        _ = (
+            method,
+            payload,
+            bearer_token,
+            gateway_base_url,
+            control_plane_base_url,
+        )
         if url.endswith("/api/v1/gateway/query"):
+            query_id = "01HSQLQUERY0000000000000000"
+            build_id = "build_sql_1"
             return {
                 "result": {"rows": [{"invoice_count": 2}]},
-                "provenance": {"provenance_version": "1"},
+                "provenance": {
+                    "provenance_version": "1",
+                    "workspace_id": workspace_id,
+                    "policy_decision_id": "01HPOLICY0000000000000000",
+                    "query_id": query_id,
+                    "build_id": build_id,
+                    "datasets_used": ["dataset-1"],
+                    "citations": [f"sp://query/{query_id}/dataset/dataset-1/build/{build_id}"],
+                },
             }
         return {}
 
@@ -132,14 +150,44 @@ def test_ai_service_ai_track_endpoints_return_success(tmp_path: Path) -> None:
         url: str,
         payload: dict[str, object] | None = None,
         bearer_token: str | None = None,
+        gateway_base_url: str | None = None,
+        control_plane_base_url: str | None = None,
     ) -> dict[str, object]:
-        _ = (method, payload, bearer_token)
+        _ = (
+            method,
+            payload,
+            bearer_token,
+            gateway_base_url,
+            control_plane_base_url,
+        )
         if url.endswith("/api/v1/gateway/query"):
-            return {"result": {"rows": []}, "provenance": {"provenance_version": "1"}}
+            query_id = "01HSQLQUERYTRACK00000000000"
+            build_id = "build_sql_track_1"
+            return {
+                "result": {"rows": []},
+                "provenance": {
+                    "provenance_version": "1",
+                    "workspace_id": workspace_id,
+                    "policy_decision_id": "01HPOLICYTRACKSQL0000000000",
+                    "query_id": query_id,
+                    "build_id": build_id,
+                    "datasets_used": ["dataset-1"],
+                    "citations": [f"sp://query/{query_id}/dataset/dataset-1/build/{build_id}"],
+                },
+            }
         if url.endswith("/api/v1/gateway/retrieve"):
             return {
                 "results": [{"dataset_id": "dataset-1", "citation": "doc://1", "snippet": "hello"}],
-                "provenance": {"citations": ["doc://1"]},
+                "provenance": {
+                    "provenance_version": "1",
+                    "workspace_id": workspace_id,
+                    "policy_decision_id": "01HPOLICYTRACK000000000000",
+                    "query_id": "01HRETRIEVE0000000000000000",
+                    "build_id": "build_retrieve_1",
+                    "datasets_used": ["dataset-1"],
+                    "allowed_dataset_ids": ["dataset-1"],
+                    "citations": ["doc://1"],
+                },
             }
         if url.endswith("/api/v1/gateway/policy/simulate"):
             return {
@@ -176,7 +224,14 @@ def test_ai_service_ai_track_endpoints_return_success(tmp_path: Path) -> None:
                     "resource_attributes": {"dataset_id": "dataset-1"},
                 },
             ),
-            ("/api/v1/ai/doc-qa", {"workspace_id": workspace_id, "question": "latest invoice"}),
+            (
+                "/api/v1/ai/doc-qa",
+                {
+                    "workspace_id": workspace_id,
+                    "question": "latest invoice",
+                    "dataset_ids": ["dataset-1"],
+                },
+            ),
             (
                 "/api/v1/ai/query-debug",
                 {
@@ -225,3 +280,54 @@ def test_ai_service_ai_track_endpoints_return_success(tmp_path: Path) -> None:
             assert response.status_code == 200, path
     finally:
         ai_service_app.request_json = original_request_json
+
+
+def test_ai_doc_qa_requires_dataset_ids(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, enabled=True, provider="mock")
+    Base.metadata.create_all(bind=get_engine(settings.database_url))
+    session_factory = get_session_factory(settings.database_url)
+    with session_factory() as session:
+        workspace_id = _seed_workspace_and_semantic_manifest(session)
+        session.commit()
+
+    client = TestClient(create_ai_service_app(settings_factory=lambda: settings))
+    response = client.post(
+        "/api/v1/ai/doc-qa",
+        headers=_auth_headers(),
+        json={"workspace_id": workspace_id, "question": "latest invoice"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["details"]["reason"] == "dataset_ids_required"
+
+
+def test_schema_evolution_advisor_returns_proposal_only_with_evidence_refs(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, enabled=True, provider="mock")
+    Base.metadata.create_all(bind=get_engine(settings.database_url))
+    session_factory = get_session_factory(settings.database_url)
+    with session_factory() as session:
+        workspace_id = _seed_workspace_and_semantic_manifest(session)
+        session.commit()
+
+    client = TestClient(create_ai_service_app(settings_factory=lambda: settings))
+    response = client.post(
+        "/api/v1/ai/schema-evolution-advisor",
+        headers=_auth_headers(),
+        json={
+            "workspace_id": workspace_id,
+            "observed_columns_by_entity": {"invoice": ["invoice_id", "gross_margin"]},
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "proposal_only"
+    assert body["auto_apply"] is False
+    assert int(body["proposal_count"]) >= 1
+    proposals = body["proposals"]
+    assert isinstance(proposals, list)
+    assert proposals
+    first = proposals[0]
+    assert isinstance(first.get("confidence"), (int, float))
+    assert first["requires_approval"] is True
+    assert first["auto_apply"] is False
+    assert isinstance(first.get("evidence_refs"), list)
+    assert first["evidence_refs"]

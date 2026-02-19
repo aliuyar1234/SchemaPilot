@@ -6,7 +6,7 @@ from backend.shared_domain.audit_models import AccessDecision, AuditEvent
 from backend.shared_domain.db import get_engine, get_session_factory
 from backend.shared_domain.ids import new_ulid
 from backend.shared_domain.metadata_models import Base, ReviewTask, RunRecord
-from tools.kpi_extract import extract_kpis
+from tools.kpi_extract import _evaluate_baseline_violations, extract_kpis
 
 
 def test_kpi_extract_derives_runtime_metrics_from_metadata(tmp_path: Path) -> None:
@@ -112,3 +112,25 @@ def test_kpi_extract_derives_runtime_metrics_from_metadata(tmp_path: Path) -> No
     assert metrics["review_queue_blocking_open_tasks"] == 1
     assert metrics["deterministic_rebuild_pass_rate"] == 1.0
     assert metrics["time_to_first_safe_answer_minutes"] is not None
+
+
+def test_kpi_extract_baseline_violations_detect_regressions() -> None:
+    payload = {
+        "run_success_rate": 0.25,
+        "security_regression_count": 2,
+        "deterministic_rebuild_pass_rate": None,
+        "time_to_first_safe_answer_minutes": 180.0,
+    }
+    baseline = {
+        "rules": {
+            "run_success_rate": {"min": 0.5, "allow_null": False},
+            "security_regression_count": {"max": 0, "allow_null": False},
+            "deterministic_rebuild_pass_rate": {"min": 0.9, "allow_null": False},
+            "time_to_first_safe_answer_minutes": {"max": 60.0, "allow_null": False},
+        }
+    }
+    violations = _evaluate_baseline_violations(payload=payload, baseline=baseline)
+    assert "run_success_rate:below_min:0.250000<0.500000" in violations
+    assert "security_regression_count:above_max:2.000000>0.000000" in violations
+    assert "deterministic_rebuild_pass_rate:value_missing" in violations
+    assert "time_to_first_safe_answer_minutes:above_max:180.000000>60.000000" in violations

@@ -28,13 +28,28 @@ from backend.shared_domain.query_templates import (
     render_query_template,
 )
 from cli.schemapilot_cli.analyze import analyze_workspace
+from cli.schemapilot_cli.breakglass import (
+    build_breakglass_decision_payload,
+    build_breakglass_request_payload,
+)
 from cli.schemapilot_cli.diag import generate_diag_bundle
 from cli.schemapilot_cli.doctor import run_doctor_preflight
+from cli.schemapilot_cli.packs import run_pack_sign, run_pack_verify
+from cli.schemapilot_cli.promote import (
+    build_promotion_import_payload,
+    load_promotion_bundle,
+    write_promotion_bundle,
+)
+from cli.schemapilot_cli.remediate import run_guided_remediation
+from cli.schemapilot_cli.slo import export_slo_snapshot, render_slo_csv
+from tools.auditor_export import export_auditor_bundle
 
 app = typer.Typer(help="SchemaPilot CLI")
 templates_app = typer.Typer(help="Gold template pack commands")
 plugins_app = typer.Typer(help="Plugin SDK helper commands")
 target_db_app = typer.Typer(help="Target database builder commands")
+slo_app = typer.Typer(help="SLO export commands")
+pack_app = typer.Typer(help="Pack signing and verification commands")
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_CP_AUTH_TOKEN = os.getenv("SCHEMAPILOT_CP_TOKEN", "local-platform-admin-token")
@@ -112,8 +127,26 @@ def _request_json(
         connection.close()
 
 
-def _as_dict(payload: dict[str, object] | list[dict[str, object]]) -> dict[str, object]:
+def _as_dict(payload: object) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
+
+
+def _as_int(value: object, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return default
+        try:
+            return int(stripped)
+        except ValueError:
+            return default
+    return default
 
 
 def _normalize_template_pack(pack: str | None) -> str | None:
@@ -222,6 +255,27 @@ def doctor(
 
 
 @app.command()
+def remediate(
+    remediation_id: str = typer.Argument(
+        ...,
+        help="Remediation ID from doctor findings (DR-####).",
+    ),
+    config_path: str | None = typer.Option(
+        None, "--config", help="Optional config file path (.json/.yaml)."
+    ),
+) -> None:
+    """Run safe local remediation or print exact manual fix steps."""
+    try:
+        result = run_guided_remediation(remediation_id, config_path=config_path)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if str(result.get("status", "manual_required")) == "manual_required":
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def init(
     profile: str = "team",
     interactive: bool = typer.Option(False, "--interactive/--no-interactive"),
@@ -253,8 +307,41 @@ def init(
         help="Output directory for generated template bundles.",
     ),
     gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help=(
+            "Run onboarding preset flow directly "
+            "(dropzone-team, filesystem-team, sharepoint-team, smb-team, legacy-dump-team)."
+        ),
+    ),
+    workspace_name: str = typer.Option("Preset Workspace", "--workspace-name"),
+    output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
+    source_root: str | None = typer.Option(None, "--source-root"),
+    connector_secret_ref: str | None = typer.Option(None, "--connector-secret-ref"),
+    provision_target_db: bool = typer.Option(
+        True,
+        "--provision-target-db/--no-provision-target-db",
+    ),
 ) -> None:
     """Generate local config skeleton."""
+    if preset is not None and preset.strip():
+        init_preset(
+            preset=preset,
+            workspace_name=workspace_name,
+            profile=profile,
+            output_root=output_root,
+            source_root=source_root,
+            connector_secret_ref=connector_secret_ref,
+            run_discover=run_discover,
+            wait_for_run=True if not wait_for_run else wait_for_run,
+            wait_timeout_seconds=wait_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            provision_target_db=provision_target_db,
+            api_base_url=api_base_url,
+            gateway_base_url=gateway_base_url,
+        )
+        return
     if interactive:
         init_interactive(
             api_base_url=api_base_url,
@@ -1663,11 +1750,11 @@ def breakglass_request(
     ttl_seconds: int = typer.Option(900, "--ttl-seconds"),
     api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
 ) -> None:
-    """Create break-glass request (TTL-bound, dual-approval)."""
+    """Create break-glass request (TTL-bound, profile approval policy)."""
     response = _request_json(
         "POST",
         f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests",
-        {"actor_id": actor_id, "ttl_seconds": max(ttl_seconds, 1)},
+        build_breakglass_request_payload(actor_id=actor_id, ttl_seconds=ttl_seconds),
     )
     typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
 
@@ -1697,7 +1784,10 @@ def breakglass_approve(
     response = _request_json(
         "POST",
         f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests/{request_id}/approve",
-        {"decision": decision, "decision_reason": reason},
+        build_breakglass_decision_payload(
+            decision=decision,
+            decision_reason=reason,
+        ),
     )
     typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
 
@@ -1744,6 +1834,53 @@ def diag_bundle(
         max_rows=max(max_rows, 1),
     )
     typer.echo(json.dumps(report, indent=2, sort_keys=True))
+
+
+@app.command("auditor-export")
+def auditor_export(
+    output: str = typer.Option("runtime/auditor/export.json", "--output"),
+    database_url: str = typer.Option(DEFAULT_DATABASE_URL, "--database-url"),
+    pack_registry: str = typer.Option("packs/registry.json", "--pack-registry"),
+    signing_key: str | None = typer.Option(None, "--signing-key"),
+) -> None:
+    """Export a governance-only auditor bundle (no raw data payloads)."""
+    report = export_auditor_bundle(
+        database_url=database_url,
+        output_path=Path(output),
+        packs_registry_path=Path(pack_registry),
+        signing_key=signing_key,
+    )
+    typer.echo(json.dumps(report, indent=2, sort_keys=True))
+
+
+@slo_app.command("export")
+def slo_export(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    database_url: str = typer.Option(DEFAULT_DATABASE_URL, "--database-url"),
+    format: str = typer.Option("json", "--format"),
+    role: str = typer.Option("platform_admin", "--role"),
+    redacted: bool = typer.Option(False, "--redacted/--full"),
+) -> None:
+    """Export SLO/SLA telemetry in JSON or CSV."""
+    try:
+        payload = export_slo_snapshot(
+            database_url=database_url,
+            workspace_id=workspace,
+            actor_role=role,
+            include_sensitive_breakdown=not redacted,
+        )
+    except PermissionError as exc:
+        typer.echo("Sensitive SLO export denied for role.", err=True)
+        raise typer.Exit(code=1) from exc
+    normalized_format = format.strip().lower()
+    if normalized_format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if normalized_format == "csv":
+        typer.echo(render_slo_csv(payload), nl=False)
+        return
+    typer.echo("Unsupported format. Use json or csv.", err=True)
+    raise typer.Exit(code=1)
 
 
 @app.command("catalog-export")
@@ -1869,9 +2006,7 @@ def promotion_export(
         {},
     )
     body = _as_dict(response)
-    path = Path(output)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
+    path = write_promotion_bundle(output_path=output, payload=body)
     typer.echo(json.dumps({"output_path": path.as_posix(), "workspace_id": workspace}, indent=2))
 
 
@@ -1885,28 +2020,24 @@ def promotion_import(
     api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
 ) -> None:
     """Import a signed promotion bundle with optional policy diff gates."""
-    path = Path(bundle_path)
-    if not path.exists():
-        typer.echo(f"Bundle not found: {path.as_posix()}", err=True)
-        raise typer.Exit(code=1)
-    payload = _as_dict(json.loads(path.read_text(encoding="utf-8")))
-    request_payload: dict[str, object] = {
-        "bundle": payload.get("bundle", {}),
-        "signature": payload.get("signature", {}),
-    }
-    if before_report and after_report:
-        before_path = Path(before_report)
-        after_path = Path(after_report)
-        if not before_path.exists() or not after_path.exists():
-            typer.echo("Policy report path missing.", err=True)
-            raise typer.Exit(code=1)
-        request_payload["before_policy_report"] = json.loads(
-            before_path.read_text(encoding="utf-8")
+    try:
+        payload = load_promotion_bundle(bundle_path)
+    except FileNotFoundError:
+        typer.echo(f"Bundle not found: {Path(bundle_path).as_posix()}", err=True)
+        raise typer.Exit(code=1) from None
+    except (json.JSONDecodeError, ValueError) as exc:
+        typer.echo(f"Invalid bundle payload: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    try:
+        request_payload = build_promotion_import_payload(
+            bundle_payload=payload,
+            before_policy_report_path=before_report,
+            after_policy_report_path=after_report,
+            protected_scenario_ids=protected_scenario_id,
         )
-        request_payload["after_policy_report"] = json.loads(
-            after_path.read_text(encoding="utf-8")
-        )
-        request_payload["protected_scenario_ids"] = protected_scenario_id
+    except FileNotFoundError:
+        typer.echo("Policy report path missing.", err=True)
+        raise typer.Exit(code=1) from None
     response = _request_json(
         "POST",
         f"{api_base_url}/api/v1/workspaces/{workspace}/promotion/import",
@@ -1931,12 +2062,17 @@ def _resolve_onboarding_preset(
     output_root: str,
 ) -> tuple[str, str, dict[str, object], dict[str, object]]:
     normalized = preset.strip().lower()
-    if normalized in {"dropzone-team", "filesystem-team"}:
+    if normalized in {"dropzone-team", "filesystem-team", "legacy-dump-team"}:
         scenario = generate_demo_scenario(output_root=output_root)
         source_root = source_root_override or scenario.exports_path
-        source_type = "dropzone" if normalized == "dropzone-team" else "filesystem"
+        if normalized == "dropzone-team":
+            source_type = "dropzone"
+        elif normalized == "legacy-dump-team":
+            source_type = "db_dump"
+        else:
+            source_type = "filesystem"
         scope: dict[str, object] = {"root_path": source_root}
-        if source_type == "dropzone":
+        if source_type in {"dropzone", "db_dump"}:
             manifest_payload = json.loads(Path(scenario.manifest_path).read_text(encoding="utf-8"))
             exports_raw = manifest_payload.get("exports", [])
             exports = [str(item) for item in exports_raw if str(item).strip()]
@@ -1950,33 +2086,122 @@ def _resolve_onboarding_preset(
             {"root_path": source_root},
             {"status": "not_generated", "reason": "sharepoint_preset_no_local_demo_data"},
         )
-    raise ValueError("Unsupported preset. Use dropzone-team, filesystem-team or sharepoint-team.")
-
-
-@app.command("init-preset")
-def init_preset(
-    preset: str = typer.Option("dropzone-team", "--preset"),
-    workspace_name: str = typer.Option("Preset Workspace", "--workspace-name"),
-    profile: str = typer.Option("team", "--profile"),
-    output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
-    source_root: str | None = typer.Option(None, "--source-root"),
-    run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
-    wait_for_run: bool = typer.Option(True, "--wait-for-run/--no-wait-for-run"),
-    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
-    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
-    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
-    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
-) -> None:
-    """Guided onboarding presets (dropzone-team/filesystem-team/sharepoint-team)."""
-    try:
-        resolved_source_type, resolved_root, scope, demo_data = _resolve_onboarding_preset(
-            preset=preset,
-            source_root_override=source_root,
-            output_root=output_root,
+    if normalized == "smb-team":
+        source_root = source_root_override or "//fileserver/shared"
+        return (
+            "smb",
+            source_root,
+            {"root_path": source_root},
+            {"status": "not_generated", "reason": "smb_preset_no_local_demo_data"},
         )
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+    raise ValueError(
+        "Unsupported preset. Use dropzone-team, filesystem-team, "
+        "sharepoint-team, smb-team or legacy-dump-team."
+    )
+
+
+def _require_connector_secret_ref(
+    *, source_type: str, connector_secret_ref: str | None
+) -> str | None:
+    if source_type not in {"sharepoint", "smb"}:
+        return None
+    normalized = str(connector_secret_ref or "").strip()
+    if normalized:
+        return normalized
+    raise ValueError(
+        "Remote preset requires --connector-secret-ref (missing secrets). "
+        "Run `schemapilot doctor` and configure secrets store reachability."
+    )
+
+
+def _emit_onboarding_preset_event(
+    *,
+    api_base_url: str,
+    workspace_id: str,
+    event_type: str,
+    event_payload: dict[str, object],
+) -> None:
+    _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace_id}/onboarding/events",
+        {"event_type": event_type, "event_payload": event_payload},
+    )
+
+
+def _blocking_review_task_ids(
+    *, api_base_url: str, workspace_id: str
+) -> tuple[dict[str, object], list[str]]:
+    summary = _as_dict(
+        _request_json(
+            "GET",
+            f"{api_base_url}/api/v1/workspaces/{workspace_id}/review_tasks/summary",
+        )
+    )
+    tasks_raw = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace_id}/review_tasks",
+    )
+    tasks = tasks_raw if isinstance(tasks_raw, list) else []
+    blocking_ids = sorted(
+        {
+            str(task.get("task_id", "")).strip()
+            for task in tasks
+            if isinstance(task, dict)
+            and bool(task.get("blocking", False))
+            and str(task.get("status", "")).strip().lower() in {"open", "in_review"}
+            and str(task.get("task_id", "")).strip()
+        }
+    )
+    if not blocking_ids and _as_int(summary.get("blocking_open_tasks"), default=0) > 0:
+        blocking_ids = ["<blocking_tasks_present_open_review_queue>"]
+    return summary, blocking_ids
+
+
+def _extract_plan_checksum(
+    *, plan_response: dict[str, object], plan_observed: dict[str, object]
+) -> str:
+    observed_output_raw = plan_observed.get("output_refs", {})
+    observed_output = observed_output_raw if isinstance(observed_output_raw, dict) else {}
+    candidate_values = [
+        str(observed_output.get("plan_checksum", "")).strip(),
+        str(observed_output.get("expected_plan_checksum", "")).strip(),
+        str(_as_dict(plan_response.get("plan", {})).get("plan_checksum", "")).strip(),
+        str(plan_response.get("plan_checksum", "")).strip(),
+    ]
+    for candidate in candidate_values:
+        if candidate:
+            return candidate
+    return ""
+
+
+def _run_onboarding_preset(
+    *,
+    preset: str,
+    workspace_name: str,
+    profile: str,
+    output_root: str,
+    source_root: str | None,
+    connector_secret_ref: str | None,
+    run_discover: bool,
+    wait_for_run: bool,
+    wait_timeout_seconds: int,
+    poll_interval_seconds: float,
+    provision_target_db: bool,
+    api_base_url: str,
+    gateway_base_url: str,
+) -> None:
+    resolved_source_type, resolved_root, scope, demo_data = _resolve_onboarding_preset(
+        preset=preset,
+        source_root_override=source_root,
+        output_root=output_root,
+    )
+    credentials_ref = _require_connector_secret_ref(
+        source_type=resolved_source_type,
+        connector_secret_ref=connector_secret_ref,
+    )
+    if credentials_ref is not None:
+        scope = dict(scope)
+        scope["credentials_ref"] = credentials_ref
 
     workspace_response = _request_json(
         "POST",
@@ -1995,6 +2220,16 @@ def init_preset(
             "source_type": resolved_source_type,
             "scope": scope,
             "display_name": resolved_root,
+        },
+    )
+    _emit_onboarding_preset_event(
+        api_base_url=api_base_url,
+        workspace_id=workspace_id,
+        event_type="onboarding.preset_started",
+        event_payload={
+            "preset": preset.strip().lower(),
+            "source_type": resolved_source_type,
+            "workspace_name": workspace_name,
         },
     )
 
@@ -2017,9 +2252,150 @@ def init_preset(
                 poll_interval_seconds=poll_interval_seconds,
             )
 
+    review_summary, blocking_task_ids = _blocking_review_task_ids(
+        api_base_url=api_base_url,
+        workspace_id=workspace_id,
+    )
+    if blocking_task_ids:
+        blocked_payload: dict[str, object] = {
+            "preset": preset.strip().lower(),
+            "workspace_id": workspace_id,
+            "blocking_task_ids": blocking_task_ids,
+            "review_summary": review_summary,
+        }
+        _emit_onboarding_preset_event(
+            api_base_url=api_base_url,
+            workspace_id=workspace_id,
+            event_type="onboarding.blocked",
+            event_payload=blocked_payload,
+        )
+        next_actions = [
+            f"schemapilot status --workspace {workspace_id}",
+            (
+                "Resolve blocking review tasks first: "
+                + ", ".join(task_id for task_id in blocking_task_ids if task_id)
+            ),
+            "schemapilot doctor",
+        ]
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "preset": preset.strip().lower(),
+                    "workspace_id": workspace_id,
+                    "source": _as_dict(source_response),
+                    "run": run_response,
+                    "run_observed": run_observed,
+                    "review_summary": review_summary,
+                    "blocking_task_ids": blocking_task_ids,
+                    "next_actions": next_actions,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1)
+
+    target_db_response: dict[str, object] = {}
+    provision_plan_response: dict[str, object] = {}
+    provision_plan_observed: dict[str, object] = {}
+    provision_apply_response: dict[str, object] = {}
+    provision_apply_observed: dict[str, object] = {}
+
+    if provision_target_db:
+        target_db_response = _as_dict(
+            _request_json(
+                "POST",
+                f"{api_base_url}/api/v1/workspaces/{workspace_id}/target-dbs",
+                {
+                    "name": "preset-serving-db",
+                    "db_type": "sqlite",
+                    "mode": "managed",
+                    "connection": {},
+                    "credential_refs": {},
+                },
+            )
+        )
+        target_db_payload = _as_dict(target_db_response.get("target_db", {}))
+        target_db_id = str(target_db_payload.get("target_db_id", "")).strip()
+        if not target_db_id:
+            typer.echo("Target DB creation did not return target_db_id.", err=True)
+            raise typer.Exit(code=1)
+
+        provision_plan_response = _as_dict(
+            _request_json(
+                "POST",
+                f"{api_base_url}/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/provision/plan",
+                {},
+            )
+        )
+        provision_plan_run_id = str(provision_plan_response.get("run_id", "")).strip()
+        if wait_for_run and provision_plan_run_id:
+            provision_plan_observed = _wait_for_run_completion(
+                api_base_url=api_base_url,
+                workspace_id=workspace_id,
+                run_id=provision_plan_run_id,
+                timeout_seconds=wait_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+        plan_id = str(_as_dict(provision_plan_response.get("plan", {})).get("plan_id", "")).strip()
+        plan_checksum = _extract_plan_checksum(
+            plan_response=provision_plan_response,
+            plan_observed=provision_plan_observed,
+        )
+        if not plan_id or not plan_checksum:
+            typer.echo(
+                "Target DB provision plan did not return plan_id/checksum. "
+                "Run `schemapilot doctor` and inspect target DB planner.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        provision_apply_response = _as_dict(
+            _request_json(
+                "POST",
+                f"{api_base_url}/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/provision/apply",
+                {"plan_id": plan_id, "expected_plan_checksum": plan_checksum},
+            )
+        )
+        provision_apply_run_id = str(provision_apply_response.get("run_id", "")).strip()
+        if wait_for_run and provision_apply_run_id:
+            provision_apply_observed = _wait_for_run_completion(
+                api_base_url=api_base_url,
+                workspace_id=workspace_id,
+                run_id=provision_apply_run_id,
+                timeout_seconds=wait_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+    first_query = _as_dict(
+        _request_json(
+            "POST",
+            f"{gateway_base_url}/api/v1/gateway/query",
+            {
+                "workspace_id": workspace_id,
+                "query": {"language": "sql", "text": "select 1 as one"},
+                "max_rows": 1,
+            },
+            auth_token=DEFAULT_GATEWAY_AUTH_TOKEN,
+        )
+    )
+
+    _emit_onboarding_preset_event(
+        api_base_url=api_base_url,
+        workspace_id=workspace_id,
+        event_type="onboarding.preset_completed",
+        event_payload={
+            "preset": preset.strip().lower(),
+            "workspace_id": workspace_id,
+            "run_id": str(run_response.get("run_id", "")),
+            "provision_target_db": provision_target_db,
+        },
+    )
     typer.echo(
         json.dumps(
             {
+                "status": "ok",
                 "preset": preset.strip().lower(),
                 "workspace_id": workspace_id,
                 "workspace_name": workspace_name,
@@ -2027,6 +2403,18 @@ def init_preset(
                 "source": _as_dict(source_response),
                 "run": run_response,
                 "run_observed": run_observed,
+                "review_summary": review_summary,
+                "blocking_task_ids": [],
+                "target_db": target_db_response,
+                "target_db_provision_plan": {
+                    "request": provision_plan_response,
+                    "run_observed": provision_plan_observed,
+                },
+                "target_db_provision_apply": {
+                    "request": provision_apply_response,
+                    "run_observed": provision_apply_observed,
+                },
+                "first_query": first_query,
                 "demo_data": demo_data,
                 "next_steps": _next_steps_payload(
                     workspace_id=workspace_id,
@@ -2038,6 +2426,47 @@ def init_preset(
             sort_keys=True,
         )
     )
+
+
+@app.command("init-preset")
+def init_preset(
+    preset: str = typer.Option("dropzone-team", "--preset"),
+    workspace_name: str = typer.Option("Preset Workspace", "--workspace-name"),
+    profile: str = typer.Option("team", "--profile"),
+    output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
+    source_root: str | None = typer.Option(None, "--source-root"),
+    connector_secret_ref: str | None = typer.Option(None, "--connector-secret-ref"),
+    run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
+    wait_for_run: bool = typer.Option(True, "--wait-for-run/--no-wait-for-run"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    provision_target_db: bool = typer.Option(
+        True,
+        "--provision-target-db/--no-provision-target-db",
+    ),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Guided onboarding presets with deterministic first-hour completion."""
+    try:
+        _run_onboarding_preset(
+            preset=preset,
+            workspace_name=workspace_name,
+            profile=profile,
+            output_root=output_root,
+            source_root=source_root,
+            connector_secret_ref=connector_secret_ref,
+            run_discover=run_discover,
+            wait_for_run=wait_for_run,
+            wait_timeout_seconds=wait_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            provision_target_db=provision_target_db,
+            api_base_url=api_base_url,
+            gateway_base_url=gateway_base_url,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command("first-hour")
@@ -2228,9 +2657,81 @@ def templates_apply(
     typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
+@pack_app.command("verify")
+def pack_verify(
+    registry: str = typer.Option("packs/registry.json", "--registry"),
+    matrix: str = typer.Option("packs/compatibility_matrix.json", "--matrix"),
+    signing_key: str | None = typer.Option(None, "--signing-key"),
+) -> None:
+    """Verify signed pack registry metadata."""
+    result = run_pack_verify(registry_path=registry, matrix_path=matrix, signing_key=signing_key)
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    status = str(result.get("status", "fail")).strip().lower()
+    if status != "ok":
+        exit_code_raw = result.get("exit_code", 1)
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        raise typer.Exit(code=exit_code)
+
+
+@pack_app.command("sign")
+def pack_sign(
+    registry: str = typer.Option("packs/registry.json", "--registry"),
+    matrix: str = typer.Option("packs/compatibility_matrix.json", "--matrix"),
+    signing_key: str | None = typer.Option(None, "--signing-key"),
+    key_id: str = typer.Option("local-dev-v1", "--key-id"),
+) -> None:
+    """Write deterministic signatures for pack registry entries."""
+    result = run_pack_sign(
+        registry_path=registry,
+        matrix_path=matrix,
+        signing_key=signing_key,
+        key_id=key_id,
+    )
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    status = str(result.get("status", "fail")).strip().lower()
+    if status != "ok":
+        exit_code_raw = result.get("exit_code", 1)
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        raise typer.Exit(code=exit_code)
+
+
+@plugins_app.command("verify")
+def plugins_verify(
+    registry: str = typer.Option("plugins/registry.json", "--registry"),
+    signing_key: str | None = typer.Option(None, "--signing-key"),
+) -> None:
+    """Verify plugin registry hash/signature metadata."""
+    command = [sys.executable, "tools/plugin_verify.py", "--registry", registry]
+    if signing_key is not None and signing_key.strip():
+        command.extend(["--signing-key", signing_key])
+    _run(command)
+
+
+@plugins_app.command("sign")
+def plugins_sign(
+    registry: str = typer.Option("plugins/registry.json", "--registry"),
+    signing_key: str | None = typer.Option(None, "--signing-key"),
+    key_id: str = typer.Option("local-dev-v1", "--key-id"),
+) -> None:
+    """Write deterministic plugin hash/signature metadata."""
+    command = [
+        sys.executable,
+        "tools/plugin_sign.py",
+        "--registry",
+        registry,
+        "--key-id",
+        key_id,
+    ]
+    if signing_key is not None and signing_key.strip():
+        command.extend(["--signing-key", signing_key])
+    _run(command)
+
+
 app.add_typer(templates_app, name="templates")
 app.add_typer(plugins_app, name="plugins")
 app.add_typer(target_db_app, name="target-db")
+app.add_typer(slo_app, name="slo")
+app.add_typer(pack_app, name="pack")
 
 
 @plugins_app.command("scaffold")

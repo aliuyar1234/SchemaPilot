@@ -47,7 +47,9 @@ def test_run_processor_persists_and_reuses_connector_cursor_state(
     monkeypatch.setattr(
         run_processor,
         "load_connector_plugin_specs",
-        lambda: {"custom": ConnectorPluginSpec(name="custom", plugin=plugin, entrypoint=None)},
+        lambda **kwargs: {
+            "custom": ConnectorPluginSpec(name="custom", plugin=plugin, entrypoint=None)
+        },
     )
     session_factory = _session_factory(tmp_path)
     storage_root = (tmp_path / "storage").as_posix()

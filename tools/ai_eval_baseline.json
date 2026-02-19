@@ -1,0 +1,12 @@
+{
+  "min_pass_rate": 1.0,
+  "min_passed_cases": 6,
+  "required_case_ids": [
+    "AI-CITATION-COMPLETENESS-GATE",
+    "AI-DOCQA-STATUS-200",
+    "AI-POLICY-DENIAL-UNAUTH",
+    "AI-PROVENANCE-QUERY-ID",
+    "AI-SQL-CITATIONS-NONEMPTY",
+    "AI-SQL-STATUS-200"
+  ]
+}

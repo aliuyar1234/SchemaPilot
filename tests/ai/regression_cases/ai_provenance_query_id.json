@@ -1,0 +1,6 @@
+{
+  "case_id": "AI-PROVENANCE-QUERY-ID",
+  "description": "AI SQL provenance must carry a gateway query id.",
+  "path": "ask_sql.provenance.query_id",
+  "op": "not_empty"
+}

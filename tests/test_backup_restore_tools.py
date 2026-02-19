@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from tools.backup import backup_runtime_state
 from tools.restore import restore_runtime_state
 
@@ -53,3 +55,25 @@ def test_backup_and_restore_tools_roundtrip(tmp_path: Path) -> None:
         ).fetchone()
     assert row is not None
     assert row[0] == "succeeded"
+
+
+def test_restore_runtime_state_fails_closed_when_metadata_missing(tmp_path: Path) -> None:
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "storage").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValueError, match="backup_metadata_db_missing"):
+        restore_runtime_state(
+            backup_dir=backup_dir,
+            restore_dir=tmp_path / "restored",
+        )
+
+
+def test_restore_runtime_state_fails_closed_when_storage_missing(tmp_path: Path) -> None:
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "metadata.db").write_text("placeholder", encoding="utf-8")
+    with pytest.raises(ValueError, match="backup_storage_missing"):
+        restore_runtime_state(
+            backup_dir=backup_dir,
+            restore_dir=tmp_path / "restored",
+        )

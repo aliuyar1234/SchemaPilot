@@ -71,7 +71,7 @@ from backend.shared_domain.observability import (
     observe_query_latency,
     render_metrics,
 )
-from backend.shared_domain.provenance import build_provenance_v1
+from backend.shared_domain.provenance import build_provenance_v1, build_provenance_v2
 from backend.shared_domain.rate_limit import InMemoryActorRateLimiter
 from backend.shared_domain.retrieval import load_retrieval_corpus, retrieve_documents
 from backend.shared_domain.tokenization import TokenizationVault
@@ -266,6 +266,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             session_factory=session_factory,
             workspace_id=workspace_id,
             actor_id=str(actor_dict.get("actor_id", "unknown")),
+            correlation_id=request.state.request_id,
         )
         if active_breakglass is not None:
             roles_raw = actor_dict.get("roles", [])
@@ -278,8 +279,18 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             merged_attributes["breakglass_request_id"] = str(
                 active_breakglass.get("request_id", "")
             )
+            merged_attributes["breakglass_expires_epoch"] = _coerce_int(
+                active_breakglass.get("expires_epoch"),
+                default=0,
+            )
             actor_attributes = merged_attributes
             actor_dict["attributes"] = merged_attributes
+            request_context["breakglass"] = True
+            request_context["breakglass_request_id"] = str(
+                merged_attributes.get("breakglass_request_id", "")
+            )
+        else:
+            request_context["breakglass"] = False
         allowlisted_ai = bool(actor_attributes.get("ai_allowlisted", False))
         decision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
         if decision.result != "allow":
@@ -831,6 +842,16 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         resolved_build_id = str(query_execution_metadata.get("current_build_id", "")).strip()
         build_id = resolved_build_id or new_ulid()
         query_id = new_ulid()
+        query_citations = _build_query_citations(
+            query_id=query_id,
+            build_id=build_id,
+            datasets_used=datasets_used,
+        )
+        query_engine_type = (
+            str(query_execution_metadata.get("engine", settings.query_engine)).strip()
+            or settings.query_engine
+        )
+        query_evidence_refs = [f"evidence://gateway/query/{workspace_id}/{query_id}"]
         try:
             provenance = build_provenance_v1(
                 workspace_id=workspace_id,
@@ -842,11 +863,39 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 decision_reason="allow",
                 applied_filters=_serialize_row_filter(abac.row_filter),
                 applied_masks=abac.masks,
+                citations=query_citations,
                 policy_pack=effective_policy_pack,
                 target_db_id=str(query_execution_metadata.get("target_db_id", "")).strip() or None,
                 target_schema_ref=(
                     str(query_execution_metadata.get("current_schema_ref", "")).strip() or None
                 ),
+                breakglass_active=bool(actor_attributes.get("breakglass", False)),
+                breakglass_request_id=(
+                    str(actor_attributes.get("breakglass_request_id", "")).strip() or None
+                ),
+            )
+            provenance_v2 = build_provenance_v2(
+                workspace_id=workspace_id,
+                policy_decision_id=policy_decision_id,
+                query_id=query_id,
+                build_id=build_id,
+                datasets_used=datasets_used,
+                snapshots=[],
+                decision_reason="allow",
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                citations=query_citations,
+                policy_pack=effective_policy_pack,
+                target_db_id=str(query_execution_metadata.get("target_db_id", "")).strip() or None,
+                target_schema_ref=(
+                    str(query_execution_metadata.get("current_schema_ref", "")).strip() or None
+                ),
+                breakglass_active=bool(actor_attributes.get("breakglass", False)),
+                breakglass_request_id=(
+                    str(actor_attributes.get("breakglass_request_id", "")).strip() or None
+                ),
+                engine_type=query_engine_type,
+                evidence_bundle_refs=query_evidence_refs,
             )
         except ValueError as exc:
             reason = "provenance_unavailable"
@@ -904,6 +953,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "query_budget_bytes": query_budget_bytes,
                 "query_budget_source": budget_resolution.get("source", "default"),
                 "breakglass": bool(actor_attributes.get("breakglass", False)),
+                "breakglass_request_id": (
+                    str(actor_attributes.get("breakglass_request_id", "")).strip() or None
+                ),
                 "query_engine_metadata": query_execution_metadata,
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
@@ -926,6 +978,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "row_count": len(masked_rows),
             },
             "provenance": provenance,
+            "provenance_v2": provenance_v2,
             "query_budget": {
                 "bytes": query_budget_bytes,
                 "source": budget_resolution.get("source", "default"),
@@ -1334,6 +1387,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             session_factory=session_factory,
             workspace_id=workspace_id,
             actor_id=str(actor_dict.get("actor_id", "unknown")),
+            correlation_id=request.state.request_id,
         )
         if active_breakglass is not None:
             roles_raw = actor_dict.get("roles", [])
@@ -1346,7 +1400,17 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             attributes_dict["breakglass_request_id"] = str(
                 active_breakglass.get("request_id", "")
             )
+            attributes_dict["breakglass_expires_epoch"] = _coerce_int(
+                active_breakglass.get("expires_epoch"),
+                default=0,
+            )
             actor_dict["attributes"] = attributes_dict
+            request_context["breakglass"] = True
+            request_context["breakglass_request_id"] = str(
+                attributes_dict.get("breakglass_request_id", "")
+            )
+        else:
+            request_context["breakglass"] = False
         actor_type = str(actor_dict.get("actor_type", "")).lower()
         allowlisted_ai = actor_type == "ai" and bool(attributes_dict.get("ai_allowlisted", False))
         decision: AccessDecision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
@@ -1439,9 +1503,86 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "Access denied by policy",
                 details={"reason": reason, "policy_decision_id": policy_decision_id},
             )
+        requested_dataset_ids_raw = payload.get("dataset_ids", [])
+        requested_dataset_ids = (
+            sorted({str(item).strip() for item in requested_dataset_ids_raw if str(item).strip()})
+            if isinstance(requested_dataset_ids_raw, list)
+            else []
+        )
+        effective_allowed_dataset_ids = set(allowed_dataset_ids)
+        if actor_type == "ai":
+            if not requested_dataset_ids:
+                reason = "retrieval_dataset_ids_required"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={"endpoint": "retrieve"},
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.retrieve",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="retrieve",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={"reason": reason, "policy_decision_id": policy_decision_id},
+                )
+            unauthorized_requested_dataset_ids = sorted(
+                dataset_id
+                for dataset_id in requested_dataset_ids
+                if dataset_id not in allowed_dataset_ids
+            )
+            if unauthorized_requested_dataset_ids:
+                reason = "dataset_not_allowed"
+                _record_access_decision(
+                    session_factory(),
+                    workspace_id=workspace_id,
+                    actor_id=str(actor_dict.get("actor_id", "unknown")),
+                    result="deny",
+                    reason=reason,
+                    request_context=request_context,
+                    resources={
+                        "endpoint": "retrieve",
+                        "requested_dataset_ids": requested_dataset_ids,
+                        "unauthorized_dataset_ids": unauthorized_requested_dataset_ids,
+                    },
+                    applied_filters={},
+                    applied_masks={},
+                    policy_decision_id=policy_decision_id,
+                    event_type="gateway.retrieve",
+                    correlation_id=request.state.request_id,
+                )
+                increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                observe_query_latency(
+                    workspace_id=workspace_id,
+                    engine="retrieve",
+                    result="deny",
+                    latency_ms=(perf_counter() - started_at) * 1000.0,
+                )
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": reason,
+                        "policy_decision_id": policy_decision_id,
+                        "requested_dataset_ids": requested_dataset_ids,
+                        "unauthorized_dataset_ids": unauthorized_requested_dataset_ids,
+                    },
+                )
+            effective_allowed_dataset_ids = set(requested_dataset_ids)
         cross_workspace_dataset_ids = sorted(
             dataset_id
-            for dataset_id in allowed_dataset_ids
+            for dataset_id in effective_allowed_dataset_ids
             if _dataset_belongs_to_other_workspace(
                 session_factory=session_factory,
                 workspace_id=workspace_id,
@@ -1520,7 +1661,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 results = retrieve_documents(
                     query_text=query_text,
                     corpus=corpus,
-                    allowed_dataset_ids=allowed_dataset_ids,
+                    allowed_dataset_ids=effective_allowed_dataset_ids,
                 )
             elif settings.retrieval_backend == "opensearch":
                 if not settings.opensearch_enabled:
@@ -1557,7 +1698,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     results = search_opensearch_documents(
                         query_text=query_text,
                         workspace_id=workspace_id,
-                        allowed_dataset_ids=allowed_dataset_ids,
+                        allowed_dataset_ids=effective_allowed_dataset_ids,
                         base_url=settings.opensearch_url,
                         index_name=settings.opensearch_index,
                         timeout_ms=settings.opensearch_timeout_ms,
@@ -1631,7 +1772,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     results = search_qdrant_documents(
                         query_vector=query_vector,
                         workspace_id=workspace_id,
-                        allowed_dataset_ids=allowed_dataset_ids,
+                        allowed_dataset_ids=effective_allowed_dataset_ids,
                         base_url=settings.qdrant_url,
                         collection_name=settings.qdrant_collection,
                         timeout_ms=settings.qdrant_timeout_ms,
@@ -1804,20 +1945,46 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         citations = [str(item.get("citation", "")) for item in results if item.get("citation")]
         dataset_ids = sorted({str(item.get("dataset_id", "")) for item in results})
         query_id = new_ulid()
+        retrieval_build_id = new_ulid()
+        retrieval_evidence_refs = [f"evidence://gateway/retrieve/{workspace_id}/{query_id}"]
         try:
             provenance = build_provenance_v1(
                 workspace_id=workspace_id,
                 policy_decision_id=policy_decision_id,
                 query_id=query_id,
-                build_id=new_ulid(),
+                build_id=retrieval_build_id,
                 datasets_used=dataset_ids,
                 snapshots=[],
                 decision_reason="allow",
                 applied_filters=_serialize_row_filter(abac.row_filter),
                 applied_masks=abac.masks,
                 citations=citations,
-                allowed_dataset_ids=sorted(allowed_dataset_ids),
+                allowed_dataset_ids=sorted(effective_allowed_dataset_ids),
                 policy_pack=effective_policy_pack,
+                breakglass_active=bool(attributes_dict.get("breakglass", False)),
+                breakglass_request_id=(
+                    str(attributes_dict.get("breakglass_request_id", "")).strip() or None
+                ),
+            )
+            provenance_v2 = build_provenance_v2(
+                workspace_id=workspace_id,
+                policy_decision_id=policy_decision_id,
+                query_id=query_id,
+                build_id=retrieval_build_id,
+                datasets_used=dataset_ids,
+                snapshots=[],
+                decision_reason="allow",
+                applied_filters=_serialize_row_filter(abac.row_filter),
+                applied_masks=abac.masks,
+                citations=citations,
+                allowed_dataset_ids=sorted(effective_allowed_dataset_ids),
+                policy_pack=effective_policy_pack,
+                breakglass_active=bool(attributes_dict.get("breakglass", False)),
+                breakglass_request_id=(
+                    str(attributes_dict.get("breakglass_request_id", "")).strip() or None
+                ),
+                engine_type=f"retrieval:{settings.retrieval_backend}",
+                evidence_bundle_refs=retrieval_evidence_refs,
             )
         except ValueError as exc:
             reason = "provenance_unavailable"
@@ -1860,10 +2027,15 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             resources={
                 "endpoint": "retrieve",
                 "query_text": query_text,
-                "allowed_dataset_ids": sorted(allowed_dataset_ids),
+                "allowed_dataset_ids": sorted(effective_allowed_dataset_ids),
+                "requested_dataset_ids": requested_dataset_ids,
                 "datasets_used": dataset_ids,
                 "retrieval_backend": settings.retrieval_backend,
                 "policy_pack": effective_policy_pack,
+                "breakglass": bool(attributes_dict.get("breakglass", False)),
+                "breakglass_request_id": (
+                    str(attributes_dict.get("breakglass_request_id", "")).strip() or None
+                ),
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
             applied_masks=abac.masks,
@@ -1874,6 +2046,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
         return {
             "results": results,
             "provenance": provenance,
+            "provenance_v2": provenance_v2,
             "audit_event_id": new_ulid(),
             "request_id": request.state.request_id,
         }
@@ -1883,6 +2056,16 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
 def _request_context(payload: dict[str, object]) -> dict[str, object]:
     return {k: v for k, v in payload.items() if k not in {"actor", "corpus"}}
+
+
+def _build_query_citations(*, query_id: str, build_id: str, datasets_used: list[str]) -> list[str]:
+    normalized_query_id = query_id.strip() or "unknown-query"
+    normalized_build_id = build_id.strip() or "unknown-build"
+    dataset_ids = sorted({str(item).strip() for item in datasets_used if str(item).strip()})
+    return [
+        f"sp://query/{normalized_query_id}/dataset/{dataset_id}/build/{normalized_build_id}"
+        for dataset_id in dataset_ids
+    ]
 
 
 def _build_query_cache_key(
@@ -2192,8 +2375,11 @@ def _load_active_breakglass_grant(
     session_factory: Callable[[], Session],
     workspace_id: str,
     actor_id: str,
+    correlation_id: str,
 ) -> dict[str, object] | None:
     session = session_factory()
+    active_payload: dict[str, object] | None = None
+    auto_revoke_events: list[dict[str, object]] = []
     try:
         rows = (
             session.execute(
@@ -2206,28 +2392,130 @@ def _load_active_breakglass_grant(
             .scalars()
             .all()
         )
+        now_epoch = int(unix_time())
+        for row in rows:
+            try:
+                payload = json.loads(row.definition_ref)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            expires_epoch = _coerce_int(payload.get("expires_epoch"), default=0)
+            is_expired = bool(expires_epoch and expires_epoch < now_epoch)
+            if is_expired:
+                payload["status"] = "expired"
+                payload["expired_at_epoch"] = now_epoch
+                payload["expired_by"] = "system:auto"
+                row.definition_ref = json.dumps(payload, sort_keys=True)
+                row.status = "expired"
+                request_id = str(payload.get("request_id", "")).strip()
+                if request_id:
+                    request_row = session.get(GovernancePolicy, request_id)
+                    if (
+                        request_row is not None
+                        and request_row.workspace_id == workspace_id
+                        and request_row.policy_type == "breakglass_request"
+                        and request_row.status == "active"
+                    ):
+                        try:
+                            request_payload = json.loads(request_row.definition_ref)
+                        except json.JSONDecodeError:
+                            request_payload = {}
+                        if isinstance(request_payload, dict):
+                            request_payload["status"] = "expired"
+                            request_payload["expired_at_epoch"] = now_epoch
+                            request_payload["expired_by"] = "system:auto"
+                            request_row.definition_ref = json.dumps(
+                                request_payload, sort_keys=True
+                            )
+                            request_row.status = "expired"
+                auto_revoke_event = {
+                    "workspace_id": workspace_id,
+                    "actor_id": str(payload.get("actor_id", "")).strip() or actor_id,
+                    "request_id": str(payload.get("request_id", "")).strip(),
+                    "grant_policy_id": row.policy_id,
+                    "expires_epoch": expires_epoch,
+                    "expired_at_epoch": now_epoch,
+                }
+                _enqueue_gateway_audit_event(
+                    session,
+                    workspace_id=workspace_id,
+                    actor_id=str(auto_revoke_event["actor_id"]),
+                    event_type="breakglass.auto_revoked",
+                    event_json=auto_revoke_event,
+                    correlation_id=correlation_id,
+                )
+                auto_revoke_events.append(auto_revoke_event)
+                continue
+            if str(payload.get("actor_id", "")).strip() != actor_id:
+                continue
+            if active_payload is None:
+                active_payload = payload
+        if auto_revoke_events:
+            session.commit()
+        return active_payload
+    except AuditSinkError as exc:
+        session.rollback()
+        increment_audit_write_failure(
+            workspace_id=workspace_id,
+            service="gateway",
+            operation="breakglass.auto_revoked",
+        )
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "audit_sink_unavailable", "operation": "breakglass.auto_revoked"},
+        ) from exc
+    except Exception as exc:
+        session.rollback()
+        increment_audit_write_failure(
+            workspace_id=workspace_id,
+            service="gateway",
+            operation="breakglass.auto_revoked",
+        )
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "audit_unavailable", "operation": "breakglass.auto_revoked"},
+        ) from exc
     finally:
         session.close()
-    now_epoch = int(unix_time())
-    for row in rows:
-        try:
-            payload = json.loads(row.definition_ref)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("actor_id", "")).strip() != actor_id:
-            continue
-        expires_epoch_raw = payload.get("expires_epoch", 0)
-        expires_epoch = (
-            int(expires_epoch_raw)
-            if isinstance(expires_epoch_raw, (int, float, str))
-            else 0
+
+
+def _enqueue_gateway_audit_event(
+    session: Session,
+    *,
+    workspace_id: str,
+    actor_id: str,
+    event_type: str,
+    event_json: dict[str, object],
+    correlation_id: str,
+) -> None:
+    event = AuditEvent(
+        audit_event_id=new_ulid(),
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        event_type=event_type,
+        event_json=event_json,
+        correlation_id=correlation_id,
+    )
+    session.add(event)
+    payload: dict[str, object] = {
+        "audit_event_id": event.audit_event_id,
+        "workspace_id": workspace_id,
+        "actor_id": actor_id,
+        "event_type": event_type,
+        "event_json": event_json,
+        "correlation_id": correlation_id,
+    }
+    if _AUDIT_SINK_MODE == "inline":
+        _ACTIVE_AUDIT_SINK.emit(payload)
+    else:
+        enqueue_audit_outbox_event(
+            session,
+            service="gateway",
+            workspace_id=workspace_id,
+            audit_event_id=event.audit_event_id,
+            payload=payload,
         )
-        if expires_epoch and expires_epoch < now_epoch:
-            continue
-        return payload
-    return None
 
 
 def _coerce_int(value: object, *, default: int) -> int:

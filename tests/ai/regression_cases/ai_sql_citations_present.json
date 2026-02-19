@@ -1,0 +1,6 @@
+{
+  "case_id": "AI-SQL-CITATIONS-NONEMPTY",
+  "description": "AI SQL answers must include citations.",
+  "path": "ask_sql.citations",
+  "op": "not_empty"
+}

@@ -37,6 +37,20 @@ def _create_workspace(client: TestClient) -> str:
     return str(response.json()["workspace_id"])
 
 
+def _create_workspace_with_profile(client: TestClient, *, profile: str) -> str:
+    response = client.post(
+        "/api/v1/workspaces",
+        json={
+            "name": f"CAP Workspace {profile}",
+            "profile": profile,
+            "security_baseline": "strict",
+        },
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert response.status_code == 200
+    return str(response.json()["workspace_id"])
+
+
 def _create_target_db(client: TestClient, workspace_id: str) -> str:
     response = client.post(
         f"/api/v1/workspaces/{workspace_id}/target-dbs",
@@ -87,7 +101,7 @@ def test_access_request_approve_creates_policy_task(tmp_path: Path) -> None:
     assert "generated_task" in body
 
 
-def test_breakglass_dual_approval_creates_grant(tmp_path: Path) -> None:
+def test_breakglass_team_single_approval_creates_grant(tmp_path: Path) -> None:
     client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
     workspace_id = _create_workspace(client)
     created = client.post(
@@ -103,6 +117,29 @@ def test_breakglass_dual_approval_creates_grant(tmp_path: Path) -> None:
         headers=_headers("local-data-steward-token"),
     )
     assert first.status_code == 200
+    body = first.json()
+    assert body["status"] == "active"
+    assert body["grant_policy_id"]
+
+
+def test_breakglass_enterprise_dual_approval_creates_grant(tmp_path: Path) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
+    workspace_id = _create_workspace_with_profile(client, profile="enterprise")
+    created = client.post(
+        f"/api/v1/workspaces/{workspace_id}/breakglass/requests",
+        json={"actor_id": "analyst-1", "ttl_seconds": 600},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert created.status_code == 200
+    request_id = str(created.json()["request_id"])
+    first = client.post(
+        f"/api/v1/workspaces/{workspace_id}/breakglass/requests/{request_id}/approve",
+        json={"decision": "approve"},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "pending"
+    assert "grant_policy_id" not in first.json()
     second = client.post(
         f"/api/v1/workspaces/{workspace_id}/breakglass/requests/{request_id}/approve",
         json={"decision": "approve"},
@@ -112,6 +149,38 @@ def test_breakglass_dual_approval_creates_grant(tmp_path: Path) -> None:
     body = second.json()
     assert body["status"] == "active"
     assert body["grant_policy_id"]
+
+
+def test_breakglass_ttl_exceed_is_blocked(tmp_path: Path) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
+    workspace_id = _create_workspace(client)
+    created = client.post(
+        f"/api/v1/workspaces/{workspace_id}/breakglass/requests",
+        json={"actor_id": "analyst-1", "ttl_seconds": 999999},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert created.status_code == 403
+    details = created.json()["error"]["details"]
+    assert details["reason"] == "invalid_breakglass_ttl"
+
+
+def test_breakglass_approve_requires_steward_or_admin_role(tmp_path: Path) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
+    workspace_id = _create_workspace(client)
+    created = client.post(
+        f"/api/v1/workspaces/{workspace_id}/breakglass/requests",
+        json={"actor_id": "analyst-1", "ttl_seconds": 600},
+        headers=_headers("local-data-steward-token"),
+    )
+    assert created.status_code == 200
+    request_id = str(created.json()["request_id"])
+    denied = client.post(
+        f"/api/v1/workspaces/{workspace_id}/breakglass/requests/{request_id}/approve",
+        json={"decision": "approve"},
+        headers=_headers("local-analyst-token"),
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"]["reason"] == "missing_required_role"
 
 
 def test_glossary_generate_and_export(tmp_path: Path) -> None:
@@ -166,15 +235,19 @@ def test_promotion_export_import_signature_gate(tmp_path: Path) -> None:
     )
     assert exported.status_code == 200
     payload = exported.json()
+    assert payload["bundle_checksum"]
+    assert payload["attestation"]["action"] == "export"
     imported = client.post(
         f"/api/v1/workspaces/{workspace_id}/promotion/import",
         json=payload,
         headers=_headers("local-platform-admin-token"),
     )
     assert imported.status_code == 200
+    assert imported.json()["attestation"]["action"] == "import"
+    assert imported.json()["bundle_checksum"] == payload["bundle_checksum"]
     tampered = dict(payload)
     bundle = dict(payload["bundle"])
-    bundle["generated_at_epoch"] = int(bundle.get("generated_at_epoch", 0)) + 1
+    bundle["workspace_profile"] = "tampered"
     tampered["bundle"] = bundle
     denied = client.post(
         f"/api/v1/workspaces/{workspace_id}/promotion/import",
@@ -182,7 +255,53 @@ def test_promotion_export_import_signature_gate(tmp_path: Path) -> None:
         headers=_headers("local-platform-admin-token"),
     )
     assert denied.status_code == 403
-    assert denied.json()["error"]["details"]["reason"] == "promotion_signature_invalid"
+    assert denied.json()["error"]["details"]["reason"] == "promotion_bundle_checksum_mismatch"
+
+
+def test_promotion_import_requires_policy_reports_for_enterprise_workspace(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(settings_factory=lambda: _settings(tmp_path)))
+    workspace_id = _create_workspace_with_profile(client, profile="enterprise")
+    exported = client.post(
+        f"/api/v1/workspaces/{workspace_id}/promotion/export",
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert exported.status_code == 200
+    payload = exported.json()
+    denied = client.post(
+        f"/api/v1/workspaces/{workspace_id}/promotion/import",
+        json=payload,
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"]["reason"] == "promotion_policy_reports_required"
+
+    report = {
+        "workspace_id": workspace_id,
+        "scenario_count": 1,
+        "scenarios": [
+            {
+                "id": "promotion-safe",
+                "result": "allow",
+                "reason": "allow",
+                "applied_masks": {},
+                "applied_filters": {},
+            }
+        ],
+    }
+    allowed = client.post(
+        f"/api/v1/workspaces/{workspace_id}/promotion/import",
+        json={
+            **payload,
+            "before_policy_report": report,
+            "after_policy_report": report,
+            "protected_scenario_ids": ["promotion-safe"],
+        },
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["policy_diff"]["status"] == "unchanged"
 
 
 def test_target_db_rotate_credentials_creates_run(tmp_path: Path) -> None:
@@ -206,6 +325,28 @@ def test_target_db_rotate_credentials_creates_run(tmp_path: Path) -> None:
         assert row.run_type == "TARGET_DB_ROTATE_CREDENTIALS"
     finally:
         session.close()
+
+
+def test_target_db_rotate_credentials_blocks_missing_external_refs(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings_factory=lambda: settings))
+    workspace_id = _create_workspace(client)
+    created = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs",
+        json={"name": "ext-db", "db_type": "postgres", "mode": "external"},
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert created.status_code == 200
+    target_db_id = str(created.json()["target_db"]["target_db_id"])
+    rotate = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/credentials/rotate",
+        json={"reason": "drill"},
+        headers=_headers("local-platform-admin-token"),
+    )
+    assert rotate.status_code == 403
+    details = rotate.json()["error"]["details"]
+    assert details["reason"] == "target_db_rotation_prerequisites_missing"
+    assert details["missing_roles"] == ["reader", "writer"]
 
 
 def test_publish_response_contains_build_attestation(tmp_path: Path) -> None:

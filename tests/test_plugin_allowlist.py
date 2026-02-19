@@ -47,7 +47,7 @@ def test_source_connect_denied_when_plugin_not_allowlisted(tmp_path: Path, monke
     assert workspace_response.status_code == 200
     workspace_id = workspace_response.json()["workspace_id"]
 
-    monkeypatch.setattr(control_plane_app, "load_connector_plugin_specs", lambda: {})
+    monkeypatch.setattr(control_plane_app, "load_connector_plugin_specs", lambda **kwargs: {})
     response = client.post(
         f"/api/v1/workspaces/{workspace_id}/sources",
         json={
@@ -75,7 +75,7 @@ def test_plugin_error_fails_closed_with_strict_ingest_evidence(tmp_path: Path, m
     monkeypatch.setattr(
         run_processor,
         "load_connector_plugin_specs",
-        lambda: {
+        lambda **kwargs: {
             "custom": ConnectorPluginSpec(
                 name="custom",
                 plugin=broken_plugin,

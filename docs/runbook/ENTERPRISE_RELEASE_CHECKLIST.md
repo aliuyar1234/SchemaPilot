@@ -19,6 +19,9 @@ Run and archive output:
 python tools/cleanroom_install_check.py
 python -m cli.schemapilot_cli.main doctor
 python -m cli.schemapilot_cli.main check
+python tools/ai_eval_harness.py --regression --output runtime/ai_eval/results_regression.json
+python tools/kpi_extract.py --enforce-baseline --output-root runtime/kpi
+python tools/plugin_verify.py
 python tools/ssot_verify.py
 python tools/verify_manifest.py
 ```
@@ -49,14 +52,18 @@ Evidence artifacts:
 | ER-010 | P1 | Document retrieval policy | Retrieve with allowed/denied dataset scopes | only allowed dataset results returned with citations | retrieve responses |
 | ER-011 | P1 | Prompt-injection resilience | Ingest malicious doc text and retrieve | content treated as data only; no control action triggered | retrieval logs + output |
 | ER-012 | P1 | Secrets hygiene | Run scanner + inspect logs | no leaked secrets; redaction works | scanner output + sampled logs |
-| ER-013 | P1 | Secrets rotation drill | `python tools/secrets_rotation_drill.py` | drill passes and report generated | `runtime/secrets_rotation_drill/report.json` |
-| ER-014 | P0 | Backup/restore drill | `python tools/backup_restore_drill.py` | `PASS CHK-BACKUP-RESTORE`; restored state valid | `runtime/backup_restore_drill/report.json` |
+| ER-013 | P1 | Secrets rotation drill | `python tools/rotation_drill.py` | drill passes, rotates reader/writer refs, validates JWKS cache invalidation | `runtime/rotation_drill/report.json` |
+| ER-013A | P0 | Break-glass drill | `python tools/breakglass_drill.py` | `PASS breakglass drill`; query provenance includes breakglass tags; expired grant auto-revokes with audit event | `runtime/breakglass_drill/report.json` |
+| ER-014 | P0 | Backup/restore drill | `python tools/backup_restore_drill.py` | `PASS CHK-BACKUP-RESTORE`; metadata + artifact pointers + packs state restored; gateway query returns masked result with provenance | `runtime/backup_restore_drill/report.json` |
 | ER-015 | P1 | Upgrade drill Starter->Team | run upgrade drill tests/harness | IDs stable, no re-ingest required | upgrade test logs |
 | ER-016 | P1 | MessyBench regression | `python tools/messybench_harness.py` | pass with stable machine-readable output | `runtime/messybench/results.json` |
 | ER-017 | P1 | Perf regression gate | `python tools/perf_harness.py` | `PASS CHK-PERF-HARNESS` | `runtime/perf/results.json` |
 | ER-018 | P1 | Observability completeness | hit `/api/v1/metrics` on API + gateway | required metrics exposed | metric scrape output + dashboard screenshot |
 | ER-019 | P1 | Review queue operability | create blocking/non-blocking review tasks | backlog visible; gating behavior correct | API/UI screenshots + logs |
 | ER-020 | P2 | Soak/stability run | 4-24h repeated ingest/query/retrieve workload | no crash loops, controlled errors, stable latency envelope | soak report |
+| ER-021 | P0 | Plugin supply-chain enforcement | run `python tools/plugin_verify.py` and attempt unsigned plugin in enterprise profile | unsigned plugin blocked; verify command passes on signed registry | verify output + source-create denial response |
+| ER-022 | P0 | Pack compatibility gate | attempt policy-pack change with legacy schema entry (`v1`) | request denied with compatibility failure until migration is executed | API response + `runtime/pack_migrations/report.json` |
+| ER-023 | P0 | Promotion bundle gate (`dev->prod`) | `schemapilot promotion-export` -> `python tools/promotion_bundle.py verify` -> `schemapilot promotion-import` with policy reports | bundle checksum/signature verified; enterprise import blocked without reports; policy diff lockout blocks import | export/import API responses + audit events (`promotion.bundle_*`, `promotion.attestation_recorded`) |
 
 ## Execution Order
 1) Preflight and deployment checks (`ER-001` to `ER-004`)  

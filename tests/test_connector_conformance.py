@@ -25,4 +25,11 @@ def test_connector_conformance_tool_passes_with_fixture_exports(tmp_path: Path) 
     assert output_path.exists()
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["status"] == "pass"
+    assert report["strict_tier"] == "recommended"
     assert len(report["results"]) >= 5
+    tiers = {str(item.get("tier", "")) for item in report["results"]}
+    assert "recommended" in tiers
+    assert any(
+        item.get("tier") == "community" and item.get("required_for_gate") is False
+        for item in report["results"]
+    )

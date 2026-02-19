@@ -79,6 +79,34 @@ def test_gateway_query_cache_miss_when_disabled(tmp_path, monkeypatch) -> None:
     assert calls["count"] == 2
 
 
+def test_gateway_query_cache_key_isolated_by_actor_identity(tmp_path, monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def fake_execute_sql(*args, **kwargs):  # type: ignore[no-untyped-def]
+        _ = (args, kwargs)
+        calls["count"] += 1
+        return QueryResult(
+            columns=[{"name": "one", "type": "INTEGER"}],
+            rows=[[1]],
+            row_count=1,
+        )
+
+    monkeypatch.setattr(gateway_app, "execute_sql", fake_execute_sql)
+    client = TestClient(create_gateway_app_with_settings(tmp_path, cache_enabled=True))
+    payload = {
+        "workspace_id": "w1",
+        "query": {"language": "sql", "text": "select 1 as one"},
+        "resource_attributes": {"dataset_id": "dataset-1"},
+    }
+    analyst_headers = {"Authorization": "Bearer local-analyst-token"}
+    admin_headers = {"Authorization": "Bearer local-platform-admin-token"}
+    first = client.post("/api/v1/gateway/query", json=payload, headers=analyst_headers)
+    second = client.post("/api/v1/gateway/query", json=payload, headers=admin_headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls["count"] == 2
+
+
 def create_gateway_app_with_settings(tmp_path, *, cache_enabled: bool):
     settings = _settings(tmp_path, cache_enabled=cache_enabled)
     return gateway_app.create_gateway_app(settings_factory=lambda: settings)

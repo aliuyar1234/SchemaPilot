@@ -16,6 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.control_plane import db_models
+from backend.control_plane.breakglass import (
+    BreakglassDecisionResult,
+    apply_breakglass_decision,
+    build_breakglass_request_payload,
+    mark_breakglass_revoked,
+    normalize_breakglass_ttl,
+    required_approvals_for_profile,
+)
 from backend.control_plane.catalog_snapshot import (
     export_catalog_snapshot,
     import_catalog_snapshot,
@@ -27,11 +35,18 @@ from backend.control_plane.deletion import (
     get_deletion_request,
     submit_deletion_request,
 )
+from backend.control_plane.export_import import (
+    build_promotion_attestation,
+    build_promotion_bundle_envelope,
+    compute_bundle_checksum,
+)
 from backend.control_plane.gating import evaluate_gold_publish_gate
+from backend.control_plane.packs.verification import verify_policy_pack_entry
 from backend.control_plane.policy_pack_service import (
     decide_policy_pack_change,
     get_effective_policy_pack,
     get_policy_pack_canary,
+    get_policy_pack_change_request,
     promote_policy_pack_canary,
     request_policy_pack_change,
     rollback_policy_pack,
@@ -92,6 +107,10 @@ from backend.control_plane.source_health import (
     configure_source_sla,
     evaluate_source_slas,
     list_source_slas,
+)
+from backend.control_plane.target_db_credentials import (
+    build_rotation_run_input_refs,
+    evaluate_rotation_prerequisites,
 )
 from backend.shared_domain.alert_sinks import AlertSinkError, load_alert_sink
 from backend.shared_domain.audit_outbox import (
@@ -260,6 +279,20 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return JSONResponse(status_code=404, content=payload.model_dump())
 
+    def policy_denied_response(
+        *, request: Request, message: str, details: dict[str, object]
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", new_ulid())
+        payload = ErrorResponse(
+            error=ErrorInner(
+                code="POLICY_DENIED",
+                message=message,
+                details=details,
+                request_id=request_id,
+            )
+        )
+        return JSONResponse(status_code=403, content=payload.model_dump())
+
     def target_db_operation_key(
         *,
         workspace_id: str,
@@ -302,6 +335,30 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             return False
         expected = _sign_payload(payload=payload, key=key, key_id=str(signature.get("key_id", "")))
         return hmac.compare_digest(provided, str(expected.get("signature", "")))
+
+    def _verify_policy_pack_signature(
+        *,
+        session: Session,
+        workspace_id: str,
+        pack_id: str,
+    ) -> dict[str, object]:
+        workspace = session.get(db_models.Workspace, workspace_id)
+        workspace_profile = (
+            str(workspace.profile).strip().lower()
+            if workspace is not None
+            else str(settings.profile).strip().lower()
+        )
+        repo_root = Path(__file__).resolve().parents[2]
+        result = verify_policy_pack_entry(
+            workspace_profile=workspace_profile,
+            pack_id=pack_id,
+            registry_path=settings.pack_registry_path,
+            matrix_path=settings.pack_matrix_path,
+            signing_key=settings.pack_signing_key,
+            enforce_non_enterprise=settings.pack_verify_enforce_non_enterprise,
+            repo_root=repo_root,
+        )
+        return result.as_dict()
 
     def _emit_alert_non_blocking(*, alert_payload: dict[str, object]) -> None:
         try:
@@ -630,6 +687,44 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 "Access denied by policy",
                 details={"reason": "missing_pack_id"},
             )
+        verification = _verify_policy_pack_signature(
+            session=session,
+            workspace_id=workspace_id,
+            pack_id=requested_pack_id,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="policy_pack.verify",
+            event_json=verification,
+            correlation_id=request.state.request_id,
+        )
+        if bool(verification.get("compatibility_checked", False)) and not bool(
+            verification.get("compatibility_ok", True)
+        ):
+            return policy_denied_response(
+                request=request,
+                message="Access denied by policy",
+                details={
+                    "reason": "pack_compatibility_failed",
+                    "pack_id": requested_pack_id,
+                    "compatibility_errors": verification.get("compatibility_errors", []),
+                    "requires_migration": bool(verification.get("requires_migration", False)),
+                },
+            )  # type: ignore[return-value]
+        if not bool(verification.get("verified", False)) and str(
+            verification.get("enforcement", "warn")
+        ) == "enforce":
+            return policy_denied_response(
+                request=request,
+                message="Access denied by policy",
+                details={
+                    "reason": "pack_verification_failed",
+                    "pack_id": requested_pack_id,
+                    "verification_errors": verification.get("errors", []),
+                },
+            )  # type: ignore[return-value]
         change_request = request_policy_pack_change(
             session,
             workspace_id=workspace_id,
@@ -637,6 +732,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             requested_pack_id=requested_pack_id,
             storage_root=settings.storage_root,
         )
+        change_request["pack_verification"] = verification
         append_audit_event(
             session,
             workspace_id=workspace_id,
@@ -660,7 +756,64 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         actor = require_actor(request, roles=steward_or_admin_roles)
         decision = str(payload.get("decision", "defer"))
         reason = str(payload.get("decision_reason", ""))
+        expected_policy_diff_checksum = str(
+            payload.get("expected_policy_diff_checksum", "")
+        ).strip()
         canary_enabled = bool(payload.get("canary", settings.policy_pack_canary_enabled))
+        verification: dict[str, object] | None = None
+        if decision.strip().lower() == "approve":
+            staged = get_policy_pack_change_request(
+                session,
+                workspace_id=workspace_id,
+                change_request_id=change_request_id,
+            )
+            if staged is None:
+                return not_found_response(
+                    request=request,
+                    message="Policy pack change request not found.",
+                    details={"workspace_id": workspace_id, "change_request_id": change_request_id},
+                )  # type: ignore[return-value]
+            staged_pack_id = str(staged.get("requested_pack_id", "")).strip()
+            verification = _verify_policy_pack_signature(
+                session=session,
+                workspace_id=workspace_id,
+                pack_id=staged_pack_id,
+            )
+            append_audit_event(
+                session,
+                workspace_id=workspace_id,
+                actor_id=str(actor.get("actor_id", "unknown")),
+                event_type="policy_pack.verify",
+                event_json=verification,
+                correlation_id=request.state.request_id,
+            )
+            if bool(verification.get("compatibility_checked", False)) and not bool(
+                verification.get("compatibility_ok", True)
+            ):
+                return policy_denied_response(
+                    request=request,
+                    message="Access denied by policy",
+                    details={
+                        "reason": "pack_compatibility_failed",
+                        "pack_id": staged_pack_id,
+                        "compatibility_errors": verification.get("compatibility_errors", []),
+                        "requires_migration": bool(
+                            verification.get("requires_migration", False)
+                        ),
+                    },
+                )  # type: ignore[return-value]
+            if not bool(verification.get("verified", False)) and str(
+                verification.get("enforcement", "warn")
+            ) == "enforce":
+                return policy_denied_response(
+                    request=request,
+                    message="Access denied by policy",
+                    details={
+                        "reason": "pack_verification_failed",
+                        "pack_id": staged_pack_id,
+                        "verification_errors": verification.get("errors", []),
+                    },
+                )  # type: ignore[return-value]
         result = decide_policy_pack_change(
             session,
             workspace_id=workspace_id,
@@ -668,6 +821,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             approver_actor_id=str(actor.get("actor_id", "unknown")),
             decision=decision,
             reason=reason,
+            expected_policy_diff_checksum=expected_policy_diff_checksum,
             canary_enabled=canary_enabled,
         )
         if result is None:
@@ -681,9 +835,15 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             workspace_id=workspace_id,
             actor_id=str(actor.get("actor_id", "unknown")),
             event_type="policy_pack.change_decided",
-            event_json=result,
+            event_json=(
+                {**result, "pack_verification": verification}
+                if verification is not None
+                else result
+            ),
             correlation_id=request.state.request_id,
         )
+        if verification is not None:
+            result = {**result, "pack_verification": verification}
         return result
 
     @app.post("/api/v1/workspaces/{workspace_id}/policy-pack/rollback")
@@ -802,6 +962,9 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         actor = require_actor(request, roles=steward_or_admin_roles)
         decision = str(payload.get("decision", "defer"))
         reason = str(payload.get("decision_reason", ""))
+        expected_migration_plan_checksum = str(
+            payload.get("expected_migration_plan_checksum", "")
+        ).strip()
         result = decide_semantic_manifest_change(
             session,
             workspace_id=workspace_id,
@@ -809,6 +972,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             approver_actor_id=str(actor.get("actor_id", "unknown")),
             decision=decision,
             reason=reason,
+            expected_migration_plan_checksum=expected_migration_plan_checksum,
         )
         if result is None:
             return not_found_response(
@@ -972,6 +1136,12 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
+        workspace_row = session.get(db_models.Workspace, workspace_id)
+        workspace_profile = (
+            str(workspace_row.profile).strip().lower()
+            if workspace_row is not None
+            else str(settings.profile).strip().lower()
+        )
         built_in_source_types = {
             "filesystem",
             "dropzone",
@@ -984,7 +1154,13 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             "db_dump",
         }
         if payload.source_type not in built_in_source_types:
-            plugin_specs = load_connector_plugin_specs()
+            plugin_specs = load_connector_plugin_specs(
+                workspace_profile=workspace_profile,
+                registry_path=settings.plugin_registry_path,
+                signing_key=settings.plugin_signing_key,
+                enforce_non_enterprise=settings.plugin_verify_enforce_non_enterprise,
+                repo_root=Path(__file__).resolve().parents[2],
+            )
             if payload.source_type not in plugin_specs:
                 raise PolicyDeniedError(
                     "Access denied by policy",
@@ -1891,6 +2067,12 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
+        shadow_cutover = bool(payload.get("shadow_cutover", False))
+        if shadow_cutover and not settings.target_db_shadow_cutover_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "module_disabled", "module": "target_db_shadow_cutover"},
+            )
         to_target_db_id = str(payload.get("to_target_db_id", "")).strip()
         from_target_db_id = str(payload.get("from_target_db_id", "")).strip()
         approval_task_id = str(payload.get("approval_task_id", "")).strip()
@@ -1946,6 +2128,8 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             "workspace_id": workspace_id,
             "from_target_db_id": current_active or None,
             "to_target_db_id": to_target_db_id,
+            "shadow_cutover": shadow_cutover,
+            "rollback_target_db_id": current_active or None,
             "state": snapshot,
         }
         append_audit_event(
@@ -1978,6 +2162,20 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 workspace_id=workspace_id,
                 target_db_id=target_db_id,
             )  # type: ignore[return-value]
+        prerequisite_status = evaluate_rotation_prerequisites(profile)
+        if not prerequisite_status.ok:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": "target_db_rotation_prerequisites_missing",
+                    **prerequisite_status.as_dict(),
+                },
+            )
+        rotation_input = build_rotation_run_input_refs(
+            target_db_id=target_db_id,
+            rotation_reason=str(payload.get("reason", "operator_requested")),
+            requested_by=str(actor.get("actor_id", "unknown")),
+        )
         run = create_run(
             session,
             workspace_id=workspace_id,
@@ -1985,10 +2183,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         run_row = session.get(db_models.RunRecord, str(run["run_id"]))
         if run_row is not None:
-            run_row.input_refs_json = {
-                "target_db_id": target_db_id,
-                "rotation_reason": str(payload.get("reason", "operator_requested")),
-            }
+            run_row.input_refs_json = rotation_input
             session.flush()
         response_payload = {
             "workspace_id": workspace_id,
@@ -2462,6 +2657,40 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 )
         return summary
 
+    @app.post("/api/v1/workspaces/{workspace_id}/onboarding/events")
+    async def api_onboarding_event(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        event_type = str(payload.get("event_type", "")).strip()
+        if event_type not in {
+            "onboarding.preset_started",
+            "onboarding.preset_completed",
+            "onboarding.blocked",
+        }:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "unsupported_onboarding_event_type", "event_type": event_type},
+            )
+        event_payload_raw = payload.get("event_payload", {})
+        event_payload = event_payload_raw if isinstance(event_payload_raw, dict) else {}
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type=event_type,
+            event_json=event_payload,
+            correlation_id=request.state.request_id,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "event_type": event_type,
+            "status": "recorded",
+        }
+
     @app.post("/api/v1/onboarding/demo_bootstrap")
     async def api_demo_bootstrap(
         payload: dict[str, object],
@@ -2799,30 +3028,41 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
+        workspace = session.get(db_models.Workspace, workspace_id)
+        if workspace is None:
+            return not_found_response(
+                request=request,
+                message="Workspace not found.",
+                details={"workspace_id": workspace_id},
+            )  # type: ignore[return-value]
         requested_actor_id = str(payload.get("actor_id", "")).strip()
         ttl_raw = payload.get("ttl_seconds", 900)
-        ttl_seconds = int(ttl_raw) if isinstance(ttl_raw, (int, float, str)) else 0
         max_ttl = int(os.getenv("SCHEMAPILOT_BREAKGLASS_MAX_TTL_SECONDS", "3600"))
         if not requested_actor_id:
             raise PolicyDeniedError(
                 "Access denied by policy",
                 details={"reason": "actor_id_required"},
             )
-        if ttl_seconds <= 0 or ttl_seconds > max_ttl:
+        try:
+            ttl_seconds = normalize_breakglass_ttl(
+                ttl_value=ttl_raw,
+                max_ttl_seconds=max_ttl,
+            )
+        except ValueError:
             raise PolicyDeniedError(
                 "Access denied by policy",
                 details={"reason": "invalid_breakglass_ttl", "max_ttl_seconds": max_ttl},
-            )
+            ) from None
+        required_approvals = required_approvals_for_profile(str(workspace.profile))
         request_id = new_ulid()
-        request_payload = {
-            "workspace_id": workspace_id,
-            "actor_id": requested_actor_id,
-            "ttl_seconds": ttl_seconds,
-            "status": "pending",
-            "approvals": [],
-            "requested_by": str(actor.get("actor_id", "unknown")),
-            "created_at_epoch": int(time.time()),
-        }
+        request_payload = build_breakglass_request_payload(
+            workspace_id=workspace_id,
+            actor_id=requested_actor_id,
+            requested_by=str(actor.get("actor_id", "unknown")),
+            ttl_seconds=ttl_seconds,
+            required_approvals=required_approvals,
+            now_epoch=int(time.time()),
+        )
         session.add(
             db_models.GovernancePolicy(
                 policy_id=request_id,
@@ -2871,59 +3111,47 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         if not isinstance(request_payload, dict):
             request_payload = {}
         status = str(request_payload.get("status", "pending")).strip().lower()
-        if status in {"revoked", "expired"}:
+        if status in {"revoked", "expired", "active"}:
             raise PolicyDeniedError(
                 "Access denied by policy",
                 details={"reason": f"breakglass_{status}"},
             )
         decision = str(payload.get("decision", "approve")).strip().lower()
-        if decision not in {"approve", "reject"}:
+        actor_id = str(actor.get("actor_id", "unknown"))
+        try:
+            decision_result: BreakglassDecisionResult = apply_breakglass_decision(
+                request_id=request_id,
+                request_payload=request_payload,
+                decision=decision,
+                actor_id=actor_id,
+                decision_reason=str(payload.get("decision_reason", "")).strip(),
+                now_epoch=int(time.time()),
+            )
+        except ValueError as exc:
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "invalid_decision"},
-            )
-        approvals_raw = request_payload.get("approvals", [])
-        approvals = approvals_raw if isinstance(approvals_raw, list) else []
-        actor_id = str(actor.get("actor_id", "unknown"))
-        if decision == "approve":
-            if actor_id not in approvals:
-                approvals.append(actor_id)
-        else:
-            request_payload["status"] = "rejected"
-        request_payload["approvals"] = sorted(
-            {str(item) for item in approvals if str(item).strip()}
-        )
-        request_payload["last_decision_actor_id"] = actor_id
-        request_payload["last_decision_reason"] = str(payload.get("decision_reason", "")).strip()
-        request_payload["last_decision_at_epoch"] = int(time.time())
-        if decision == "approve" and len(request_payload["approvals"]) >= 2:
-            now_epoch = int(time.time())
-            ttl_seconds = int(request_payload.get("ttl_seconds", 900))
-            expires_epoch = now_epoch + max(ttl_seconds, 1)
-            request_payload["status"] = "active"
-            request_payload["active_from_epoch"] = now_epoch
-            request_payload["expires_epoch"] = expires_epoch
+                details={"reason": str(exc)},
+            ) from None
+        updated_payload = decision_result.request_payload
+        if decision_result.grant_payload is not None:
             grant_id = new_ulid()
-            grant_payload = {
-                "request_id": request_id,
-                "workspace_id": workspace_id,
-                "actor_id": str(request_payload.get("actor_id", "")),
-                "status": "active",
-                "expires_epoch": expires_epoch,
-            }
             session.add(
                 db_models.GovernancePolicy(
                     policy_id=grant_id,
                     workspace_id=workspace_id,
                     policy_type="breakglass_grant",
-                    definition_ref=json.dumps(grant_payload, sort_keys=True),
+                    definition_ref=json.dumps(decision_result.grant_payload, sort_keys=True),
                     status="active",
                 )
             )
-            request_payload["grant_policy_id"] = grant_id
-        row.definition_ref = json.dumps(request_payload, sort_keys=True)
+            updated_payload["grant_policy_id"] = grant_id
+        request_status = str(updated_payload.get("status", "pending")).strip().lower()
+        row.status = (
+            "inactive" if request_status in {"rejected", "revoked", "expired"} else "active"
+        )
+        row.definition_ref = json.dumps(updated_payload, sort_keys=True)
         session.flush()
-        response_payload = {"request_id": request_id, **request_payload}
+        response_payload = {"request_id": request_id, **updated_payload}
         append_audit_event(
             session,
             workspace_id=workspace_id,
@@ -2960,17 +3188,31 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             request_payload = {}
         if not isinstance(request_payload, dict):
             request_payload = {}
-        request_payload["status"] = "revoked"
-        request_payload["revoked_by"] = str(actor.get("actor_id", "unknown"))
-        request_payload["revoked_at_epoch"] = int(time.time())
-        row.definition_ref = json.dumps(request_payload, sort_keys=True)
-        grant_policy_id = str(request_payload.get("grant_policy_id", "")).strip()
+        updated_payload = mark_breakglass_revoked(
+            request_payload=request_payload,
+            revoked_by=str(actor.get("actor_id", "unknown")),
+            now_epoch=int(time.time()),
+            reason="manual_revoke",
+        )
+        row.status = "inactive"
+        row.definition_ref = json.dumps(updated_payload, sort_keys=True)
+        grant_policy_id = str(updated_payload.get("grant_policy_id", "")).strip()
         if grant_policy_id:
             grant_row = session.get(db_models.GovernancePolicy, grant_policy_id)
             if grant_row is not None:
+                try:
+                    grant_payload = json.loads(grant_row.definition_ref)
+                except json.JSONDecodeError:
+                    grant_payload = {}
+                if isinstance(grant_payload, dict):
+                    grant_payload["status"] = "revoked"
+                    grant_payload["revoked_by"] = str(actor.get("actor_id", "unknown"))
+                    grant_payload["revoked_at_epoch"] = int(time.time())
+                    grant_payload["revoked_reason"] = "manual_revoke"
+                    grant_row.definition_ref = json.dumps(grant_payload, sort_keys=True)
                 grant_row.status = "inactive"
         session.flush()
-        response_payload = {"request_id": request_id, **request_payload}
+        response_payload = {"request_id": request_id, **updated_payload}
         append_audit_event(
             session,
             workspace_id=workspace_id,
@@ -3133,17 +3375,31 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
-        snapshot = export_catalog_snapshot(session, workspace_id=workspace_id)
-        bundle_payload = {
-            "workspace_id": workspace_id,
-            "snapshot": snapshot,
-            "generated_at_epoch": int(time.time()),
-        }
-        signing_key = os.getenv("SCHEMAPILOT_PROMOTION_SIGNING_KEY", "schemapilot-promotion-key-v1")
-        signature = _sign_payload(payload=bundle_payload, key=signing_key, key_id="promotion-v1")
+        envelope = build_promotion_bundle_envelope(
+            session,
+            workspace_id=workspace_id,
+            settings=settings,
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+        signature = _sign_payload(
+            payload=envelope.signature_payload(),
+            key=settings.promotion_signing_key,
+            key_id="promotion-v1",
+        )
+        attestation = build_promotion_attestation(
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            bundle_checksum=envelope.bundle_checksum,
+            action="export",
+            signature_key_id=str(signature.get("key_id", "")),
+            policy_gate={"status": "not_applicable"},
+            source_workspace_id=workspace_id,
+        )
         response_payload: dict[str, object] = {
-            "bundle": bundle_payload,
+            "bundle": envelope.bundle,
+            "bundle_checksum": envelope.bundle_checksum,
             "signature": signature,
+            "attestation": attestation,
         }
         append_audit_event(
             session,
@@ -3151,6 +3407,14 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             actor_id=str(actor.get("actor_id", "unknown")),
             event_type="promotion.bundle_exported",
             event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="promotion.attestation_recorded",
+            event_json=attestation,
             correlation_id=request.state.request_id,
         )
         return response_payload
@@ -3164,17 +3428,55 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
         bundle_raw = payload.get("bundle", {})
+        bundle_checksum = str(payload.get("bundle_checksum", "")).strip()
         signature_raw = payload.get("signature", {})
         bundle = bundle_raw if isinstance(bundle_raw, dict) else {}
         signature = signature_raw if isinstance(signature_raw, dict) else {}
-        signing_key = os.getenv("SCHEMAPILOT_PROMOTION_SIGNING_KEY", "schemapilot-promotion-key-v1")
-        if not _verify_signed_payload(payload=bundle, signature=signature, key=signing_key):
+        computed_checksum = compute_bundle_checksum(bundle)
+        if not bundle_checksum:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "promotion_bundle_checksum_missing"},
+            )
+        if not hmac.compare_digest(bundle_checksum, computed_checksum):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "promotion_bundle_checksum_mismatch"},
+            )
+        signature_payload: dict[str, object] = {
+            "bundle": bundle,
+            "bundle_checksum": bundle_checksum,
+        }
+        if not _verify_signed_payload(
+            payload=signature_payload,
+            signature=signature,
+            key=settings.promotion_signing_key,
+        ):
             raise PolicyDeniedError(
                 "Access denied by policy",
                 details={"reason": "promotion_signature_invalid"},
             )
+        workspace = session.get(db_models.Workspace, workspace_id)
+        workspace_profile = (
+            str(workspace.profile).strip().lower()
+            if workspace is not None
+            else str(settings.profile).strip().lower()
+        )
+        require_policy_reports = (
+            workspace_profile == "enterprise"
+            or settings.promotion_require_policy_reports_non_enterprise
+        )
         before_report_raw = payload.get("before_policy_report")
         after_report_raw = payload.get("after_policy_report")
+        policy_gate: dict[str, object] = {"status": "skipped", "reason": "reports_not_provided"}
+        policy_diff: dict[str, object] | None = None
+        if require_policy_reports and not (
+            isinstance(before_report_raw, dict) and isinstance(after_report_raw, dict)
+        ):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "promotion_policy_reports_required"},
+            )
         if isinstance(before_report_raw, dict) and isinstance(after_report_raw, dict):
             protected_raw = payload.get("protected_scenario_ids", [])
             protected = (
@@ -3182,12 +3484,12 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 if isinstance(protected_raw, list)
                 else []
             )
-            diff = compute_policy_impact_diff(
+            policy_diff = compute_policy_impact_diff(
                 before_report={str(key): value for key, value in before_report_raw.items()},
                 after_report={str(key): value for key, value in after_report_raw.items()},
                 protected_scenario_ids=protected,
             )
-            invariants = diff.get("invariants", {})
+            invariants = policy_diff.get("invariants", {})
             protected_denials = (
                 invariants.get("protected_denials", [])
                 if isinstance(invariants, dict)
@@ -3201,12 +3503,30 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                         "protected_denials": protected_denials,
                     },
                 )
-        snapshot_raw = bundle.get("snapshot", {})
+            policy_gate = {
+                "status": "passed",
+                "protected_scenario_ids": protected,
+                "diff_status": str(policy_diff.get("status", "unchanged")),
+                "protected_denials": [],
+            }
+        snapshot_raw = bundle.get("catalog_snapshot", bundle.get("snapshot", {}))
         snapshot = snapshot_raw if isinstance(snapshot_raw, dict) else {}
         result = import_catalog_snapshot(session, workspace_id=workspace_id, snapshot=snapshot)
+        attestation = build_promotion_attestation(
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            bundle_checksum=bundle_checksum,
+            action="import",
+            signature_key_id=str(signature.get("key_id", "")),
+            policy_gate=policy_gate,
+            source_workspace_id=str(bundle.get("workspace_id", "")).strip() or None,
+        )
         response_payload: dict[str, object] = {
             "workspace_id": workspace_id,
             "import": result,
+            "bundle_checksum": bundle_checksum,
+            "attestation": attestation,
+            "policy_diff": policy_diff or {},
         }
         append_audit_event(
             session,
@@ -3214,6 +3534,14 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             actor_id=str(actor.get("actor_id", "unknown")),
             event_type="promotion.bundle_imported",
             event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="promotion.attestation_recorded",
+            event_json=attestation,
             correlation_id=request.state.request_id,
         )
         return response_payload

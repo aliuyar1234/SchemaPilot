@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,11 @@ def _parse_args() -> argparse.Namespace:
         "--write",
         action="store_true",
         help="Write migrated artifacts and updated registry/signatures to disk.",
+    )
+    parser.add_argument(
+        "--output",
+        default="runtime/pack_migrations/report.json",
+        help="Path to write deterministic migration evidence report.",
     )
     return parser.parse_args()
 
@@ -169,6 +175,12 @@ def migrate_registry_packs(
                         "status": "up_to_date",
                         "from_schema_version": source_schema_version,
                         "to_schema_version": target_schema_version,
+                        "artifact_before_checksum": _payload_checksum(payload),
+                        "artifact_after_checksum": _payload_checksum(payload),
+                        "diff_checksum": _diff_checksum(
+                            before_payload=payload,
+                            after_payload=payload,
+                        ),
                     }
                 )
                 entry["schema_version"] = source_schema_version
@@ -205,6 +217,12 @@ def migrate_registry_packs(
                     "status": "migrated" if write else "migration_available",
                     "from_schema_version": source_schema_version,
                     "to_schema_version": target_schema_version,
+                    "artifact_before_checksum": _payload_checksum(payload),
+                    "artifact_after_checksum": _payload_checksum(migrated_payload),
+                    "diff_checksum": _diff_checksum(
+                        before_payload=payload,
+                        after_payload=migrated_payload,
+                    ),
                 }
             )
             if write:
@@ -246,6 +264,28 @@ def _has_migration(
     return False
 
 
+def _payload_checksum(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _diff_checksum(*, before_payload: dict[str, Any], after_payload: dict[str, Any]) -> str:
+    before_keys = set(before_payload.keys())
+    after_keys = set(after_payload.keys())
+    changed_keys = sorted(
+        key
+        for key in before_keys & after_keys
+        if before_payload[key] != after_payload[key]
+    )
+    diff_payload = {
+        "added_keys": sorted(after_keys - before_keys),
+        "changed_keys": changed_keys,
+        "removed_keys": sorted(before_keys - after_keys),
+    }
+    canonical = json.dumps(diff_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def main() -> int:
     args = _parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -257,6 +297,18 @@ def main() -> int:
         key_id=args.key_id,
         write=args.write,
     )
+    output_path = root / args.output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_payload: dict[str, object] = {
+        "errors": list(errors),
+        "matrix_path": args.matrix,
+        "registry_path": args.registry,
+        "report": report,
+        "status": "fail" if errors else "pass",
+        "write_mode": bool(args.write),
+    }
+    output_path.write_text(_canonical_json(output_payload, indent=2), encoding="utf-8")
+    print(output_path.as_posix())
     if errors:
         for error in errors:
             print(f"FAIL {error}")

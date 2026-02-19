@@ -10,6 +10,10 @@ from pathlib import Path
 
 
 def backup_runtime_state(*, source_db: Path, source_storage: Path, output_dir: Path) -> Path:
+    if not source_db.exists() or not source_db.is_file():
+        raise ValueError(f"backup_metadata_db_missing:{source_db.as_posix()}")
+    if not source_storage.exists() or not source_storage.is_dir():
+        raise ValueError(f"backup_storage_missing:{source_storage.as_posix()}")
     output_dir.mkdir(parents=True, exist_ok=True)
     backup_db = output_dir / "metadata.db"
     backup_storage = output_dir / "storage"

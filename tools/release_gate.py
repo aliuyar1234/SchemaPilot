@@ -129,7 +129,13 @@ def main() -> int:
         (
             "RG-006",
             "Secrets rotation drill",
-            [sys.executable, "tools/secrets_rotation_drill.py"],
+            [sys.executable, "tools/rotation_drill.py"],
+            None,
+        ),
+        (
+            "RG-006A",
+            "Breakglass drill",
+            [sys.executable, "tools/breakglass_drill.py"],
             None,
         ),
         (
@@ -151,6 +157,12 @@ def main() -> int:
             None,
         ),
         (
+            "RG-007B1",
+            "AI eval harness regression",
+            [sys.executable, "tools/ai_eval_harness.py", "--regression"],
+            None,
+        ),
+        (
             "RG-007C",
             "Connector conformance harness",
             [sys.executable, "tools/connector_conformance.py"],
@@ -166,6 +178,12 @@ def main() -> int:
             "RG-008",
             "Performance harness",
             [sys.executable, "tools/perf_harness.py"],
+            None,
+        ),
+        (
+            "RG-008C",
+            "KPI baseline regression gate",
+            [sys.executable, "tools/kpi_extract.py", "--enforce-baseline"],
             None,
         ),
         (

@@ -155,3 +155,50 @@ def test_validate_pack_registry_detects_signature_tampering(tmp_path: Path) -> N
         signing_key=signing_key,
     )
     assert any("signature verification failed" in error for error in errors)
+
+
+def test_validate_pack_registry_requires_declared_compat_metadata(tmp_path: Path) -> None:
+    signing_key = "test-key"
+    _write_matrix(tmp_path / "packs" / "compatibility_matrix.json")
+    pack_file = tmp_path / "packs" / "policy" / "baseline-team.json"
+    pack_file.parent.mkdir(parents=True, exist_ok=True)
+    pack_file.write_text(
+        json.dumps({"pack_id": "baseline-team", "schema_version": "v2", "version": "1.0.0"}),
+        encoding="utf-8",
+    )
+    registry_payload = {
+        "registry_version": "v1",
+        "policy_packs": [
+            {
+                "pack_id": "baseline-team",
+                "version": "1.0.0",
+                "schema_version": "v2",
+                "path": "packs/policy/baseline-team.json",
+            }
+        ],
+        "semantic_packs": [],
+        "template_packs": [],
+        "connector_examples": [],
+    }
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry_payload), encoding="utf-8")
+    assert (
+        sign_pack_registry(
+            tmp_path,
+            registry_path="registry.json",
+            matrix_path="packs/compatibility_matrix.json",
+            signing_key=signing_key,
+            key_id="test",
+        )
+        == []
+    )
+    signed_registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    signed_registry["policy_packs"][0].pop("compat_range", None)
+    registry_path.write_text(json.dumps(signed_registry), encoding="utf-8")
+    errors = validate_pack_registry(
+        tmp_path,
+        registry_path="registry.json",
+        matrix_path="packs/compatibility_matrix.json",
+        signing_key=signing_key,
+    )
+    assert any("missing compat_range" in error for error in errors)

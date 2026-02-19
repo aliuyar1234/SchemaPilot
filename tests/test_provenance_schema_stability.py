@@ -39,6 +39,7 @@ def test_gateway_query_provenance_v1_fields_are_stable(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     provenance = response.json()["provenance"]
+    provenance_v2 = response.json()["provenance_v2"]
     required = {
         "provenance_version",
         "workspace_id",
@@ -53,6 +54,11 @@ def test_gateway_query_provenance_v1_fields_are_stable(tmp_path: Path) -> None:
     assert provenance["workspace_id"] == "w1"
     assert provenance["datasets_used"] == ["dataset-1"]
     assert isinstance(provenance["snapshots"], list)
+    assert provenance_v2["provenance_version"] == "2"
+    assert provenance_v2["workspace_id"] == "w1"
+    assert provenance_v2["engine_type"] == "duckdb"
+    assert isinstance(provenance_v2["evidence_bundle_refs"], list)
+    assert provenance_v2["build_id"] == provenance["build_id"]
 
 
 def test_gateway_retrieve_provenance_v1_fields_are_stable(tmp_path: Path) -> None:
@@ -68,16 +74,25 @@ def test_gateway_retrieve_provenance_v1_fields_are_stable(tmp_path: Path) -> Non
     client = TestClient(create_gateway_app(settings_factory=lambda: _settings(tmp_path)))
     response = client.post(
         "/api/v1/gateway/retrieve",
-        json={"workspace_id": "w1", "query_text": "invoice"},
+        json={
+            "workspace_id": "w1",
+            "query_text": "invoice",
+            "dataset_ids": ["dataset-1"],
+        },
         headers=_headers("local-ai-reader-token"),
     )
     assert response.status_code == 200
     provenance = response.json()["provenance"]
+    provenance_v2 = response.json()["provenance_v2"]
     assert provenance["provenance_version"] == "1"
     assert provenance["workspace_id"] == "w1"
     assert provenance["datasets_used"] == ["dataset-1"]
     assert provenance["allowed_dataset_ids"] == ["dataset-1"]
     assert isinstance(provenance["citations"], list)
+    assert provenance_v2["provenance_version"] == "2"
+    assert provenance_v2["engine_type"] == "retrieval:filesystem"
+    assert provenance_v2["allowed_dataset_ids"] == ["dataset-1"]
+    assert isinstance(provenance_v2["evidence_bundle_refs"], list)
 
 
 def test_gateway_denies_when_provenance_contract_cannot_be_built(

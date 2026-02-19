@@ -1,0 +1,7 @@
+{
+  "case_id": "AI-CITATION-COMPLETENESS-GATE",
+  "description": "Missing gateway citations must be fail-closed.",
+  "path": "negative_checks.ask_sql_missing_citations_reason",
+  "op": "equals",
+  "expected": "ai_citations_required"
+}

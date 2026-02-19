@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+
+from backend.shared_domain.streaming_io import sample_sha256
 
 
 def plugin_id() -> str:
@@ -54,8 +55,4 @@ def _cursor_token(path: Path) -> str:
 
 
 def _sample_hash(path: Path, sample_bytes: int = 4096) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        hasher.update(handle.read(sample_bytes))
-    return hasher.hexdigest()
-
+    return sample_sha256(path, sample_bytes=sample_bytes)

@@ -1,4 +1,4 @@
-"""Secrets store abstraction with local-encrypted and vault adapters."""
+"""Secrets store abstraction with local-encrypted, file, k8s-secret, and vault adapters."""
 
 from __future__ import annotations
 
@@ -137,6 +137,64 @@ class VaultSecretsStore:
         return {str(k): v for k, v in parsed.items()}
 
 
+@dataclass(frozen=True)
+class FileSecretsStore:
+    """Plain file-backed secrets store for local development workflows."""
+
+    root: Path
+
+    def put_secret(self, *, scope: str, key: str, value: str) -> str:
+        if not value:
+            raise SecretsStoreError("secret_value_required")
+        ref_id = new_ulid()
+        reference = f"secret://file/{scope}/{key}/{ref_id}"
+        path = self._path_for_reference(reference)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        return reference
+
+    def get_secret(self, reference: str) -> str:
+        path = self._path_for_reference(reference)
+        if not path.exists():
+            raise SecretsStoreError("secret_not_found")
+        return path.read_text(encoding="utf-8")
+
+    def _path_for_reference(self, reference: str) -> Path:
+        if not reference.startswith("secret://file/"):
+            raise SecretsStoreError("secret_reference_invalid")
+        suffix = reference.removeprefix("secret://file/")
+        return self.root / (suffix.replace("/", "__") + ".txt")
+
+
+@dataclass(frozen=True)
+class KubernetesSecretFileStore:
+    """K8s-secret style adapter backed by mounted secret files."""
+
+    root: Path
+
+    def put_secret(self, *, scope: str, key: str, value: str) -> str:
+        if not value:
+            raise SecretsStoreError("secret_value_required")
+        ref_id = new_ulid()
+        reference = f"secret://k8s/{scope}/{key}/{ref_id}"
+        path = self._path_for_reference(reference)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        return reference
+
+    def get_secret(self, reference: str) -> str:
+        path = self._path_for_reference(reference)
+        if not path.exists():
+            raise SecretsStoreError("secret_not_found")
+        return path.read_text(encoding="utf-8")
+
+    def _path_for_reference(self, reference: str) -> Path:
+        if not reference.startswith("secret://k8s/"):
+            raise SecretsStoreError("secret_reference_invalid")
+        suffix = reference.removeprefix("secret://k8s/")
+        return self.root / (suffix.replace("/", "__") + ".secret")
+
+
 def load_secrets_store(settings: Settings) -> SecretsStore:
     """Load configured secrets store implementation."""
     backend = settings.secrets_store_backend.strip().lower()
@@ -146,6 +204,10 @@ def load_secrets_store(settings: Settings) -> SecretsStore:
             root=Path(settings.secrets_store_root),
             master_key=master_key,
         )
+    if backend == "file":
+        return FileSecretsStore(root=Path(settings.secrets_store_root))
+    if backend == "k8s_secret":
+        return KubernetesSecretFileStore(root=Path(settings.secrets_store_root) / "k8s")
     if backend == "vault":
         if not settings.vault_url or not settings.vault_token:
             raise StartupConfigurationError(
@@ -157,6 +219,19 @@ def load_secrets_store(settings: Settings) -> SecretsStore:
         "Secrets store backend is disabled.",
         details={"secrets_store_backend": backend},
     )
+
+
+def rotation_hook_for_reference(*, reference: str) -> dict[str, object]:
+    """Return deterministic rotation hook metadata for one secret reference."""
+    if reference.startswith("secret://local/"):
+        return {"backend": "local_encrypted", "hook": "rotate_local_secret_ref"}
+    if reference.startswith("secret://file/"):
+        return {"backend": "file", "hook": "rotate_file_secret_ref"}
+    if reference.startswith("secret://k8s/"):
+        return {"backend": "k8s_secret", "hook": "rotate_k8s_secret_ref"}
+    if reference.startswith("secret://vault/"):
+        return {"backend": "vault", "hook": "rotate_vault_secret_ref"}
+    return {"backend": "unknown", "hook": "rotate_unknown_secret_ref"}
 
 
 def _derive_key(master_key: str) -> bytes:

@@ -58,7 +58,11 @@ def test_gateway_retrieval_budget_denies_over_limit(tmp_path: Path) -> None:
     response = client.post(
         "/api/v1/gateway/retrieve",
         headers=_headers("local-ai-reader-token"),
-        json={"workspace_id": "w1", "query_text": "find invoice reference in dataset"},
+        json={
+            "workspace_id": "w1",
+            "query_text": "find invoice reference in dataset",
+            "dataset_ids": ["dataset-1"],
+        },
     )
     assert response.status_code == 403
     assert response.json()["error"]["details"]["reason"] == "retrieval_budget_exceeded"

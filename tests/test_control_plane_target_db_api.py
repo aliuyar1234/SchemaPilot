@@ -25,6 +25,11 @@ def _settings_rls_enabled() -> Settings:
     return Settings(**{**settings.__dict__, "target_db_rls_enabled": True})
 
 
+def _settings_shadow_cutover_enabled() -> Settings:
+    settings = _settings()
+    return Settings(**{**settings.__dict__, "target_db_shadow_cutover_enabled": True})
+
+
 def _admin_headers() -> dict[str, str]:
     return {"Authorization": "Bearer local-platform-admin-token"}
 
@@ -281,12 +286,63 @@ def test_target_db_cutover_switches_active_target() -> None:
     assert cutover.status_code == 200
     body = cutover.json()
     assert body["to_target_db_id"] == second_target_db_id
+    assert body["rollback_target_db_id"] == first_target_db_id
 
     session_factory = get_session_factory(_settings().database_url)
     with session_factory() as session:
         state_row = session.get(TargetDbState, workspace_id)
         assert state_row is not None
         assert state_row.active_target_db_id == second_target_db_id
+
+
+def test_target_db_shadow_cutover_requires_module_enable_flag() -> None:
+    client = TestClient(create_app(settings_factory=_settings))
+    workspace_id = _create_workspace(client)
+    first = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs",
+        json={"name": "primary-db", "db_type": "postgres", "mode": "managed"},
+        headers=_admin_headers(),
+    )
+    second = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs",
+        json={"name": "shadow-db", "db_type": "postgres", "mode": "managed"},
+        headers=_admin_headers(),
+    )
+    denied = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs/cutover",
+        json={
+            "from_target_db_id": first.json()["target_db"]["target_db_id"],
+            "to_target_db_id": second.json()["target_db"]["target_db_id"],
+            "shadow_cutover": True,
+        },
+        headers=_admin_headers(),
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["details"]["module"] == "target_db_shadow_cutover"
+
+    enabled_client = TestClient(create_app(settings_factory=_settings_shadow_cutover_enabled))
+    enabled_workspace_id = _create_workspace(enabled_client)
+    enabled_first = enabled_client.post(
+        f"/api/v1/workspaces/{enabled_workspace_id}/target-dbs",
+        json={"name": "primary-db", "db_type": "postgres", "mode": "managed"},
+        headers=_admin_headers(),
+    )
+    enabled_second = enabled_client.post(
+        f"/api/v1/workspaces/{enabled_workspace_id}/target-dbs",
+        json={"name": "shadow-db", "db_type": "postgres", "mode": "managed"},
+        headers=_admin_headers(),
+    )
+    allowed = enabled_client.post(
+        f"/api/v1/workspaces/{enabled_workspace_id}/target-dbs/cutover",
+        json={
+            "from_target_db_id": enabled_first.json()["target_db"]["target_db_id"],
+            "to_target_db_id": enabled_second.json()["target_db"]["target_db_id"],
+            "shadow_cutover": True,
+        },
+        headers=_admin_headers(),
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["shadow_cutover"] is True
 
 
 def test_target_db_rls_endpoints_require_module_enable_flag() -> None:

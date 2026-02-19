@@ -69,6 +69,21 @@ class _JwksCacheEntry:
 _JWKS_CACHE: dict[str, _JwksCacheEntry] = {}
 
 
+def clear_jwks_cache(*, jwks_url: str | None = None) -> None:
+    """Clear cached JWKS entries (used by rotation drills and tests)."""
+
+    if jwks_url is None:
+        _JWKS_CACHE.clear()
+        return
+    _JWKS_CACHE.pop(jwks_url, None)
+
+
+def load_jwks_keys_for_settings(*, settings: Settings) -> list[dict[str, object]]:
+    """Load JWKS keys using the same cache path as auth verification."""
+
+    return _load_jwks_keys(settings=settings)
+
+
 def load_local_auth_tokens(
     defaults: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, dict[str, object]]:

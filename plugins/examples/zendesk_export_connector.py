@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from backend.shared_domain.streaming_io import sample_sha256
+
 
 def plugin_id() -> str:
     """Return stable plugin identifier."""
@@ -27,7 +29,7 @@ def discover(scope: dict[str, object]) -> list[dict[str, object]]:
                 "dataset_family": "zendesk",
                 "size_bytes": int(stat.st_size),
                 "mtime_epoch": float(stat.st_mtime),
-                "content_hash_sample": "",
+                "content_hash_sample": sample_sha256(path, sample_bytes=4096),
             }
         )
     return discovered

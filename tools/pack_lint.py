@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 from typing import Any, TypedDict
 
+from backend.shared_domain.semantic_schema_versions import default_compat_range
+
 DEFAULT_REGISTRY_PATH = "packs/registry.json"
 DEFAULT_MATRIX_PATH = "packs/compatibility_matrix.json"
 DEFAULT_SIGNING_KEY = "schemapilot-pack-signing-key-dev-v1"
@@ -19,6 +21,7 @@ DEFAULT_KEY_ID = "local-dev-v1"
 SIGNATURE_ALGORITHM = "hmac-sha256"
 SIGNED_SECTIONS = ("policy_packs", "semantic_packs", "template_packs")
 VERSION_PATTERN = re.compile(r"^v[0-9]+$")
+COMPARATOR_PATTERN = re.compile(r"^(>=|<=|>|<|==)?\s*([0-9]+(?:\.[0-9]+){0,2})$")
 
 
 class EntryFields(TypedDict):
@@ -66,6 +69,7 @@ def validate_pack_registry(
     signing_key: str = DEFAULT_SIGNING_KEY,
 ) -> list[str]:
     payload, errors = _load_registry(root=root, registry_path=registry_path)
+    artifact_root = _resolve_registry_artifact_root(root=root, registry_path=registry_path)
     matrix, matrix_errors = load_compatibility_matrix(root, matrix_path=matrix_path)
     errors.extend(matrix_errors)
     if payload is None or matrix is None:
@@ -82,6 +86,7 @@ def validate_pack_registry(
                 continue
             entry_errors = _validate_registry_entry(
                 root=root,
+                artifact_root=artifact_root,
                 matrix=matrix,
                 section=section,
                 entry=raw_entry,
@@ -100,6 +105,7 @@ def sign_pack_registry(
     key_id: str = DEFAULT_KEY_ID,
 ) -> list[str]:
     payload, errors = _load_registry(root=root, registry_path=registry_path)
+    artifact_root = _resolve_registry_artifact_root(root=root, registry_path=registry_path)
     matrix, matrix_errors = load_compatibility_matrix(root, matrix_path=matrix_path)
     errors.extend(matrix_errors)
     if payload is None or matrix is None:
@@ -110,6 +116,8 @@ def sign_pack_registry(
         if not isinstance(entries, list):
             errors.append(f"{section} must be a list")
             continue
+        current_schema = _section_current_version(matrix, section=section)
+        runtime_version = str(matrix.get("runtime_version", "")).strip() or "0.1.0"
         for raw_entry in entries:
             if not isinstance(raw_entry, dict):
                 errors.append(f"{section}: entry must be an object")
@@ -119,7 +127,11 @@ def sign_pack_registry(
                 errors.extend([f"{section}: {message}" for message in fields["errors"]])
                 continue
             path = str(fields["path"])
-            target = root / path
+            target = _resolve_artifact_path(
+                root=root,
+                artifact_root=artifact_root,
+                path=path,
+            )
             if not target.exists():
                 errors.append(f"{section}: missing artifact {target.as_posix()}")
                 continue
@@ -135,11 +147,30 @@ def sign_pack_registry(
                 )
                 continue
             raw_entry["schema_version"] = schema_version
+            raw_entry["semantic_schema_version"] = schema_version
+            compat_range = _normalize_compat_range(
+                value=str(raw_entry.get("compat_range", "")).strip(),
+                runtime_version=runtime_version,
+            )
+            if compat_range is None:
+                errors.append(f"{section}: invalid compat_range for {fields['pack_id']}")
+                continue
+            raw_entry["compat_range"] = compat_range
+            raw_entry["migration_available"] = (
+                schema_version != current_schema
+                and _has_migration_path(
+                    matrix,
+                    section=section,
+                    from_schema_version=schema_version,
+                    to_schema_version=current_schema,
+                )
+            )
             raw_entry["signature"] = {
                 "algorithm": SIGNATURE_ALGORITHM,
                 "key_id": key_id,
                 "value": _compute_signature(
                     root=root,
+                    artifact_root=artifact_root,
                     section=section,
                     entry=raw_entry,
                     signing_key=signing_key,
@@ -256,6 +287,7 @@ def _extract_sections(payload: dict[str, Any]) -> dict[str, Any]:
 def _validate_registry_entry(
     *,
     root: Path,
+    artifact_root: Path,
     matrix: dict[str, Any],
     section: str,
     entry: dict[str, Any],
@@ -270,12 +302,17 @@ def _validate_registry_entry(
     if not path:
         return errors
 
-    target = root / path
+    target = _resolve_artifact_path(
+        root=root,
+        artifact_root=artifact_root,
+        path=path,
+    )
     if not target.exists():
         errors.append(f"{section}: missing artifact {target.as_posix()}")
         return errors
 
     current_schema = _section_current_version(matrix, section=section)
+    runtime_version = str(matrix.get("runtime_version", "")).strip() or "0.1.0"
     schema_version = _infer_schema_version(
         entry=entry,
         target=target,
@@ -298,6 +335,50 @@ def _validate_registry_entry(
         )
 
     if section in SIGNED_SECTIONS:
+        semantic_schema_version = str(entry.get("semantic_schema_version", "")).strip()
+        if not semantic_schema_version:
+            errors.append(
+                f"{section}: missing semantic_schema_version for {pack_id or '<unknown>'}"
+            )
+        elif semantic_schema_version != schema_version:
+            errors.append(
+                f"{section}: semantic_schema_version mismatch for {pack_id or '<unknown>'}"
+            )
+
+        compat_range = str(entry.get("compat_range", "")).strip()
+        if not compat_range:
+            errors.append(f"{section}: missing compat_range for {pack_id or '<unknown>'}")
+        else:
+            parsed_range = _parse_compat_range(compat_range)
+            if parsed_range is None:
+                errors.append(f"{section}: invalid compat_range for {pack_id or '<unknown>'}")
+            elif not _version_matches(runtime_version, parsed_range):
+                errors.append(
+                    f"{section}: compat_range excludes runtime {runtime_version} for "
+                    f"{pack_id or '<unknown>'}"
+                )
+
+        migration_available_raw = entry.get("migration_available")
+        if not isinstance(migration_available_raw, bool):
+            errors.append(
+                f"{section}: missing migration_available for {pack_id or '<unknown>'}"
+            )
+        else:
+            expected_migration_available = (
+                schema_version != current_schema
+                and _has_migration_path(
+                    matrix,
+                    section=section,
+                    from_schema_version=schema_version,
+                    to_schema_version=current_schema,
+                )
+            )
+            if migration_available_raw != expected_migration_available:
+                errors.append(
+                    f"{section}: inconsistent migration_available for {pack_id or '<unknown>'}"
+                )
+
+    if section in SIGNED_SECTIONS:
         signature = entry.get("signature")
         if not isinstance(signature, dict):
             errors.append(f"{section}: missing signature for {pack_id or '<unknown>'}")
@@ -317,8 +398,18 @@ def _validate_registry_entry(
         if algorithm == SIGNATURE_ALGORITHM and value:
             expected = _compute_signature(
                 root=root,
+                artifact_root=artifact_root,
                 section=section,
-                entry={**entry, "schema_version": schema_version},
+                entry={
+                    **entry,
+                    "schema_version": schema_version,
+                    "semantic_schema_version": str(
+                        entry.get("semantic_schema_version", schema_version)
+                    ).strip()
+                    or schema_version,
+                    "compat_range": str(entry.get("compat_range", "")).strip(),
+                    "migration_available": bool(entry.get("migration_available", False)),
+                },
                 signing_key=signing_key,
             )
             if not hmac.compare_digest(value, expected):
@@ -406,6 +497,7 @@ def _has_migration_path(
 def _compute_signature(
     *,
     root: Path,
+    artifact_root: Path,
     section: str,
     entry: dict[str, Any],
     signing_key: str,
@@ -414,13 +506,27 @@ def _compute_signature(
     version = str(entry.get("version", "")).strip()
     path = str(entry.get("path", "")).strip()
     schema_version = str(entry.get("schema_version", "")).strip() or "v1"
-    artifact_checksum = _artifact_checksum(root / path)
+    semantic_schema_version = (
+        str(entry.get("semantic_schema_version", "")).strip() or schema_version
+    )
+    compat_range = str(entry.get("compat_range", "")).strip()
+    migration_available = bool(entry.get("migration_available", False))
+    artifact_checksum = _artifact_checksum(
+        _resolve_artifact_path(
+            root=root,
+            artifact_root=artifact_root,
+            path=path,
+        )
+    )
     signature_input = _canonical_json_bytes(
         {
             "artifact_checksum": artifact_checksum,
+            "compat_range": compat_range,
+            "migration_available": migration_available,
             "pack_id": pack_id,
             "path": path,
             "schema_version": schema_version,
+            "semantic_schema_version": semantic_schema_version,
             "section": section,
             "version": version,
         }
@@ -431,6 +537,26 @@ def _compute_signature(
 def _artifact_checksum(target: Path) -> str:
     canonical_bytes = _artifact_canonical_bytes(target)
     return hashlib.sha256(canonical_bytes).hexdigest()
+
+
+def _resolve_registry_artifact_root(*, root: Path, registry_path: str) -> Path:
+    registry_file = Path(registry_path)
+    if not registry_file.is_absolute():
+        registry_file = root / registry_path
+    return registry_file.resolve().parent
+
+
+def _resolve_artifact_path(*, root: Path, artifact_root: Path, path: str) -> Path:
+    entry_path = Path(path)
+    if entry_path.is_absolute():
+        return entry_path.resolve()
+    primary = (artifact_root / entry_path).resolve()
+    if primary.exists():
+        return primary
+    fallback = (root / entry_path).resolve()
+    if fallback.exists():
+        return fallback
+    return primary
 
 
 def _artifact_canonical_bytes(target: Path) -> bytes:
@@ -454,6 +580,70 @@ def _canonical_json_bytes(payload: object) -> bytes:
 
 def _canonical_json(payload: object, *, indent: int) -> str:
     return json.dumps(payload, indent=indent, sort_keys=True) + "\n"
+
+
+def _normalize_compat_range(*, value: str, runtime_version: str) -> str | None:
+    if not value:
+        return default_compat_range(runtime_version=runtime_version)
+    parsed = _parse_compat_range(value)
+    if parsed is None:
+        return None
+    if not _version_matches(runtime_version, parsed):
+        return value
+    return value
+
+
+def _parse_compat_range(value: str) -> tuple[tuple[str, tuple[int, int, int]], ...] | None:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        return None
+    result: list[tuple[str, tuple[int, int, int]]] = []
+    for part in parts:
+        match = COMPARATOR_PATTERN.match(part)
+        if match is None:
+            return None
+        comparator = match.group(1) or "=="
+        parsed_version = _parse_semver(match.group(2))
+        if parsed_version is None:
+            return None
+        result.append((comparator, parsed_version))
+    return tuple(result)
+
+
+def _parse_semver(value: str) -> tuple[int, int, int] | None:
+    parts = value.split(".")
+    if not 1 <= len(parts) <= 3:
+        return None
+    normalized = list(parts)
+    while len(normalized) < 3:
+        normalized.append("0")
+    try:
+        parsed = tuple(int(part) for part in normalized)
+    except ValueError:
+        return None
+    if any(number < 0 for number in parsed):
+        return None
+    return parsed[0], parsed[1], parsed[2]
+
+
+def _version_matches(
+    runtime_version: str, range_checks: tuple[tuple[str, tuple[int, int, int]], ...]
+) -> bool:
+    runtime = _parse_semver(runtime_version)
+    if runtime is None:
+        return False
+    for comparator, bound in range_checks:
+        if comparator == "==" and runtime != bound:
+            return False
+        if comparator == ">=" and runtime < bound:
+            return False
+        if comparator == "<=" and runtime > bound:
+            return False
+        if comparator == ">" and runtime <= bound:
+            return False
+        if comparator == "<" and runtime >= bound:
+            return False
+    return True
 
 
 def main() -> int:

@@ -14,6 +14,7 @@ class SchemaAdvisorProposal:
     field_name: str
     reason: str
     confidence: float
+    evidence_refs: tuple[str, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -22,9 +23,24 @@ class SchemaAdvisorProposal:
             "field_name": self.field_name,
             "reason": self.reason,
             "confidence": self.confidence,
+            "evidence_refs": list(self.evidence_refs),
             "requires_approval": True,
             "auto_apply": False,
         }
+
+
+def _stable_ref_token(value: str) -> str:
+    return value.strip().replace("/", "_").replace(" ", "_")
+
+
+def _build_evidence_refs(*, entity_id: str, field_name: str, reason: str) -> tuple[str, ...]:
+    entity_token = _stable_ref_token(entity_id) or "unknown_entity"
+    field_token = _stable_ref_token(field_name) or "unknown_field"
+    reason_token = _stable_ref_token(reason) or "unknown_reason"
+    return (
+        f"sp://advisor/entity/{entity_token}/field/{field_token}/reason/{reason_token}",
+        f"sp://manifest/entity/{entity_token}",
+    )
 
 
 def build_schema_evolution_proposals(
@@ -73,6 +89,11 @@ def build_schema_evolution_proposals(
                         field_name=column,
                         reason="entity_not_in_semantic_manifest",
                         confidence=0.55,
+                        evidence_refs=_build_evidence_refs(
+                            entity_id=entity_id,
+                            field_name=column,
+                            reason="entity_not_in_semantic_manifest",
+                        ),
                     )
                 )
             continue
@@ -84,6 +105,11 @@ def build_schema_evolution_proposals(
                     field_name=column,
                     reason="observed_column_not_in_manifest",
                     confidence=0.65,
+                    evidence_refs=_build_evidence_refs(
+                        entity_id=entity_id,
+                        field_name=column,
+                        reason="observed_column_not_in_manifest",
+                    ),
                 )
             )
         for column in sorted(known.difference(observed)):
@@ -94,6 +120,11 @@ def build_schema_evolution_proposals(
                     field_name=column,
                     reason="manifest_column_not_observed",
                     confidence=0.6,
+                    evidence_refs=_build_evidence_refs(
+                        entity_id=entity_id,
+                        field_name=column,
+                        reason="manifest_column_not_observed",
+                    ),
                 )
             )
     return [proposal.to_dict() for proposal in proposals]

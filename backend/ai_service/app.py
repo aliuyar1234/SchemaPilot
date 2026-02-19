@@ -8,6 +8,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from backend.ai_service.clients import ServiceClientError, request_json
+from backend.ai_service.output_contract import (
+    build_retrieval_answer_citations,
+    build_sql_answer_citations,
+    cannot_answer_safely_guidance,
+)
 from backend.ai_service.schema_change_advisor import build_schema_evolution_proposals
 from backend.ai_service.sql_agent import (
     _load_effective_semantic_manifest,
@@ -123,15 +128,34 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                     "resource_attributes": {},
                 },
                 bearer_token=str(payload.get("gateway_token", "local-ai-reader-token")),
+                gateway_base_url=settings.ai_gateway_url,
+                control_plane_base_url=settings.ai_control_plane_url,
             )
         except ServiceClientError as exc:
+            reason = (
+                "ai_tool_endpoint_not_allowed"
+                if str(exc) == "ai_tool_endpoint_not_allowed"
+                else "gateway_unavailable"
+            )
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "gateway_unavailable", "error": str(exc)},
+                details={"reason": reason, "error": str(exc)},
             ) from exc
         result = gateway_response.get("result", {})
         rows = result.get("rows", []) if isinstance(result, dict) else []
         row_count = len(rows) if isinstance(rows, list) else 0
+        provenance_raw = gateway_response.get("provenance", {})
+        provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
+        try:
+            citations = build_sql_answer_citations(provenance=provenance)
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": str(exc),
+                    "guidance": cannot_answer_safely_guidance(),
+                },
+            ) from exc
         return {
             "workspace_id": workspace_id,
             "question": question,
@@ -144,7 +168,8 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 "row_count": row_count,
                 "summary": f"Returned {row_count} rows.",
             },
-            "provenance": gateway_response.get("provenance", {}),
+            "provenance": provenance,
+            "citations": citations,
             "request_id": request.state.request_id,
             "actor_id": str(actor.get("actor_id", "unknown")),
         }
@@ -186,15 +211,34 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                     "resource_attributes": {},
                 },
                 bearer_token=str(payload.get("gateway_token", "local-ai-reader-token")),
+                gateway_base_url=settings.ai_gateway_url,
+                control_plane_base_url=settings.ai_control_plane_url,
             )
         except ServiceClientError as exc:
+            reason = (
+                "ai_tool_endpoint_not_allowed"
+                if str(exc) == "ai_tool_endpoint_not_allowed"
+                else "gateway_unavailable"
+            )
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "gateway_unavailable", "error": str(exc)},
+                details={"reason": reason, "error": str(exc)},
             ) from exc
         result = gateway_response.get("result", {})
         rows = result.get("rows", []) if isinstance(result, dict) else []
         row_count = len(rows) if isinstance(rows, list) else 0
+        provenance_raw = gateway_response.get("provenance", {})
+        provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
+        try:
+            citations = build_sql_answer_citations(provenance=provenance)
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": str(exc),
+                    "guidance": cannot_answer_safely_guidance(),
+                },
+            ) from exc
         return {
             "workspace_id": workspace_id,
             "metric_id": metric_id,
@@ -207,7 +251,8 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 "row_count": row_count,
                 "summary": f"Metric {metric_id} returned {row_count} rows.",
             },
-            "provenance": gateway_response.get("provenance", {}),
+            "provenance": provenance,
+            "citations": citations,
         }
 
     @app.post("/api/v1/ai/catalog-assistant")
@@ -224,11 +269,18 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 method="GET",
                 url=f"{settings.ai_control_plane_url.rstrip('/')}/api/v1/workspaces/{workspace_id}/datasets",
                 bearer_token=str(payload.get("control_plane_token", "local-data-steward-token")),
+                gateway_base_url=settings.ai_gateway_url,
+                control_plane_base_url=settings.ai_control_plane_url,
             )
         except ServiceClientError as exc:
+            reason = (
+                "ai_tool_endpoint_not_allowed"
+                if str(exc) == "ai_tool_endpoint_not_allowed"
+                else "control_plane_unavailable"
+            )
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "control_plane_unavailable", "error": str(exc)},
+                details={"reason": reason, "error": str(exc)},
             ) from exc
         datasets_raw = (
             datasets_response
@@ -272,11 +324,18 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                     "action": str(payload.get("action", "query")),
                 },
                 bearer_token=str(payload.get("gateway_token", "local-data-steward-token")),
+                gateway_base_url=settings.ai_gateway_url,
+                control_plane_base_url=settings.ai_control_plane_url,
             )
         except ServiceClientError as exc:
+            reason = (
+                "ai_tool_endpoint_not_allowed"
+                if str(exc) == "ai_tool_endpoint_not_allowed"
+                else "gateway_unavailable"
+            )
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "gateway_unavailable", "error": str(exc)},
+                details={"reason": reason, "error": str(exc)},
             ) from exc
         return {"workspace_id": workspace_id, "simulation": simulation}
 
@@ -285,25 +344,62 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         _ = require_ai_enabled(request)
         workspace_id = str(payload.get("workspace_id", "")).strip()
         question = str(payload.get("question", "")).strip()
+        dataset_ids_raw = payload.get("dataset_ids", [])
+        dataset_ids = (
+            sorted({str(item).strip() for item in dataset_ids_raw if str(item).strip()})
+            if isinstance(dataset_ids_raw, list)
+            else []
+        )
         if not workspace_id or not question:
             raise PolicyDeniedError(
                 "Access denied by policy",
                 details={"reason": "missing_question_or_workspace"},
             )
+        if not dataset_ids:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "dataset_ids_required"},
+            )
         try:
             retrieval = request_json(
                 method="POST",
                 url=f"{settings.ai_gateway_url.rstrip('/')}/api/v1/gateway/retrieve",
-                payload={"workspace_id": workspace_id, "query_text": question},
+                payload={
+                    "workspace_id": workspace_id,
+                    "query_text": question,
+                    "dataset_ids": dataset_ids,
+                },
                 bearer_token=str(payload.get("gateway_token", "local-ai-reader-token")),
+                gateway_base_url=settings.ai_gateway_url,
+                control_plane_base_url=settings.ai_control_plane_url,
             )
         except ServiceClientError as exc:
+            reason = (
+                "ai_tool_endpoint_not_allowed"
+                if str(exc) == "ai_tool_endpoint_not_allowed"
+                else "gateway_unavailable"
+            )
             raise PolicyDeniedError(
                 "Access denied by policy",
-                details={"reason": "gateway_unavailable", "error": str(exc)},
+                details={"reason": reason, "error": str(exc)},
             ) from exc
         snippets = retrieval.get("results", [])
         snippet_count = len(snippets) if isinstance(snippets, list) else 0
+        provenance_raw = retrieval.get("provenance", {})
+        provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
+        try:
+            citations = build_retrieval_answer_citations(
+                provenance=provenance,
+                snippets=snippets,
+            )
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": str(exc),
+                    "guidance": cannot_answer_safely_guidance(),
+                },
+            ) from exc
         try:
             completion = llm_provider.complete(
                 system_prompt="Grounded Doc QA",
@@ -314,15 +410,12 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
                 "Access denied by policy",
                 details={"reason": "ai_provider_disabled", "error": str(exc)},
             ) from exc
-        provenance_raw = retrieval.get("provenance", {})
-        provenance = provenance_raw if isinstance(provenance_raw, dict) else {}
-        citations_raw = provenance.get("citations", [])
-        citations = citations_raw if isinstance(citations_raw, list) else []
         return {
             "workspace_id": workspace_id,
             "question": question,
             "answer": completion,
             "citations": citations,
+            "provenance": provenance,
             "result_count": snippet_count,
         }
 

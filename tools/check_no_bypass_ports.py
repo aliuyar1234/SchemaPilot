@@ -6,10 +6,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-BYPASS_PORTS = (8080, 8083, 9200, 6333)
+BYPASS_PORTS = (6432, 8080, 8083, 9200, 6333)
 BYPASS_TOKENS = tuple(f"{port}:{port}" for port in BYPASS_PORTS)
 COMPOSE_ONLY_BLOCKED_MAPPINGS = ("5432:5432",)
 PORT_PATTERN = re.compile(r"\b(?:port|targetPort|nodePort)\s*:\s*(\d+)\b")
+AI_URL_CONFIG_PATTERN = re.compile(r"SCHEMAPILOT_AI_(?:GATEWAY|CONTROL_PLANE)_URL:\s*(.+)$")
+URL_PORT_PATTERN = re.compile(r":(\d+)\b")
 
 
 def validate_no_bypass_ports(root: Path) -> list[str]:
@@ -26,6 +28,18 @@ def validate_no_bypass_ports(root: Path) -> list[str]:
             errors.append(
                 f"{compose_path.as_posix()}: direct managed target-db mapping detected ({mapping})"
             )
+    for line_no, line in enumerate(compose.splitlines(), start=1):
+        match = AI_URL_CONFIG_PATTERN.search(line)
+        if match is None:
+            continue
+        value = match.group(1)
+        for port_raw in URL_PORT_PATTERN.findall(value):
+            port = int(port_raw)
+            if port in BYPASS_PORTS:
+                errors.append(
+                    f"{compose_path.as_posix()}:{line_no}: "
+                    f"AI routing points to bypass port ({port})"
+                )
 
     k8s_root = root / "deploy" / "k8s"
     for file in sorted(k8s_root.glob("*.yaml")):
