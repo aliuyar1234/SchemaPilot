@@ -50,6 +50,7 @@ TARGET_DB_APPLY_RUN_TYPES = {
     "TARGET_DB_RLS_APPLY",
 }
 TARGET_DB_SYNC_RUN_TYPES = {"TARGET_DB_SYNC_RUN"}
+TARGET_DB_ROTATION_RUN_TYPES = {"TARGET_DB_ROTATE_CREDENTIALS"}
 SEMANTIC_MANIFEST_POLICY_TYPE = "semantic_manifest"
 
 
@@ -534,6 +535,38 @@ def process_target_db_run(
             "run_type": run_type,
             "plan_id": plan_id or None,
             "result": apply_payload,
+            "evidence_bundle_uri": evidence.evidence_bundle_uri,
+        }
+
+    if run_type in TARGET_DB_ROTATION_RUN_TYPES:
+        previous_refs = dict(profile.credential_refs_json)
+        rotated_refs = _rotate_target_db_credentials(
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            profile=profile,
+        )
+        profile.credential_refs_json = rotated_refs
+        profile.disabled = False
+        state.health_status = "healthy"
+        state.last_error_evidence_bundle_uri = None
+        evidence = store_evidence_bundle(
+            workspace_id=workspace_id,
+            storage_root=storage_root,
+            bundle_type="target_db_credentials_rotation",
+            payload={
+                "workspace_id": workspace_id,
+                "target_db_id": target_db_id,
+                "run_id": run_id,
+                "previous_credential_refs": previous_refs,
+                "rotated_credential_refs": rotated_refs,
+            },
+        )
+        session.flush()
+        return {
+            "target_db_id": target_db_id,
+            "status": "credentials_rotated",
+            "previous_credential_refs": previous_refs,
+            "rotated_credential_refs": rotated_refs,
             "evidence_bundle_uri": evidence.evidence_bundle_uri,
         }
 
@@ -1134,3 +1167,35 @@ def _materialize_sqlite_build_file(
     build_path = build_root / f"{target_build_id}.sqlite"
     shutil.copy2(source_path, build_path)
     return build_path.as_posix()
+
+
+def _rotate_target_db_credentials(
+    *,
+    workspace_id: str,
+    target_db_id: str,
+    profile: TargetDbProfile,
+) -> dict[str, object]:
+    settings = load_settings()
+    secrets_store = load_secrets_store(settings)
+    if profile.db_type == "postgres" and profile.mode == "managed":
+        host = str(profile.connection_json.get("host", "postgres"))
+        port = _as_int(profile.connection_json.get("port"), default=5432)
+        identifiers = managed_postgres_identifiers(workspace_id=workspace_id)
+        return provision_managed_postgres_secret_refs(
+            secrets_store=secrets_store,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            host=host,
+            port=port,
+            identifiers=identifiers,
+        )
+    rotated: dict[str, object] = {}
+    stamp = str(int(time.time()))
+    for key in sorted(profile.credential_refs_json):
+        ref = str(profile.credential_refs_json.get(key, "")).strip()
+        if not ref:
+            continue
+        rotated[str(key)] = f"{ref}#rotated-{stamp}"
+    if not rotated:
+        rotated = {"reader": f"secret://workspace/{workspace_id}/target_db/{target_db_id}/reader#{stamp}"}
+    return rotated

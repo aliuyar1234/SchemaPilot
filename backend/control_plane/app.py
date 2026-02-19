@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
+import time
 from collections.abc import Callable, Generator
 from pathlib import Path
 
@@ -90,6 +93,7 @@ from backend.control_plane.source_health import (
     evaluate_source_slas,
     list_source_slas,
 )
+from backend.shared_domain.alert_sinks import AlertSinkError, load_alert_sink
 from backend.shared_domain.audit_outbox import (
     dispatch_audit_outbox_batch,
     enqueue_audit_outbox_event,
@@ -120,6 +124,7 @@ from backend.shared_domain.observability import (
     set_review_queue_backlog,
 )
 from backend.shared_domain.plugin_loader import load_connector_plugin_specs
+from backend.shared_domain.policy_diff import compute_policy_impact_diff
 from backend.shared_domain.policy_packs import list_policy_pack_summaries
 from backend.shared_domain.scheduling import (
     create_run_schedule,
@@ -135,6 +140,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
     settings.validate()
     secrets_store = load_secrets_store(settings)
     audit_sink = load_audit_sink(settings)
+    alert_sink = load_alert_sink(settings)
     auth_tokens = load_local_auth_tokens()
     if settings.database_url.startswith("sqlite:///"):
         sqlite_path = settings.database_url.removeprefix("sqlite:///")
@@ -271,6 +277,44 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return f"opk_{digest}"
+
+    def _sign_payload(
+        *,
+        payload: dict[str, object],
+        key: str,
+        key_id: str,
+        algorithm: str = "HMAC-SHA256",
+    ) -> dict[str, object]:
+        canonical = json_dumps_sorted(payload).encode("utf-8")
+        signature = hmac.new(key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+        return {"algorithm": algorithm, "key_id": key_id, "signature": signature}
+
+    def _verify_signed_payload(
+        *,
+        payload: dict[str, object],
+        signature: dict[str, object],
+        key: str,
+    ) -> bool:
+        if str(signature.get("algorithm", "")).strip().upper() != "HMAC-SHA256":
+            return False
+        provided = str(signature.get("signature", "")).strip()
+        if not provided:
+            return False
+        expected = _sign_payload(payload=payload, key=key, key_id=str(signature.get("key_id", "")))
+        return hmac.compare_digest(provided, str(expected.get("signature", "")))
+
+    def _emit_alert_non_blocking(*, alert_payload: dict[str, object]) -> None:
+        try:
+            alert_sink.emit(alert_payload)
+        except AlertSinkError as exc:
+            log_structured_event(
+                level="error",
+                msg="alert.sink_failed",
+                service="control_plane",
+                correlation_id=str(alert_payload.get("correlation_id", "alert")),
+                event_type="alert.sink_failed",
+                extra={"error": str(exc)},
+            )
 
     def _target_db_state_snapshot(
         session: Session, *, workspace_id: str
@@ -928,7 +972,17 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=steward_or_admin_roles)
-        built_in_source_types = {"filesystem", "s3", "database"}
+        built_in_source_types = {
+            "filesystem",
+            "dropzone",
+            "s3",
+            "database",
+            "sharepoint",
+            "smb",
+            "jira",
+            "zendesk",
+            "db_dump",
+        }
         if payload.source_type not in built_in_source_types:
             plugin_specs = load_connector_plugin_specs()
             if payload.source_type not in plugin_specs:
@@ -1904,6 +1958,54 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return result
 
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/credentials/rotate")
+    async def api_target_db_rotate_credentials(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        run = create_run(
+            session,
+            workspace_id=workspace_id,
+            run_type="TARGET_DB_ROTATE_CREDENTIALS",
+        )
+        run_row = session.get(db_models.RunRecord, str(run["run_id"]))
+        if run_row is not None:
+            run_row.input_refs_json = {
+                "target_db_id": target_db_id,
+                "rotation_reason": str(payload.get("reason", "operator_requested")),
+            }
+            session.flush()
+        response_payload = {
+            "workspace_id": workspace_id,
+            "target_db_id": target_db_id,
+            "run_id": run["run_id"],
+            "status_url": f"/api/v1/workspaces/{workspace_id}/runs/{run['run_id']}",
+        }
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.credentials_rotate_requested",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
     @app.get("/api/v1/workspaces/{workspace_id}/datasets")
     async def api_list_datasets(
         workspace_id: str, session: Session = Depends(get_session)
@@ -2055,7 +2157,156 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             event_json=result,
             correlation_id=request.state.request_id,
         )
+        violation_count_raw = result.get("violation_count", 0)
+        if isinstance(violation_count_raw, bool):
+            violation_count = int(violation_count_raw)
+        elif isinstance(violation_count_raw, (int, float)):
+            violation_count = int(violation_count_raw)
+        elif isinstance(violation_count_raw, str):
+            try:
+                violation_count = int(violation_count_raw.strip())
+            except ValueError:
+                violation_count = 0
+        else:
+            violation_count = 0
+        if violation_count > 0:
+            _emit_alert_non_blocking(
+                alert_payload={
+                    "alert_type": "source_sla_violation",
+                    "workspace_id": workspace_id,
+                    "violation_count": violation_count,
+                    "violations": result.get("violations", []),
+                    "correlation_id": request.state.request_id,
+                }
+            )
         return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/alerts/test")
+    async def api_test_alert_sink(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        alert_payload = {
+            "alert_type": "test",
+            "workspace_id": workspace_id,
+            "message": str(payload.get("message", "test_alert")),
+            "actor_id": str(actor.get("actor_id", "unknown")),
+            "correlation_id": request.state.request_id,
+        }
+        _emit_alert_non_blocking(alert_payload=alert_payload)
+        return {"status": "emitted", "alert": alert_payload}
+
+    @app.get("/api/v1/workspaces/{workspace_id}/query-budgets")
+    async def api_get_query_budgets(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        row = (
+            session.execute(
+                select(db_models.GovernancePolicy).where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "query_budget",
+                    db_models.GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            return {
+                "workspace_id": workspace_id,
+                "default_bytes": settings.query_max_bytes,
+                "per_role_bytes": {},
+                "status": "default",
+            }
+        try:
+            payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "workspace_id": workspace_id,
+            "default_bytes": int(payload.get("default_bytes", settings.query_max_bytes)),
+            "per_role_bytes": (
+                payload.get("per_role_bytes", {})
+                if isinstance(payload.get("per_role_bytes", {}), dict)
+                else {}
+            ),
+            "status": "configured",
+            "policy_id": row.policy_id,
+        }
+
+    @app.post("/api/v1/workspaces/{workspace_id}/query-budgets")
+    async def api_set_query_budgets(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        default_bytes_raw = payload.get("default_bytes", settings.query_max_bytes)
+        default_bytes = (
+            int(default_bytes_raw) if isinstance(default_bytes_raw, (int, float, str)) else 0
+        )
+        if default_bytes <= 0:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "invalid_default_bytes"},
+            )
+        per_role_raw = payload.get("per_role_bytes", {})
+        per_role_source = per_role_raw if isinstance(per_role_raw, dict) else {}
+        per_role: dict[str, int] = {}
+        for role, value in per_role_source.items():
+            role_name = str(role).strip()
+            if not role_name:
+                continue
+            value_int = int(value) if isinstance(value, (int, float, str)) else 0
+            if value_int > 0:
+                per_role[role_name] = value_int
+        definition = {
+            "workspace_id": workspace_id,
+            "default_bytes": default_bytes,
+            "per_role_bytes": per_role,
+            "updated_by": str(actor.get("actor_id", "unknown")),
+            "updated_at_epoch": int(time.time()),
+        }
+        row = (
+            session.execute(
+                select(db_models.GovernancePolicy).where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "query_budget",
+                    db_models.GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            row = db_models.GovernancePolicy(
+                policy_id=new_ulid(),
+                workspace_id=workspace_id,
+                policy_type="query_budget",
+                definition_ref=json.dumps(definition, sort_keys=True),
+                status="active",
+            )
+            session.add(row)
+        else:
+            row.definition_ref = json.dumps(definition, sort_keys=True)
+        session.flush()
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="query_budget.configured",
+            event_json=definition,
+            correlation_id=request.state.request_id,
+        )
+        return {"workspace_id": workspace_id, "policy_id": row.policy_id, **definition}
 
     @app.get("/api/v1/workspaces/{workspace_id}/evidence/{evidence_id}")
     async def api_get_evidence_bundle(
@@ -2358,6 +2609,615 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return decision
 
+    @app.get("/api/v1/workspaces/{workspace_id}/access-requests")
+    async def api_list_access_requests(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        rows = (
+            session.execute(
+                select(db_models.GovernancePolicy)
+                .where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "data_access_request",
+                    db_models.GovernancePolicy.status == "active",
+                )
+                .order_by(db_models.GovernancePolicy.policy_id)
+            )
+            .scalars()
+            .all()
+        )
+        requests: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row.definition_ref)
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict):
+                requests.append({"request_id": row.policy_id, **payload})
+        return requests
+
+    @app.post("/api/v1/workspaces/{workspace_id}/access-requests")
+    async def api_create_access_request(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        dataset_id = str(payload.get("dataset_id", "")).strip()
+        requested_role = str(payload.get("requested_role", "analyst")).strip() or "analyst"
+        if not dataset_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "dataset_id_required"},
+            )
+        request_id = new_ulid()
+        request_payload = {
+            "workspace_id": workspace_id,
+            "dataset_id": dataset_id,
+            "requested_role": requested_role,
+            "requester_actor_id": str(actor.get("actor_id", "unknown")),
+            "status": "open",
+            "created_at_epoch": int(time.time()),
+        }
+        session.add(
+            db_models.GovernancePolicy(
+                policy_id=request_id,
+                workspace_id=workspace_id,
+                policy_type="data_access_request",
+                definition_ref=json.dumps(request_payload, sort_keys=True),
+                status="active",
+            )
+        )
+        session.flush()
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="access_request.created",
+            event_json={"request_id": request_id, **request_payload},
+            correlation_id=request.state.request_id,
+        )
+        return {"request_id": request_id, **request_payload}
+
+    @app.post("/api/v1/workspaces/{workspace_id}/access-requests/{request_id}/decision")
+    async def api_decide_access_request(
+        workspace_id: str,
+        request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        row = session.get(db_models.GovernancePolicy, request_id)
+        if (
+            row is None
+            or row.workspace_id != workspace_id
+            or row.policy_type != "data_access_request"
+            or row.status != "active"
+        ):
+            return not_found_response(
+                request=request,
+                message="Access request not found.",
+                details={"workspace_id": workspace_id, "request_id": request_id},
+            )  # type: ignore[return-value]
+        try:
+            request_payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            request_payload = {}
+        if not isinstance(request_payload, dict):
+            request_payload = {}
+        decision = str(payload.get("decision", "defer")).strip().lower()
+        if decision not in {"approve", "reject", "defer"}:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "invalid_decision"},
+            )
+        request_payload["status"] = (
+            "approved" if decision == "approve" else "rejected" if decision == "reject" else "open"
+        )
+        request_payload["decision_actor_id"] = str(actor.get("actor_id", "unknown"))
+        request_payload["decision_reason"] = str(payload.get("decision_reason", "")).strip()
+        request_payload["decision_at_epoch"] = int(time.time())
+        row.definition_ref = json.dumps(request_payload, sort_keys=True)
+
+        generated_task: dict[str, object] | None = None
+        if decision == "approve":
+            evidence = store_evidence_bundle(
+                workspace_id=workspace_id,
+                storage_root=settings.storage_root,
+                bundle_type="data_access_request",
+                payload={"request_id": request_id, **request_payload},
+            )
+            proposal = create_proposal(
+                session,
+                workspace_id=workspace_id,
+                proposal_type="policy_pack_change_proposal",
+                evidence_bundle_uri=evidence.evidence_bundle_uri,
+                confidence=1.0,
+            )
+            generated_task = create_review_task(
+                session,
+                workspace_id=workspace_id,
+                subject_ref=str(proposal["proposal_id"]),
+                priority="security_critical",
+                blocking=True,
+            )
+            request_payload["policy_change_task_id"] = generated_task["task_id"]
+        session.flush()
+        response_payload = {"request_id": request_id, **request_payload}
+        if generated_task is not None:
+            response_payload["generated_task"] = generated_task
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="access_request.decided",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
+    @app.get("/api/v1/workspaces/{workspace_id}/breakglass/requests")
+    async def api_list_breakglass_requests(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=steward_or_admin_roles)
+        rows = (
+            session.execute(
+                select(db_models.GovernancePolicy)
+                .where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "breakglass_request",
+                    db_models.GovernancePolicy.status == "active",
+                )
+                .order_by(db_models.GovernancePolicy.policy_id)
+            )
+            .scalars()
+            .all()
+        )
+        requests: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row.definition_ref)
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict):
+                requests.append({"request_id": row.policy_id, **payload})
+        return requests
+
+    @app.post("/api/v1/workspaces/{workspace_id}/breakglass/requests")
+    async def api_create_breakglass_request(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        requested_actor_id = str(payload.get("actor_id", "")).strip()
+        ttl_raw = payload.get("ttl_seconds", 900)
+        ttl_seconds = int(ttl_raw) if isinstance(ttl_raw, (int, float, str)) else 0
+        max_ttl = int(os.getenv("SCHEMAPILOT_BREAKGLASS_MAX_TTL_SECONDS", "3600"))
+        if not requested_actor_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "actor_id_required"},
+            )
+        if ttl_seconds <= 0 or ttl_seconds > max_ttl:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "invalid_breakglass_ttl", "max_ttl_seconds": max_ttl},
+            )
+        request_id = new_ulid()
+        request_payload = {
+            "workspace_id": workspace_id,
+            "actor_id": requested_actor_id,
+            "ttl_seconds": ttl_seconds,
+            "status": "pending",
+            "approvals": [],
+            "requested_by": str(actor.get("actor_id", "unknown")),
+            "created_at_epoch": int(time.time()),
+        }
+        session.add(
+            db_models.GovernancePolicy(
+                policy_id=request_id,
+                workspace_id=workspace_id,
+                policy_type="breakglass_request",
+                definition_ref=json.dumps(request_payload, sort_keys=True),
+                status="active",
+            )
+        )
+        session.flush()
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="breakglass.request_created",
+            event_json={"request_id": request_id, **request_payload},
+            correlation_id=request.state.request_id,
+        )
+        return {"request_id": request_id, **request_payload}
+
+    @app.post("/api/v1/workspaces/{workspace_id}/breakglass/requests/{request_id}/approve")
+    async def api_approve_breakglass_request(
+        workspace_id: str,
+        request_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        row = session.get(db_models.GovernancePolicy, request_id)
+        if (
+            row is None
+            or row.workspace_id != workspace_id
+            or row.policy_type != "breakglass_request"
+            or row.status != "active"
+        ):
+            return not_found_response(
+                request=request,
+                message="Breakglass request not found.",
+                details={"workspace_id": workspace_id, "request_id": request_id},
+            )  # type: ignore[return-value]
+        try:
+            request_payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            request_payload = {}
+        if not isinstance(request_payload, dict):
+            request_payload = {}
+        status = str(request_payload.get("status", "pending")).strip().lower()
+        if status in {"revoked", "expired"}:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": f"breakglass_{status}"},
+            )
+        decision = str(payload.get("decision", "approve")).strip().lower()
+        if decision not in {"approve", "reject"}:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "invalid_decision"},
+            )
+        approvals_raw = request_payload.get("approvals", [])
+        approvals = approvals_raw if isinstance(approvals_raw, list) else []
+        actor_id = str(actor.get("actor_id", "unknown"))
+        if decision == "approve":
+            if actor_id not in approvals:
+                approvals.append(actor_id)
+        else:
+            request_payload["status"] = "rejected"
+        request_payload["approvals"] = sorted(
+            {str(item) for item in approvals if str(item).strip()}
+        )
+        request_payload["last_decision_actor_id"] = actor_id
+        request_payload["last_decision_reason"] = str(payload.get("decision_reason", "")).strip()
+        request_payload["last_decision_at_epoch"] = int(time.time())
+        if decision == "approve" and len(request_payload["approvals"]) >= 2:
+            now_epoch = int(time.time())
+            ttl_seconds = int(request_payload.get("ttl_seconds", 900))
+            expires_epoch = now_epoch + max(ttl_seconds, 1)
+            request_payload["status"] = "active"
+            request_payload["active_from_epoch"] = now_epoch
+            request_payload["expires_epoch"] = expires_epoch
+            grant_id = new_ulid()
+            grant_payload = {
+                "request_id": request_id,
+                "workspace_id": workspace_id,
+                "actor_id": str(request_payload.get("actor_id", "")),
+                "status": "active",
+                "expires_epoch": expires_epoch,
+            }
+            session.add(
+                db_models.GovernancePolicy(
+                    policy_id=grant_id,
+                    workspace_id=workspace_id,
+                    policy_type="breakglass_grant",
+                    definition_ref=json.dumps(grant_payload, sort_keys=True),
+                    status="active",
+                )
+            )
+            request_payload["grant_policy_id"] = grant_id
+        row.definition_ref = json.dumps(request_payload, sort_keys=True)
+        session.flush()
+        response_payload = {"request_id": request_id, **request_payload}
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            event_type="breakglass.request_decided",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
+    @app.post("/api/v1/workspaces/{workspace_id}/breakglass/requests/{request_id}/revoke")
+    async def api_revoke_breakglass_request(
+        workspace_id: str,
+        request_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        row = session.get(db_models.GovernancePolicy, request_id)
+        if (
+            row is None
+            or row.workspace_id != workspace_id
+            or row.policy_type != "breakglass_request"
+            or row.status != "active"
+        ):
+            return not_found_response(
+                request=request,
+                message="Breakglass request not found.",
+                details={"workspace_id": workspace_id, "request_id": request_id},
+            )  # type: ignore[return-value]
+        try:
+            request_payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            request_payload = {}
+        if not isinstance(request_payload, dict):
+            request_payload = {}
+        request_payload["status"] = "revoked"
+        request_payload["revoked_by"] = str(actor.get("actor_id", "unknown"))
+        request_payload["revoked_at_epoch"] = int(time.time())
+        row.definition_ref = json.dumps(request_payload, sort_keys=True)
+        grant_policy_id = str(request_payload.get("grant_policy_id", "")).strip()
+        if grant_policy_id:
+            grant_row = session.get(db_models.GovernancePolicy, grant_policy_id)
+            if grant_row is not None:
+                grant_row.status = "inactive"
+        session.flush()
+        response_payload = {"request_id": request_id, **request_payload}
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="breakglass.request_revoked",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
+    @app.post("/api/v1/workspaces/{workspace_id}/glossary/generate")
+    async def api_generate_glossary(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        datasets = list_datasets(session, workspace_id)
+        entries: list[dict[str, object]] = []
+        for dataset in datasets:
+            logical_name = str(dataset.get("logical_name", "")).strip()
+            if not logical_name:
+                continue
+            entries.append(
+                {
+                    "term": logical_name,
+                    "kind": "dataset",
+                    "dataset_id": str(dataset.get("dataset_id", "")),
+                    "definition": f"Dataset {logical_name} available in workspace {workspace_id}.",
+                }
+            )
+        semantic_row = (
+            session.execute(
+                select(db_models.GovernancePolicy).where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "semantic_manifest",
+                    db_models.GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if semantic_row is not None:
+            try:
+                semantic_payload = json.loads(semantic_row.definition_ref)
+            except json.JSONDecodeError:
+                semantic_payload = {}
+            if isinstance(semantic_payload, dict):
+                manifest = semantic_payload.get("manifest", {})
+                if isinstance(manifest, dict):
+                    metrics_raw = manifest.get("metrics", [])
+                    metrics = metrics_raw if isinstance(metrics_raw, list) else []
+                    for metric in metrics:
+                        if not isinstance(metric, dict):
+                            continue
+                        metric_id = str(metric.get("metric_id", "")).strip()
+                        if not metric_id:
+                            continue
+                        entries.append(
+                            {
+                                "term": metric_id,
+                                "kind": "metric",
+                                "definition": str(metric.get("description", "Semantic metric")),
+                            }
+                        )
+        glossary_payload = {
+            "workspace_id": workspace_id,
+            "generated_at_epoch": int(time.time()),
+            "entry_count": len(entries),
+            "entries": sorted(
+                entries,
+                key=lambda item: (str(item.get("kind", "")), str(item.get("term", ""))),
+            ),
+        }
+        row = (
+            session.execute(
+                select(db_models.GovernancePolicy).where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "glossary",
+                    db_models.GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            row = db_models.GovernancePolicy(
+                policy_id=new_ulid(),
+                workspace_id=workspace_id,
+                policy_type="glossary",
+                definition_ref=json.dumps(glossary_payload, sort_keys=True),
+                status="active",
+            )
+            session.add(row)
+        else:
+            row.definition_ref = json.dumps(glossary_payload, sort_keys=True)
+        session.flush()
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="glossary.generated",
+            event_json=glossary_payload,
+            correlation_id=request.state.request_id,
+        )
+        return glossary_payload
+
+    @app.get("/api/v1/workspaces/{workspace_id}/glossary/export")
+    async def api_export_glossary(
+        workspace_id: str,
+        request: Request,
+        format: str = "json",  # noqa: A002
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        row = (
+            session.execute(
+                select(db_models.GovernancePolicy).where(
+                    db_models.GovernancePolicy.workspace_id == workspace_id,
+                    db_models.GovernancePolicy.policy_type == "glossary",
+                    db_models.GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            return {"workspace_id": workspace_id, "entry_count": 0, "entries": [], "format": "json"}
+        try:
+            payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        normalized_format = str(format).strip().lower()
+        if normalized_format == "markdown":
+            entries_raw = payload.get("entries", [])
+            entries = entries_raw if isinstance(entries_raw, list) else []
+            lines = [f"# Glossary for {workspace_id}", ""]
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                term = str(entry.get("term", "")).strip()
+                if not term:
+                    continue
+                definition = str(entry.get("definition", "")).strip()
+                kind = str(entry.get("kind", "")).strip()
+                lines.append(f"- **{term}** ({kind}): {definition}")
+            return {
+                "workspace_id": workspace_id,
+                "format": "markdown",
+                "content": "\n".join(lines).strip() + "\n",
+            }
+        return {**payload, "format": "json"}
+
+    @app.post("/api/v1/workspaces/{workspace_id}/promotion/export")
+    async def api_promotion_export(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        snapshot = export_catalog_snapshot(session, workspace_id=workspace_id)
+        bundle_payload = {
+            "workspace_id": workspace_id,
+            "snapshot": snapshot,
+            "generated_at_epoch": int(time.time()),
+        }
+        signing_key = os.getenv("SCHEMAPILOT_PROMOTION_SIGNING_KEY", "schemapilot-promotion-key-v1")
+        signature = _sign_payload(payload=bundle_payload, key=signing_key, key_id="promotion-v1")
+        response_payload: dict[str, object] = {
+            "bundle": bundle_payload,
+            "signature": signature,
+        }
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="promotion.bundle_exported",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
+    @app.post("/api/v1/workspaces/{workspace_id}/promotion/import")
+    async def api_promotion_import(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        bundle_raw = payload.get("bundle", {})
+        signature_raw = payload.get("signature", {})
+        bundle = bundle_raw if isinstance(bundle_raw, dict) else {}
+        signature = signature_raw if isinstance(signature_raw, dict) else {}
+        signing_key = os.getenv("SCHEMAPILOT_PROMOTION_SIGNING_KEY", "schemapilot-promotion-key-v1")
+        if not _verify_signed_payload(payload=bundle, signature=signature, key=signing_key):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "promotion_signature_invalid"},
+            )
+        before_report_raw = payload.get("before_policy_report")
+        after_report_raw = payload.get("after_policy_report")
+        if isinstance(before_report_raw, dict) and isinstance(after_report_raw, dict):
+            protected_raw = payload.get("protected_scenario_ids", [])
+            protected = (
+                [str(item) for item in protected_raw if str(item).strip()]
+                if isinstance(protected_raw, list)
+                else []
+            )
+            diff = compute_policy_impact_diff(
+                before_report={str(key): value for key, value in before_report_raw.items()},
+                after_report={str(key): value for key, value in after_report_raw.items()},
+                protected_scenario_ids=protected,
+            )
+            invariants = diff.get("invariants", {})
+            protected_denials = (
+                invariants.get("protected_denials", [])
+                if isinstance(invariants, dict)
+                else []
+            )
+            if isinstance(protected_denials, list) and protected_denials:
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": "promotion_policy_gate_failed",
+                        "protected_denials": protected_denials,
+                    },
+                )
+        snapshot_raw = bundle.get("snapshot", {})
+        snapshot = snapshot_raw if isinstance(snapshot_raw, dict) else {}
+        result = import_catalog_snapshot(session, workspace_id=workspace_id, snapshot=snapshot)
+        response_payload: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "import": result,
+        }
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="promotion.bundle_imported",
+            event_json=response_payload,
+            correlation_id=request.state.request_id,
+        )
+        return response_payload
+
     @app.post("/api/v1/workspaces/{workspace_id}/recommendations")
     async def api_create_recommendation(
         workspace_id: str, payload: RecommendationCreateRequest, request: Request
@@ -2394,6 +3254,49 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             "workspace_id": workspace_id,
             "lineage_version": "v1",
             "lineage": lineage,
+            "lineage_available": bool(lineage),
+        }
+
+    @app.post("/api/v1/workspaces/{workspace_id}/lineage/export")
+    async def api_export_lineage_graph(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        sql_text = str(payload.get("sql_text", "")).strip()
+        if not sql_text:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_sql_text"},
+            )
+        lineage = derive_column_lineage(sql_text)
+        nodes: set[str] = set()
+        edges: list[dict[str, object]] = []
+        for row in lineage:
+            output_column = str(row.get("output_column", "")).strip()
+            source_columns_raw = row.get("source_columns", [])
+            source_columns = (
+                [str(item) for item in source_columns_raw if str(item).strip()]
+                if isinstance(source_columns_raw, list)
+                else []
+            )
+            if output_column:
+                nodes.add(output_column)
+            for source in source_columns:
+                nodes.add(source)
+                if output_column:
+                    edges.append({"from": source, "to": output_column})
+        return {
+            "workspace_id": workspace_id,
+            "lineage_version": "v1",
+            "graph": {
+                "nodes": [{"id": node} for node in sorted(nodes)],
+                "edges": sorted(
+                    edges,
+                    key=lambda item: (str(item.get("from", "")), str(item.get("to", ""))),
+                ),
+            },
             "lineage_available": bool(lineage),
         }
 
@@ -2481,6 +3384,31 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 build_id=build_id,
                 failures=contract_failures,
             )
+        build_attestation_payload = {
+            "workspace_id": workspace_id,
+            "build_id": build_id,
+            "status": str(result_payload.get("status", "")),
+            "gate_reason": str(result_payload.get("gate_reason", "")),
+            "latest_pointer_after": result_payload.get("latest_pointer_after"),
+            "target_db_state_after": result_payload.get("target_db_state_after"),
+        }
+        attestation_required = (
+            os.getenv("SCHEMAPILOT_BUILD_ATTESTATION_REQUIRED", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        attestation_key = os.getenv("SCHEMAPILOT_BUILD_ATTESTATION_KEY", "").strip()
+        if attestation_required and not attestation_key:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "build_attestation_key_required"},
+            )
+        if not attestation_key:
+            attestation_key = "schemapilot-build-attestation-key-dev-v1"
+        result_payload["build_attestation"] = _sign_payload(
+            payload=build_attestation_payload,
+            key=attestation_key,
+            key_id="build-attestation-v1",
+        )
         append_audit_event(
             session,
             workspace_id=workspace_id,

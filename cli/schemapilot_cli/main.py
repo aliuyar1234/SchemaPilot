@@ -22,6 +22,11 @@ from backend.shared_domain.gold_templates import (
     list_gold_template_packs,
 )
 from backend.shared_domain.ids import new_ulid
+from backend.shared_domain.policy_diff import compute_policy_impact_diff
+from backend.shared_domain.query_templates import (
+    list_query_template_summaries,
+    render_query_template,
+)
 from cli.schemapilot_cli.analyze import analyze_workspace
 from cli.schemapilot_cli.diag import generate_diag_bundle
 from cli.schemapilot_cli.doctor import run_doctor_preflight
@@ -955,6 +960,35 @@ def target_db_cutover(
     typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
 
 
+@target_db_app.command("rotate-credentials")
+def target_db_rotate_credentials(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    reason: str = typer.Option("operator_requested", "--reason"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Rotate target DB credential refs through worker-run flow."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/credentials/rotate",
+            {"reason": reason},
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
 @target_db_app.command("status")
 def target_db_status(
     workspace: str = typer.Option(..., "--workspace", "-w"),
@@ -1247,6 +1281,173 @@ def query_console(
     typer.echo(json.dumps(output_payload, indent=2, sort_keys=True))
 
 
+@app.command("query-explain")
+def query_explain(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    query_text: str = typer.Option(..., "--query-text"),
+    estimated_rows: int = typer.Option(100, "--estimated-rows"),
+    estimated_columns: int = typer.Option(8, "--estimated-columns"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Estimate query cost/budget outcome without returning rows."""
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/query-explain",
+        {
+            "workspace_id": workspace,
+            "query_text": query_text,
+            "estimated_rows": max(estimated_rows, 0),
+            "estimated_columns": max(estimated_columns, 0),
+        },
+        auth_token=DEFAULT_GATEWAY_AUTH_TOKEN,
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("pgwire-query")
+def pgwire_query(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    sql: str = typer.Option(..., "--sql"),
+    dataset_id: str | None = typer.Option(None, "--dataset-id"),
+    max_rows: int = typer.Option(100, "--max-rows"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Run SQL through optional PGWire proxy shim endpoint."""
+    payload: dict[str, object] = {
+        "workspace_id": workspace,
+        "sql": sql,
+        "max_rows": max(max_rows, 1),
+    }
+    if dataset_id:
+        payload["dataset_id"] = dataset_id
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/pgwire/query",
+        payload,
+        auth_token=DEFAULT_GATEWAY_AUTH_TOKEN,
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("tokenize")
+def tokenize_value(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    value: str = typer.Option(..., "--value"),
+    namespace: str = typer.Option("default", "--namespace"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Tokenize one sensitive value through optional tokenization vault."""
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/tokenize",
+        {"workspace_id": workspace, "value": value, "namespace": namespace},
+        auth_token=os.getenv("SCHEMAPILOT_GATEWAY_STEWARD_TOKEN", "local-data-steward-token"),
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("detokenize")
+def detokenize_value(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    token: str = typer.Option(..., "--token"),
+    namespace: str = typer.Option("default", "--namespace"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Detokenize one token (platform-admin only)."""
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/detokenize",
+        {"workspace_id": workspace, "token": token, "namespace": namespace},
+        auth_token=os.getenv("SCHEMAPILOT_GATEWAY_ADMIN_TOKEN", "local-platform-admin-token"),
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("sample")
+def sample_query(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    sql: str = typer.Option(..., "--sql"),
+    dataset_id: str | None = typer.Option(None, "--dataset-id"),
+    max_rows: int = typer.Option(10, "--max-rows"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Fetch policy-bound masked sample rows."""
+    payload: dict[str, object] = {
+        "workspace_id": workspace,
+        "query_text": sql,
+        "max_rows": max(max_rows, 1),
+    }
+    if dataset_id:
+        payload["resource_attributes"] = {"dataset_id": dataset_id}
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/sample",
+        payload,
+        auth_token=DEFAULT_GATEWAY_AUTH_TOKEN,
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("query-templates")
+def query_templates() -> None:
+    """List safe query templates and required parameters."""
+    typer.echo(json.dumps({"templates": list_query_template_summaries()}, indent=2, sort_keys=True))
+
+
+@app.command("query-template-run")
+def query_template_run(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    template_id: str = typer.Option(..., "--template-id"),
+    params_json: str = typer.Option("{}", "--params-json"),
+    dataset_id: str | None = typer.Option(None, "--dataset-id"),
+    max_rows: int = typer.Option(100, "--max-rows"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Render and run a safe query template through the gateway."""
+    params = _parse_json_mapping(params_json, field_name="params_json")
+    try:
+        rendered = render_query_template(template_id=template_id, params=params)
+    except ValueError as exc:
+        typer.echo(f"Template render failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    template_dataset_id = str(rendered.get("dataset_id", "")).strip()
+    resolved_dataset_id = dataset_id or template_dataset_id
+    if not resolved_dataset_id:
+        typer.echo("Template requires dataset_id; provide --dataset-id.", err=True)
+        raise typer.Exit(code=1)
+    response = _request_json(
+        "POST",
+        f"{gateway_base_url}/api/v1/gateway/query",
+        {
+            "workspace_id": workspace,
+            "query": {"language": "sql", "text": rendered["sql"]},
+            "resource_attributes": {"dataset_id": resolved_dataset_id},
+            "max_rows": max(max_rows, 1),
+            "template_id": rendered["template_id"],
+        },
+        auth_token=DEFAULT_GATEWAY_AUTH_TOKEN,
+    )
+    result = _as_dict(response)
+    typer.echo(
+        json.dumps(
+            {
+                "workspace_id": workspace,
+                "template": {
+                    "template_id": rendered["template_id"],
+                    "name": rendered.get("name", rendered["template_id"]),
+                    "dataset_id": resolved_dataset_id,
+                    "sql": rendered["sql"],
+                },
+                "result": result.get("result", {}),
+                "provenance": result.get("provenance", {}),
+                "request_id": result.get("request_id"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def _parse_json_mapping(raw: str, *, field_name: str) -> dict[str, object]:
     text = raw.strip()
     if not text:
@@ -1354,6 +1555,168 @@ def policy_audit_report(
     )
 
 
+@app.command("policy-diff")
+def policy_diff(
+    before: str = typer.Option(..., "--before"),
+    after: str = typer.Option(..., "--after"),
+    output: str = typer.Option("runtime/audit/policy_diff_report.json", "--output"),
+    protected_scenario_id: list[str] = typer.Option([], "--protected-scenario-id"),
+) -> None:
+    """Compare two policy simulation reports and emit deterministic impact diff."""
+    before_path = Path(before)
+    after_path = Path(after)
+    if not before_path.exists():
+        typer.echo(f"Before report not found: {before_path.as_posix()}", err=True)
+        raise typer.Exit(code=1)
+    if not after_path.exists():
+        typer.echo(f"After report not found: {after_path.as_posix()}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        before_payload = json.loads(before_path.read_text(encoding="utf-8"))
+        after_payload = json.loads(after_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        typer.echo(f"Invalid report JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(before_payload, dict) or not isinstance(after_payload, dict):
+        typer.echo("Policy diff reports must be JSON objects.", err=True)
+        raise typer.Exit(code=1)
+    diff = compute_policy_impact_diff(
+        before_report={str(key): value for key, value in before_payload.items()},
+        after_report={str(key): value for key, value in after_payload.items()},
+        protected_scenario_ids=protected_scenario_id,
+    )
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(diff, indent=2, sort_keys=True), encoding="utf-8")
+    invariants = diff.get("invariants", {})
+    protected_denials = (
+        invariants.get("protected_denials", [])
+        if isinstance(invariants, dict)
+        else []
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "output_path": output_path.as_posix(),
+                "status": diff.get("status", "unknown"),
+                "summary": diff.get("summary", {}),
+                "protected_denials": protected_denials,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if isinstance(protected_denials, list) and protected_denials:
+        raise typer.Exit(code=1)
+
+
+@app.command("access-request-create")
+def access_request_create(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    dataset_id: str = typer.Option(..., "--dataset-id"),
+    requested_role: str = typer.Option("analyst", "--requested-role"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Create a data access request."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/access-requests",
+        {"dataset_id": dataset_id, "requested_role": requested_role},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("access-request-list")
+def access_request_list(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """List data access requests."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/access-requests",
+    )
+    typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@app.command("access-request-decide")
+def access_request_decide(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    request_id: str = typer.Option(..., "--request-id"),
+    decision: str = typer.Option(..., "--decision"),
+    reason: str = typer.Option("", "--reason"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Approve/reject one data access request."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/access-requests/{request_id}/decision",
+        {"decision": decision, "decision_reason": reason},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("breakglass-request")
+def breakglass_request(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    actor_id: str = typer.Option(..., "--actor-id"),
+    ttl_seconds: int = typer.Option(900, "--ttl-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Create break-glass request (TTL-bound, dual-approval)."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests",
+        {"actor_id": actor_id, "ttl_seconds": max(ttl_seconds, 1)},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("breakglass-list")
+def breakglass_list(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """List break-glass requests."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests",
+    )
+    typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@app.command("breakglass-approve")
+def breakglass_approve(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    request_id: str = typer.Option(..., "--request-id"),
+    decision: str = typer.Option("approve", "--decision"),
+    reason: str = typer.Option("", "--reason"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Approve/reject a break-glass request."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests/{request_id}/approve",
+        {"decision": decision, "decision_reason": reason},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("breakglass-revoke")
+def breakglass_revoke(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    request_id: str = typer.Option(..., "--request-id"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Revoke a break-glass request/grant."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/breakglass/requests/{request_id}/revoke",
+        {},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
 @app.command("analyze")
 def analyze(
     workspace: str = typer.Option(..., "--workspace", "-w"),
@@ -1420,6 +1783,138 @@ def catalog_import(
     typer.echo(json.dumps(response, indent=2, sort_keys=True))
 
 
+@app.command("glossary-generate")
+def glossary_generate(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Generate glossary/data dictionary for a workspace."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/glossary/generate",
+        {},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("glossary-export")
+def glossary_export(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    format: str = typer.Option("json", "--format"),  # noqa: A002
+    output: str | None = typer.Option(None, "--output"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Export glossary in JSON or markdown format."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/glossary/export?format={format}",
+    )
+    body = _as_dict(response)
+    if output:
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if str(body.get("format", "")).lower() == "markdown":
+            path.write_text(str(body.get("content", "")), encoding="utf-8")
+        else:
+            path.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("lineage-export")
+def lineage_export(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    sql: str = typer.Option(..., "--sql"),
+    output: str | None = typer.Option(None, "--output"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Export column lineage graph for SQL text."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/lineage/export",
+        {"sql_text": sql},
+    )
+    body = _as_dict(response)
+    if output:
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("alerts-test")
+def alerts_test(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    message: str = typer.Option("test_alert", "--message"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Emit one non-blocking alert sink test event."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/alerts/test",
+        {"message": message},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@app.command("promotion-export")
+def promotion_export(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    output: str = typer.Option(..., "--output"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Export a signed promotion bundle."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/promotion/export",
+        {},
+    )
+    body = _as_dict(response)
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
+    typer.echo(json.dumps({"output_path": path.as_posix(), "workspace_id": workspace}, indent=2))
+
+
+@app.command("promotion-import")
+def promotion_import(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    bundle_path: str = typer.Option(..., "--bundle-path"),
+    before_report: str | None = typer.Option(None, "--before-policy-report"),
+    after_report: str | None = typer.Option(None, "--after-policy-report"),
+    protected_scenario_id: list[str] = typer.Option([], "--protected-scenario-id"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Import a signed promotion bundle with optional policy diff gates."""
+    path = Path(bundle_path)
+    if not path.exists():
+        typer.echo(f"Bundle not found: {path.as_posix()}", err=True)
+        raise typer.Exit(code=1)
+    payload = _as_dict(json.loads(path.read_text(encoding="utf-8")))
+    request_payload: dict[str, object] = {
+        "bundle": payload.get("bundle", {}),
+        "signature": payload.get("signature", {}),
+    }
+    if before_report and after_report:
+        before_path = Path(before_report)
+        after_path = Path(after_report)
+        if not before_path.exists() or not after_path.exists():
+            typer.echo("Policy report path missing.", err=True)
+            raise typer.Exit(code=1)
+        request_payload["before_policy_report"] = json.loads(
+            before_path.read_text(encoding="utf-8")
+        )
+        request_payload["after_policy_report"] = json.loads(
+            after_path.read_text(encoding="utf-8")
+        )
+        request_payload["protected_scenario_ids"] = protected_scenario_id
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/promotion/import",
+        request_payload,
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
 @app.command("demo-generate")
 def demo_generate(
     output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
@@ -1427,6 +1922,122 @@ def demo_generate(
     """Generate deterministic first-hour demo data files."""
     result = generate_demo_scenario(output_root=output_root)
     typer.echo(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+
+
+def _resolve_onboarding_preset(
+    *,
+    preset: str,
+    source_root_override: str | None,
+    output_root: str,
+) -> tuple[str, str, dict[str, object], dict[str, object]]:
+    normalized = preset.strip().lower()
+    if normalized in {"dropzone-team", "filesystem-team"}:
+        scenario = generate_demo_scenario(output_root=output_root)
+        source_root = source_root_override or scenario.exports_path
+        source_type = "dropzone" if normalized == "dropzone-team" else "filesystem"
+        scope: dict[str, object] = {"root_path": source_root}
+        if source_type == "dropzone":
+            manifest_payload = json.loads(Path(scenario.manifest_path).read_text(encoding="utf-8"))
+            exports_raw = manifest_payload.get("exports", [])
+            exports = [str(item) for item in exports_raw if str(item).strip()]
+            scope["required_files"] = sorted(exports)
+        return source_type, source_root, scope, scenario.to_dict()
+    if normalized == "sharepoint-team":
+        source_root = source_root_override or "/sites/default/shared-documents"
+        return (
+            "sharepoint",
+            source_root,
+            {"root_path": source_root},
+            {"status": "not_generated", "reason": "sharepoint_preset_no_local_demo_data"},
+        )
+    raise ValueError("Unsupported preset. Use dropzone-team, filesystem-team or sharepoint-team.")
+
+
+@app.command("init-preset")
+def init_preset(
+    preset: str = typer.Option("dropzone-team", "--preset"),
+    workspace_name: str = typer.Option("Preset Workspace", "--workspace-name"),
+    profile: str = typer.Option("team", "--profile"),
+    output_root: str = typer.Option("runtime/demo/first_hour", "--output-root"),
+    source_root: str | None = typer.Option(None, "--source-root"),
+    run_discover: bool = typer.Option(True, "--run-discover/--no-run-discover"),
+    wait_for_run: bool = typer.Option(True, "--wait-for-run/--no-wait-for-run"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+    gateway_base_url: str = typer.Option(DEFAULT_GATEWAY_BASE_URL, "--gateway-base-url"),
+) -> None:
+    """Guided onboarding presets (dropzone-team/filesystem-team/sharepoint-team)."""
+    try:
+        resolved_source_type, resolved_root, scope, demo_data = _resolve_onboarding_preset(
+            preset=preset,
+            source_root_override=source_root,
+            output_root=output_root,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    workspace_response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces",
+        {"name": workspace_name, "profile": profile, "security_baseline": "strict"},
+    )
+    workspace_id = str(_as_dict(workspace_response).get("workspace_id", "")).strip()
+    if not workspace_id:
+        typer.echo("Workspace creation did not return workspace_id.", err=True)
+        raise typer.Exit(code=1)
+
+    source_response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace_id}/sources",
+        {
+            "source_type": resolved_source_type,
+            "scope": scope,
+            "display_name": resolved_root,
+        },
+    )
+
+    run_response: dict[str, object] = {}
+    run_observed: dict[str, object] = {}
+    if run_discover:
+        run_payload = _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace_id}/runs",
+            {"run_type": "discover"},
+        )
+        run_response = _as_dict(run_payload)
+        run_id = str(run_response.get("run_id", "")).strip()
+        if wait_for_run and run_id:
+            run_observed = _wait_for_run_completion(
+                api_base_url=api_base_url,
+                workspace_id=workspace_id,
+                run_id=run_id,
+                timeout_seconds=wait_timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+
+    typer.echo(
+        json.dumps(
+            {
+                "preset": preset.strip().lower(),
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "profile": profile,
+                "source": _as_dict(source_response),
+                "run": run_response,
+                "run_observed": run_observed,
+                "demo_data": demo_data,
+                "next_steps": _next_steps_payload(
+                    workspace_id=workspace_id,
+                    pack=None,
+                    gateway_base_url=gateway_base_url,
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("first-hour")

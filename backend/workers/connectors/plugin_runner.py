@@ -68,6 +68,9 @@ def _run_plugin_in_subprocess(
 def _normalize_plugin_rows(raw: Any) -> list[dict[str, object]]:
     if not isinstance(raw, list):
         raise ValueError("plugin_execution_failed:expected_list_output")
+    max_rows = _plugin_max_rows()
+    if len(raw) > max_rows:
+        raise ValueError("plugin_execution_failed:plugin_row_limit_exceeded")
     normalized: list[dict[str, object]] = []
     for row in raw:
         if not isinstance(row, dict):
@@ -91,8 +94,23 @@ def _safe_subprocess_env() -> dict[str, str]:
         value = os.getenv(key)
         if value is not None:
             env[key] = value
-    for key, value in os.environ.items():
-        if key.startswith("SCHEMAPILOT_PLUGIN_"):
+    plugin_keys = {
+        "SCHEMAPILOT_PLUGIN_ALLOWED_ROOT",
+        "SCHEMAPILOT_PLUGIN_NETWORK_ENABLED",
+        "SCHEMAPILOT_PLUGIN_MAX_RUNTIME_SECONDS",
+        "SCHEMAPILOT_PLUGIN_MAX_ROWS",
+    }
+    dynamic_allow = os.getenv("SCHEMAPILOT_PLUGIN_ENV_ALLOWLIST", "")
+    plugin_keys.update(
+        {
+            item.strip()
+            for item in dynamic_allow.split(",")
+            if item.strip().startswith("SCHEMAPILOT_PLUGIN_")
+        }
+    )
+    for key in sorted(plugin_keys):
+        value = os.getenv(key)
+        if value is not None:
             env[key] = value
     return env
 
@@ -103,6 +121,15 @@ def _plugin_max_runtime_seconds() -> int:
         return int(raw.strip())
     except ValueError:
         return 30
+
+
+def _plugin_max_rows() -> int:
+    raw = os.getenv("SCHEMAPILOT_PLUGIN_MAX_ROWS", "50000")
+    try:
+        parsed = int(raw.strip())
+    except ValueError:
+        return 50000
+    return max(parsed, 1)
 
 
 @contextmanager

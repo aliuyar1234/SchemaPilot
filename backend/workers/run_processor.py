@@ -33,10 +33,18 @@ from backend.shared_domain.metadata_models import (
 )
 from backend.shared_domain.observability import observe_worker_step_duration
 from backend.shared_domain.plugin_loader import ConnectorPluginSpec, load_connector_plugin_specs
+from backend.shared_domain.source_mirror import (
+    build_source_snapshot_manifest,
+    persist_source_snapshot_manifest,
+)
 from backend.workers.anomaly_detection import detect_profile_anomalies
 from backend.workers.bronze import ingest_file_to_bronze
+from backend.workers.connectors.db_dumps import discover as discover_db_dumps
+from backend.workers.connectors.dropzone import discover_dropzone_files
 from backend.workers.connectors.filesystem import DiscoveredFile, discover_files
+from backend.workers.connectors.jira_exports import discover_jira_exports
 from backend.workers.connectors.plugin_runner import execute_connector_plugin
+from backend.workers.connectors.zendesk_exports import discover_zendesk_exports
 from backend.workers.drift import detect_schema_drift
 from backend.workers.pii import detect_pii_proposals
 from backend.workers.profiler import profile_csv_file
@@ -280,6 +288,19 @@ RUN_STEP_DEFINITIONS: dict[str, tuple[RunStepDefinition, ...]] = {
         ),
     ),
     "TARGET_DB_SYNC_RUN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_ROTATE_CREDENTIALS": (
         RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
         RunStepDefinition(
             step_key="execute_target_operation",
@@ -812,6 +833,7 @@ def _process_discover_run(
     _enforce_worker_step_timeout(step_rows=step_rows, step_key="ingest_profile_governance")
     dataset_ids: set[str] = set()
     artifact_manifests: list[dict[str, object]] = []
+    source_snapshot_manifests: list[dict[str, object]] = []
     evidence_bundles: list[dict[str, object]] = []
     completeness_expected_items: list[dict[str, object]] = []
     completeness_failures: list[dict[str, object]] = []
@@ -844,6 +866,61 @@ def _process_discover_run(
                     include_globs=include_globs,
                     exclude_globs=exclude_globs,
                 )
+            elif source.source_type == "dropzone":
+                root_path = str(scope.get("root_path", "")).strip()
+                if not root_path:
+                    raise ValueError(f"Dropzone source {source.source_id} is missing root_path.")
+                include_globs = _string_list(scope.get("include_globs"), default=[])
+                exclude_globs = _string_list(scope.get("exclude_globs"), default=[])
+                required_files = _string_list(scope.get("required_files"), default=[])
+                discovered_files = discover_dropzone_files(
+                    root_path=root_path,
+                    include_globs=include_globs or None,
+                    exclude_globs=exclude_globs or None,
+                    required_files=required_files or None,
+                )
+            elif source.source_type == "db_dump":
+                root_path = str(scope.get("root_path", "")).strip()
+                if not root_path:
+                    raise ValueError(f"DB dump source {source.source_id} is missing root_path.")
+                discovered_files = [
+                    DiscoveredFile(
+                        path=str(row.get("path", "")),
+                        dataset_family=str(row.get("dataset_family", "db_dump")),
+                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                        content_hash_sample=str(row.get("content_hash_sample", "")),
+                    )
+                    for row in discover_db_dumps(scope)
+                ]
+            elif source.source_type == "jira":
+                root_path = str(scope.get("root_path", "")).strip()
+                if not root_path:
+                    raise ValueError(f"Jira source {source.source_id} is missing root_path.")
+                discovered_files = [
+                    DiscoveredFile(
+                        path=str(row.get("path", "")),
+                        dataset_family=str(row.get("dataset_family", "jira")),
+                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                        content_hash_sample=str(row.get("content_hash_sample", "")),
+                    )
+                    for row in discover_jira_exports(scope)
+                ]
+            elif source.source_type == "zendesk":
+                root_path = str(scope.get("root_path", "")).strip()
+                if not root_path:
+                    raise ValueError(f"Zendesk source {source.source_id} is missing root_path.")
+                discovered_files = [
+                    DiscoveredFile(
+                        path=str(row.get("path", "")),
+                        dataset_family=str(row.get("dataset_family", "zendesk")),
+                        size_bytes=_coerce_int(row.get("size_bytes", 0), default=0),
+                        mtime_epoch=_coerce_float(row.get("mtime_epoch", 0.0), default=0.0),
+                        content_hash_sample=str(row.get("content_hash_sample", "")),
+                    )
+                    for row in discover_zendesk_exports(scope)
+                ]
             else:
                 plugin = connector_plugins.get(source.source_type)
                 if plugin is None:
@@ -872,17 +949,52 @@ def _process_discover_run(
             [{"path": item.path, "mtime_epoch": item.mtime_epoch} for item in discovered_files],
             previous_cursor=str(state.get("cursor", "")),
         )
+        source_snapshot = build_source_snapshot_manifest(
+            workspace_id=run.workspace_id,
+            source_id=source.source_id,
+            source_type=source.source_type,
+            root_path=root_path,
+            cursor_before=str(state.get("cursor", "")),
+            cursor_after=next_cursor,
+            rows=[
+                {
+                    "path": _relative_locator(root_path=root_path, path=item.path),
+                    "size_bytes": item.size_bytes,
+                    "mtime_epoch": item.mtime_epoch,
+                    "content_hash_sample": item.content_hash_sample,
+                    "dataset_family": item.dataset_family,
+                }
+                for item in discovered_files
+            ],
+            strict_mode=strict_ingest,
+        )
+        source_snapshot_materialized = persist_source_snapshot_manifest(
+            storage_root=storage_root,
+            manifest=source_snapshot,
+        )
+        source_snapshot_manifests.append(
+            {
+                "source_id": source.source_id,
+                "source_type": source.source_type,
+                "snapshot_checksum": source_snapshot_materialized["snapshot_checksum"],
+                "snapshot_uri": source_snapshot_materialized["snapshot_uri"],
+                "entry_count": _coerce_int(source_snapshot.get("entry_count"), default=0),
+            }
+        )
         if len(discovered_files) > _worker_step_max_items():
             raise ValueError("worker_step_item_quota_exceeded")
+        connector_state_payload: dict[str, object] = {
+            "cursor": next_cursor,
+            "source_type": source.source_type,
+            "last_discovered_count": len(discovered_files),
+        }
+        if source.source_type == "sharepoint":
+            connector_state_payload["delta_cursor"] = next_cursor
         save_connector_state(
             storage_root=storage_root,
             workspace_id=run.workspace_id,
             source_id=source.source_id,
-            state={
-                "cursor": next_cursor,
-                "source_type": source.source_type,
-                "last_discovered_count": len(discovered_files),
-            },
+            state=connector_state_payload,
         )
         for discovered in discovered_files:
             _enforce_worker_step_timeout(step_rows=step_rows, step_key="ingest_profile_governance")
@@ -1124,6 +1236,10 @@ def _process_discover_run(
         "artifact_manifests": sorted(
             artifact_manifests,
             key=lambda row: (str(row.get("dataset_id")), str(row.get("artifact_id"))),
+        ),
+        "source_snapshot_manifests": sorted(
+            source_snapshot_manifests,
+            key=lambda row: (str(row.get("source_id")), str(row.get("snapshot_checksum"))),
         ),
         "evidence_bundles": sorted(
             evidence_bundles,
@@ -1717,6 +1833,19 @@ def _coerce_int(value: object, *, default: int) -> int:
     if isinstance(value, str):
         try:
             return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_float(value: object, *, default: float) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
         except ValueError:
             return default
     return default

@@ -6,7 +6,9 @@ import json
 import os
 import re
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from time import perf_counter
+from time import time as unix_time
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -20,7 +22,9 @@ from backend.gateway.executor import (
     UnsafeSqlError,
     execute_sql,
 )
+from backend.gateway.pgwire_proxy import normalize_pgwire_payload
 from backend.gateway.policy import AccessDecision, evaluate_access
+from backend.gateway.query_budgets import resolve_query_budget
 from backend.gateway.query_cache import InMemoryQueryCache
 from backend.gateway.retrieval_opensearch import (
     OpenSearchUnavailableError,
@@ -53,6 +57,7 @@ from backend.shared_domain.errors import (
     DisabledIntegrationError,
     PolicyDeniedError,
     SchemaPilotError,
+    StartupConfigurationError,
 )
 from backend.shared_domain.gold_pointer import load_latest_gold_pointer
 from backend.shared_domain.ids import new_ulid
@@ -69,6 +74,7 @@ from backend.shared_domain.observability import (
 from backend.shared_domain.provenance import build_provenance_v1
 from backend.shared_domain.rate_limit import InMemoryActorRateLimiter
 from backend.shared_domain.retrieval import load_retrieval_corpus, retrieve_documents
+from backend.shared_domain.tokenization import TokenizationVault
 from backend.shared_domain.tracing import start_trace
 
 _ACTIVE_AUDIT_SINK: AuditSink = DisabledAuditSink()
@@ -81,6 +87,34 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
     """Create gateway app with deny-by-default behavior."""
     settings = settings_factory()
     settings.validate()
+    pgwire_enabled = (
+        os.getenv("SCHEMAPILOT_GATEWAY_PGWIRE_ENABLED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    ha_enabled = (
+        os.getenv("SCHEMAPILOT_GATEWAY_HA_ENABLED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    redis_required = (
+        os.getenv("SCHEMAPILOT_GATEWAY_REDIS_REQUIRED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    redis_url = os.getenv("SCHEMAPILOT_GATEWAY_REDIS_URL", "").strip()
+    if ha_enabled and redis_required and not redis_url:
+        raise StartupConfigurationError(
+            "Gateway HA with required Redis needs SCHEMAPILOT_GATEWAY_REDIS_URL.",
+            details={"reason": "redis_url_required_for_ha"},
+        )
+    tokenization_enabled = (
+        os.getenv("SCHEMAPILOT_TOKENIZATION_ENABLED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    tokenization_vault = TokenizationVault(
+        enabled=tokenization_enabled,
+        vault_path=Path(settings.storage_root) / "tokenization" / "vault.jsonl",
+        signing_key=os.getenv("SCHEMAPILOT_TOKENIZATION_KEY", "schemapilot-tokenization-key-v1"),
+        key_id=os.getenv("SCHEMAPILOT_TOKENIZATION_KEY_ID", "token-v1"),
+    )
     global _ACTIVE_AUDIT_SINK  # noqa: PLW0603
     global _AUDIT_SINK_MODE  # noqa: PLW0603
     global _AUDIT_OUTBOX_DISPATCH_BATCH_SIZE  # noqa: PLW0603
@@ -228,6 +262,24 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
         actor_attributes_raw = actor_dict.get("attributes", {})
         actor_attributes = actor_attributes_raw if isinstance(actor_attributes_raw, dict) else {}
+        active_breakglass = _load_active_breakglass_grant(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+        )
+        if active_breakglass is not None:
+            roles_raw = actor_dict.get("roles", [])
+            roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+            if "analyst" not in roles:
+                roles.append("analyst")
+            actor_dict["roles"] = roles
+            merged_attributes = dict(actor_attributes)
+            merged_attributes["breakglass"] = True
+            merged_attributes["breakglass_request_id"] = str(
+                active_breakglass.get("request_id", "")
+            )
+            actor_attributes = merged_attributes
+            actor_dict["attributes"] = merged_attributes
         allowlisted_ai = bool(actor_attributes.get("ai_allowlisted", False))
         decision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
         if decision.result != "allow":
@@ -718,9 +770,25 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             row_count=len(masked_rows),
             column_count=len(result_columns),
         )
+        actor_roles_raw = actor_dict.get("roles", [])
+        actor_roles = (
+            [str(item) for item in actor_roles_raw]
+            if isinstance(actor_roles_raw, list)
+            else []
+        )
+        budget_resolution = resolve_query_budget(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            actor_roles=actor_roles,
+            default_budget_bytes=settings.query_max_bytes,
+        )
+        query_budget_bytes = _coerce_int(
+            budget_resolution.get("query_budget_bytes", settings.query_max_bytes),
+            default=settings.query_max_bytes,
+        )
         if not enforce_budget(
             estimated_bytes=estimated_query_bytes,
-            budget_bytes=settings.query_max_bytes,
+            budget_bytes=query_budget_bytes,
         ):
             reason = "query_budget_exceeded"
             _record_access_decision(
@@ -733,7 +801,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 resources={
                     "endpoint": "query",
                     "estimated_query_bytes": estimated_query_bytes,
-                    "query_budget_bytes": settings.query_max_bytes,
+                    "query_budget_bytes": query_budget_bytes,
+                    "query_budget_source": budget_resolution.get("source", "default"),
+                    "query_budget_role": budget_resolution.get("matched_role"),
                 },
                 applied_filters=_serialize_row_filter(abac.row_filter),
                 applied_masks=abac.masks,
@@ -754,7 +824,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     "reason": reason,
                     "policy_decision_id": policy_decision_id,
                     "estimated_query_bytes": estimated_query_bytes,
-                    "query_budget_bytes": settings.query_max_bytes,
+                    "query_budget_bytes": query_budget_bytes,
                 },
             )
 
@@ -831,6 +901,9 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     semantic_binding.manifest_checksum if semantic_binding is not None else None
                 ),
                 "policy_pack": effective_policy_pack,
+                "query_budget_bytes": query_budget_bytes,
+                "query_budget_source": budget_resolution.get("source", "default"),
+                "breakglass": bool(actor_attributes.get("breakglass", False)),
                 "query_engine_metadata": query_execution_metadata,
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
@@ -853,6 +926,11 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "row_count": len(masked_rows),
             },
             "provenance": provenance,
+            "query_budget": {
+                "bytes": query_budget_bytes,
+                "source": budget_resolution.get("source", "default"),
+                "matched_role": budget_resolution.get("matched_role"),
+            },
             "audit_event_id": new_ulid(),
             "request_id": request.state.request_id,
         }
@@ -863,6 +941,227 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 "manifest_checksum": semantic_binding.manifest_checksum,
             }
         return response_payload
+
+    @app.get("/api/v1/gateway/ha/status")
+    async def ha_status() -> dict[str, object]:
+        return {
+            "gateway_ha_enabled": ha_enabled,
+            "redis_configured": bool(redis_url),
+            "redis_required": redis_required,
+        }
+
+    @app.post("/api/v1/gateway/pgwire/query")
+    async def pgwire_query(payload: dict[str, object], request: Request) -> dict[str, object]:
+        if not pgwire_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "module_disabled", "module": "pgwire"},
+            )
+        try:
+            normalized = normalize_pgwire_payload(payload)
+        except ValueError as exc:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": str(exc)},
+            ) from exc
+        result = await query(normalized, request)
+        result["transport"] = "pgwire_proxy"
+        return result
+
+    @app.post("/api/v1/gateway/query-explain")
+    async def query_explain(payload: dict[str, object], request: Request) -> dict[str, object]:
+        workspace_id = str(payload.get("workspace_id", "unknown"))
+        request_context = _request_context(payload)
+        policy_decision_id = new_ulid()
+        actor_dict = authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        if actor_dict is None:
+            reason = "missing_or_invalid_auth_token"
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id="unknown",
+                result="deny",
+                reason=reason,
+                request_context=request_context,
+                resources={"endpoint": "query_explain"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query_explain",
+                correlation_id=request.state.request_id,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": reason, "policy_decision_id": policy_decision_id},
+            )
+        decision = evaluate_access(actor_dict, allow_ai=False)
+        if decision.result != "allow":
+            _record_access_decision(
+                session_factory(),
+                workspace_id=workspace_id,
+                actor_id=str(actor_dict.get("actor_id", "unknown")),
+                result="deny",
+                reason=decision.reason,
+                request_context=request_context,
+                resources={"endpoint": "query_explain"},
+                applied_filters={},
+                applied_masks={},
+                policy_decision_id=policy_decision_id,
+                event_type="gateway.query_explain",
+                correlation_id=request.state.request_id,
+            )
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": decision.reason, "policy_decision_id": policy_decision_id},
+            )
+        query_text = str(payload.get("query_text", "")).strip()
+        if not query_text:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "query_text_required"},
+            )
+        estimated_rows_raw = payload.get("estimated_rows", 100)
+        estimated_columns_raw = payload.get("estimated_columns", 8)
+        estimated_rows = (
+            int(estimated_rows_raw) if isinstance(estimated_rows_raw, (int, float, str)) else 100
+        )
+        estimated_columns = (
+            int(estimated_columns_raw)
+            if isinstance(estimated_columns_raw, (int, float, str))
+            else 8
+        )
+        estimated_query_bytes = estimate_query_cost_bytes(
+            query_text=query_text,
+            row_count=max(estimated_rows, 0),
+            column_count=max(estimated_columns, 0),
+        )
+        roles_raw = actor_dict.get("roles", [])
+        roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+        budget_resolution = resolve_query_budget(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            actor_roles=roles,
+            default_budget_bytes=settings.query_max_bytes,
+        )
+        query_budget_bytes = _coerce_int(
+            budget_resolution.get("query_budget_bytes", settings.query_max_bytes),
+            default=settings.query_max_bytes,
+        )
+        result = "allow" if estimated_query_bytes <= query_budget_bytes else "deny"
+        reason = "within_budget" if result == "allow" else "query_budget_exceeded"
+        _record_access_decision(
+            session_factory(),
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+            result=result,
+            reason=reason,
+            request_context=request_context,
+            resources={
+                "endpoint": "query_explain",
+                "estimated_query_bytes": estimated_query_bytes,
+                "query_budget_bytes": query_budget_bytes,
+            },
+            applied_filters={},
+            applied_masks={},
+            policy_decision_id=policy_decision_id,
+            event_type="gateway.query_explain",
+            correlation_id=request.state.request_id,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "estimated_query_bytes": estimated_query_bytes,
+            "query_budget_bytes": query_budget_bytes,
+            "query_budget_source": budget_resolution.get("source", "default"),
+            "query_budget_role": budget_resolution.get("matched_role"),
+            "result": result,
+            "reason": reason,
+            "policy_decision_id": policy_decision_id,
+        }
+
+    @app.post("/api/v1/gateway/tokenize")
+    async def tokenize_value(payload: dict[str, object], request: Request) -> dict[str, object]:
+        workspace_id = str(payload.get("workspace_id", "unknown")).strip()
+        actor_dict = authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        if actor_dict is None:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_or_invalid_auth_token"},
+            )
+        roles_raw = actor_dict.get("roles", [])
+        roles = {str(item) for item in roles_raw} if isinstance(roles_raw, list) else set()
+        if not roles.intersection({"data_steward", "platform_admin"}):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_required_role"},
+            )
+        tokenized = tokenization_vault.tokenize(
+            workspace_id=workspace_id,
+            value=str(payload.get("value", "")),
+            namespace=str(payload.get("namespace", "default")),
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+        )
+        return {"workspace_id": workspace_id, **tokenized}
+
+    @app.post("/api/v1/gateway/detokenize")
+    async def detokenize_value(payload: dict[str, object], request: Request) -> dict[str, object]:
+        workspace_id = str(payload.get("workspace_id", "unknown")).strip()
+        actor_dict = authenticated_actor_from_request(
+            request,
+            settings=settings,
+            auth_tokens=auth_tokens,
+        )
+        if actor_dict is None:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_or_invalid_auth_token"},
+            )
+        roles_raw = actor_dict.get("roles", [])
+        roles = {str(item) for item in roles_raw} if isinstance(roles_raw, list) else set()
+        if "platform_admin" not in roles:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_required_role"},
+            )
+        value = tokenization_vault.detokenize(
+            workspace_id=workspace_id,
+            token=str(payload.get("token", "")),
+            namespace=str(payload.get("namespace", "default")),
+        )
+        return {"workspace_id": workspace_id, "value": value}
+
+    @app.post("/api/v1/gateway/sample")
+    async def sample_rows(payload: dict[str, object], request: Request) -> dict[str, object]:
+        max_rows_raw = payload.get("max_rows", 10)
+        max_rows = int(max_rows_raw) if isinstance(max_rows_raw, (int, float, str)) else 10
+        bounded_rows = max(1, min(max_rows, 25))
+        sample_payload = dict(payload)
+        sample_payload["max_rows"] = bounded_rows
+        if "query_text" in sample_payload and "query" not in sample_payload:
+            sample_payload["query"] = {"language": "sql", "text": str(sample_payload["query_text"])}
+        response = await query(sample_payload, request)
+        result_raw = response.get("result", {})
+        result = result_raw if isinstance(result_raw, dict) else {}
+        rows_raw = result.get("rows", [])
+        rows = rows_raw if isinstance(rows_raw, list) else []
+        return {
+            "workspace_id": str(sample_payload.get("workspace_id", "unknown")),
+            "sample": {
+                "columns": result.get("columns", []),
+                "rows": rows[:bounded_rows],
+                "row_count": min(len(rows), bounded_rows),
+                "max_rows": bounded_rows,
+            },
+            "provenance": response.get("provenance", {}),
+            "request_id": response.get("request_id"),
+        }
 
     @app.post("/api/v1/gateway/policy/simulate")
     async def policy_simulate(payload: dict[str, object], request: Request) -> dict[str, object]:
@@ -1031,6 +1330,23 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
 
         attributes = actor_dict.get("attributes", {})
         attributes_dict = attributes if isinstance(attributes, dict) else {}
+        active_breakglass = _load_active_breakglass_grant(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+            actor_id=str(actor_dict.get("actor_id", "unknown")),
+        )
+        if active_breakglass is not None:
+            roles_raw = actor_dict.get("roles", [])
+            roles = [str(item) for item in roles_raw] if isinstance(roles_raw, list) else []
+            if "analyst" not in roles:
+                roles.append("analyst")
+            actor_dict["roles"] = roles
+            attributes_dict = dict(attributes_dict)
+            attributes_dict["breakglass"] = True
+            attributes_dict["breakglass_request_id"] = str(
+                active_breakglass.get("request_id", "")
+            )
+            actor_dict["attributes"] = attributes_dict
         actor_type = str(actor_dict.get("actor_type", "")).lower()
         allowlisted_ai = actor_type == "ai" and bool(attributes_dict.get("ai_allowlisted", False))
         decision: AccessDecision = evaluate_access(actor_dict, allow_ai=allowlisted_ai)
@@ -1869,6 +2185,64 @@ def _load_effective_policy_pack(
     if not pack_id:
         return None
     return {"pack_id": pack_id, "version": version}
+
+
+def _load_active_breakglass_grant(
+    *,
+    session_factory: Callable[[], Session],
+    workspace_id: str,
+    actor_id: str,
+) -> dict[str, object] | None:
+    session = session_factory()
+    try:
+        rows = (
+            session.execute(
+                select(GovernancePolicy).where(
+                    GovernancePolicy.workspace_id == workspace_id,
+                    GovernancePolicy.policy_type == "breakglass_grant",
+                    GovernancePolicy.status == "active",
+                )
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        session.close()
+    now_epoch = int(unix_time())
+    for row in rows:
+        try:
+            payload = json.loads(row.definition_ref)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("actor_id", "")).strip() != actor_id:
+            continue
+        expires_epoch_raw = payload.get("expires_epoch", 0)
+        expires_epoch = (
+            int(expires_epoch_raw)
+            if isinstance(expires_epoch_raw, (int, float, str))
+            else 0
+        )
+        if expires_epoch and expires_epoch < now_epoch:
+            continue
+        return payload
+    return None
+
+
+def _coerce_int(value: object, *, default: int) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
 
 
 def _env_int(name: str, default: int) -> int:
