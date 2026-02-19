@@ -21,6 +21,8 @@ def build_provenance_v1(
     citations: list[str] | None = None,
     allowed_dataset_ids: list[str] | None = None,
     policy_pack: Mapping[str, object] | None = None,
+    target_db_id: str | None = None,
+    target_schema_ref: str | None = None,
 ) -> dict[str, object]:
     """Construct a stable provenance payload for gateway responses."""
     payload: dict[str, object] = {
@@ -46,6 +48,10 @@ def build_provenance_v1(
             "pack_id": str(policy_pack.get("pack_id", "")),
             "version": _coerce_int(policy_pack.get("version"), default=0),
         }
+    if target_db_id is not None:
+        payload["target_db_id"] = str(target_db_id)
+    if target_schema_ref is not None:
+        payload["target_schema_ref"] = str(target_schema_ref)
     _validate_provenance_v1(payload)
     return payload
 

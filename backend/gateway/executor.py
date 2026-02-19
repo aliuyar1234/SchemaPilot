@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from urllib.parse import urlparse
 
 import duckdb
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import NoSuchModuleError, SQLAlchemyError
+from sqlalchemy.orm import Session
 
+from backend.shared_domain.db import get_session_factory
 from backend.shared_domain.gold_pointer import load_latest_gold_pointer
+from backend.shared_domain.metadata_models import TargetDbProfile, TargetDbState
 
 
 @dataclass(frozen=True)
@@ -59,6 +66,10 @@ class QueryTimeoutError(ValueError):
     """Raised when SQL execution exceeds configured timeout budget."""
 
 
+class QueryEngineUnavailableError(ValueError):
+    """Raised when configured query engine is unavailable for safe execution."""
+
+
 def _validate_filter_column(column: str) -> str:
     normalized = column.strip()
     if not FILTER_COLUMN_RE.match(normalized):
@@ -100,6 +111,7 @@ def execute_sql(
     trino_user: str = "schemapilot",
     trino_catalog: str = "memory",
     trino_schema: str = "default",
+    metadata_database_url: str | None = None,
 ) -> QueryResult:
     """Execute SQL using an in-memory DuckDB engine for gateway behavior."""
     query = _validate_read_only_query(sql or "select 1 as one")
@@ -139,6 +151,15 @@ def execute_sql(
             row_count=len(rows),
             execution_metadata=metadata,
         )
+    if query_engine == "target_db":
+        return _execute_sql_target_db(
+            query=query,
+            capped_rows=capped_rows,
+            row_filter=row_filter,
+            timeout_ms=budget_ms,
+            workspace_id=workspace_id,
+            metadata_database_url=metadata_database_url,
+        )
 
     connection = duckdb.connect(database=":memory:")
     try:
@@ -173,6 +194,311 @@ def execute_sql(
     finally:
         connection.close()
     return QueryResult(columns=columns, rows=rows, row_count=len(rows), execution_metadata={})
+
+
+def _execute_sql_target_db(
+    *,
+    query: str,
+    capped_rows: int,
+    row_filter: tuple[str, str] | None,
+    timeout_ms: int,
+    workspace_id: str | None,
+    metadata_database_url: str | None,
+) -> QueryResult:
+    if not workspace_id:
+        raise QueryEngineUnavailableError("target_db_workspace_required")
+    if not metadata_database_url:
+        raise QueryEngineUnavailableError("target_db_metadata_unavailable")
+    target_info = _load_active_target_db_info(
+        metadata_database_url=metadata_database_url, workspace_id=workspace_id
+    )
+    if target_info is None:
+        raise QueryEngineUnavailableError("target_db_not_configured")
+    db_type = str(target_info["db_type"]).strip().lower()
+    if db_type == "sqlite":
+        return _execute_sql_target_db_sqlite(
+            target_info=target_info,
+            query=query,
+            capped_rows=capped_rows,
+            row_filter=row_filter,
+            timeout_ms=timeout_ms,
+        )
+    if db_type == "postgres":
+        return _execute_sql_target_db_postgres(
+            target_info=target_info,
+            query=query,
+            capped_rows=capped_rows,
+            row_filter=row_filter,
+            timeout_ms=timeout_ms,
+        )
+    if db_type == "mysql":
+        return _execute_sql_target_db_mysql(
+            target_info=target_info,
+            query=query,
+            capped_rows=capped_rows,
+            row_filter=row_filter,
+            timeout_ms=timeout_ms,
+        )
+    raise QueryEngineUnavailableError(f"target_db_driver_unavailable:{target_info['db_type']}")
+
+
+def _execute_sql_target_db_sqlite(
+    *,
+    target_info: dict[str, object],
+    query: str,
+    capped_rows: int,
+    row_filter: tuple[str, str] | None,
+    timeout_ms: int,
+) -> QueryResult:
+    connection_payload_raw = target_info.get("connection", {})
+    connection_payload = (
+        dict(connection_payload_raw)
+        if isinstance(connection_payload_raw, dict)
+        else {}
+    )
+    active_database_ref = str(connection_payload.get("active_database", "")).strip()
+    database_ref = active_database_ref or str(connection_payload.get("database", "")).strip()
+    if not database_ref:
+        raise QueryEngineUnavailableError("target_db_sqlite_database_missing")
+    normalized_path = Path(database_ref)
+    if not normalized_path.exists():
+        raise QueryEngineUnavailableError("target_db_sqlite_database_missing")
+    sqlite_uri = f"file:{normalized_path.as_posix()}?mode=ro"
+    started_at = perf_counter()
+    connection = sqlite3.connect(sqlite_uri, uri=True, timeout=max(float(timeout_ms) / 1000.0, 1.0))
+    try:
+        cursor = connection.execute(query)
+        elapsed_ms = (perf_counter() - started_at) * 1000.0
+        if elapsed_ms > float(timeout_ms):
+            raise QueryTimeoutError("query_timeout_exceeded")
+        description = cursor.description or []
+        columns = [
+            {"name": str(item[0]), "type": "unknown"}
+            for item in description
+            if len(item) >= 1 and str(item[0]).strip()
+        ]
+        rows = (
+            _apply_optional_row_filter(
+                columns=columns,
+                rows=[list(row) for row in cursor.fetchall()],
+                row_filter=row_filter,
+                capped_rows=capped_rows,
+            )
+            if row_filter is not None
+            else [list(row) for row in cursor.fetchmany(capped_rows)]
+        )
+    except sqlite3.OperationalError as exc:
+        raise QueryEngineUnavailableError("target_db_sqlite_unavailable") from exc
+    finally:
+        connection.close()
+    return QueryResult(
+        columns=columns,
+        rows=rows,
+        row_count=len(rows),
+        execution_metadata={
+            "engine": "target_db",
+            "db_type": target_info["db_type"],
+            "target_db_id": target_info["target_db_id"],
+            "current_build_id": target_info["current_build_id"],
+            "current_schema_ref": target_info["current_schema_ref"],
+        },
+    )
+
+
+def _execute_sql_target_db_postgres(
+    *,
+    target_info: dict[str, object],
+    query: str,
+    capped_rows: int,
+    row_filter: tuple[str, str] | None,
+    timeout_ms: int,
+) -> QueryResult:
+    connection_payload_raw = target_info.get("connection", {})
+    connection_payload = (
+        dict(connection_payload_raw)
+        if isinstance(connection_payload_raw, dict)
+        else {}
+    )
+    reader_dsn = _resolve_postgres_reader_dsn(connection_payload)
+    started_at = perf_counter()
+    try:
+        columns, rows = _execute_postgres_query(
+            dsn=reader_dsn,
+            query=query,
+            timeout_ms=timeout_ms,
+            schema_ref=str(target_info.get("current_schema_ref", "")).strip() or None,
+            capped_rows=capped_rows,
+        )
+    except QueryTimeoutError:
+        raise
+    except ValueError as exc:
+        raise QueryEngineUnavailableError(str(exc)) from exc
+    elapsed_ms = (perf_counter() - started_at) * 1000.0
+    if elapsed_ms > float(timeout_ms):
+        raise QueryTimeoutError("query_timeout_exceeded")
+    filtered_rows = (
+        _apply_optional_row_filter(
+            columns=columns,
+            rows=rows,
+            row_filter=row_filter,
+            capped_rows=capped_rows,
+        )
+        if row_filter is not None
+        else rows[:capped_rows]
+    )
+    return QueryResult(
+        columns=columns,
+        rows=filtered_rows,
+        row_count=len(filtered_rows),
+        execution_metadata={
+            "engine": "target_db",
+            "db_type": "postgres",
+            "target_db_id": target_info["target_db_id"],
+            "current_build_id": target_info["current_build_id"],
+            "current_schema_ref": target_info["current_schema_ref"],
+        },
+    )
+
+
+def _execute_sql_target_db_mysql(
+    *,
+    target_info: dict[str, object],
+    query: str,
+    capped_rows: int,
+    row_filter: tuple[str, str] | None,
+    timeout_ms: int,
+) -> QueryResult:
+    connection_payload_raw = target_info.get("connection", {})
+    connection_payload = (
+        dict(connection_payload_raw)
+        if isinstance(connection_payload_raw, dict)
+        else {}
+    )
+    reader_dsn = _resolve_mysql_reader_dsn(connection_payload)
+    started_at = perf_counter()
+    try:
+        columns, rows = _execute_mysql_query(
+            dsn=reader_dsn,
+            query=query,
+            timeout_ms=timeout_ms,
+            capped_rows=capped_rows,
+        )
+    except QueryTimeoutError:
+        raise
+    except ValueError as exc:
+        raise QueryEngineUnavailableError(str(exc)) from exc
+    elapsed_ms = (perf_counter() - started_at) * 1000.0
+    if elapsed_ms > float(timeout_ms):
+        raise QueryTimeoutError("query_timeout_exceeded")
+    filtered_rows = (
+        _apply_optional_row_filter(
+            columns=columns,
+            rows=rows,
+            row_filter=row_filter,
+            capped_rows=capped_rows,
+        )
+        if row_filter is not None
+        else rows[:capped_rows]
+    )
+    return QueryResult(
+        columns=columns,
+        rows=filtered_rows,
+        row_count=len(filtered_rows),
+        execution_metadata={
+            "engine": "target_db",
+            "db_type": "mysql",
+            "target_db_id": target_info["target_db_id"],
+            "current_build_id": target_info["current_build_id"],
+            "current_schema_ref": target_info["current_schema_ref"],
+        },
+    )
+
+
+def _resolve_postgres_reader_dsn(connection_payload: dict[str, object]) -> str:
+    reader_dsn = str(connection_payload.get("reader_dsn", "")).strip()
+    if not reader_dsn:
+        raise QueryEngineUnavailableError("target_db_postgres_reader_dsn_missing")
+    parsed = urlparse(reader_dsn)
+    if not parsed.scheme.startswith("postgresql"):
+        raise QueryEngineUnavailableError("target_db_postgres_reader_dsn_invalid")
+    return reader_dsn
+
+
+def _resolve_mysql_reader_dsn(connection_payload: dict[str, object]) -> str:
+    reader_dsn = str(connection_payload.get("reader_dsn", "")).strip()
+    if not reader_dsn:
+        raise QueryEngineUnavailableError("target_db_mysql_reader_dsn_missing")
+    parsed = urlparse(reader_dsn)
+    if not parsed.scheme.startswith("mysql"):
+        raise QueryEngineUnavailableError("target_db_mysql_reader_dsn_invalid")
+    return reader_dsn
+
+
+def _execute_postgres_query(
+    *,
+    dsn: str,
+    query: str,
+    timeout_ms: int,
+    schema_ref: str | None,
+    capped_rows: int,
+) -> tuple[list[dict[str, str]], list[list[object]]]:
+    safe_schema = _safe_identifier(schema_ref) if schema_ref else None
+    try:
+        engine = create_engine(dsn, future=True)
+    except (NoSuchModuleError, ModuleNotFoundError) as exc:
+        raise ValueError("target_db_postgres_driver_unavailable") from exc
+    try:
+        with engine.connect() as connection:
+            if safe_schema:
+                connection.exec_driver_sql(
+                    f"set search_path to {safe_schema}"  # nosec B608 - identifier normalized by _safe_identifier
+                )
+            connection.execute(
+                text("set statement_timeout = :timeout_ms"),
+                {"timeout_ms": timeout_ms},
+            )
+            result = connection.execute(text(query))
+            columns = [{"name": str(name), "type": "unknown"} for name in result.keys()]
+            rows = [list(row) for row in result.fetchmany(capped_rows)]
+            return columns, rows
+    except SQLAlchemyError as exc:
+        message = str(exc).lower()
+        if "statement timeout" in message or "query canceled" in message:
+            raise QueryTimeoutError("query_timeout_exceeded") from exc
+        raise ValueError("target_db_postgres_unavailable") from exc
+    finally:
+        engine.dispose()
+
+
+def _execute_mysql_query(
+    *,
+    dsn: str,
+    query: str,
+    timeout_ms: int,
+    capped_rows: int,
+) -> tuple[list[dict[str, str]], list[list[object]]]:
+    try:
+        engine = create_engine(dsn, future=True)
+    except (NoSuchModuleError, ModuleNotFoundError) as exc:
+        raise ValueError("target_db_mysql_driver_unavailable") from exc
+    try:
+        with engine.connect() as connection:
+            # Best-effort server timeout guard for MySQL-compatible engines.
+            connection.execute(
+                text("set session max_execution_time = :timeout_ms"),
+                {"timeout_ms": timeout_ms},
+            )
+            result = connection.execute(text(query))
+            columns = [{"name": str(name), "type": "unknown"} for name in result.keys()]
+            rows = [list(row) for row in result.fetchmany(capped_rows)]
+            return columns, rows
+    except SQLAlchemyError as exc:
+        message = str(exc).lower()
+        if "max execution time exceeded" in message or "query execution was interrupted" in message:
+            raise QueryTimeoutError("query_timeout_exceeded") from exc
+        raise ValueError("target_db_mysql_unavailable") from exc
+    finally:
+        engine.dispose()
 
 
 def _apply_optional_row_filter(
@@ -247,3 +573,38 @@ def _safe_identifier(value: str) -> str:
     if normalized[0].isdigit():
         return f"_{normalized}"
     return normalized
+
+
+def _load_active_target_db_info(
+    *, metadata_database_url: str, workspace_id: str
+) -> dict[str, object] | None:
+    session_factory = get_session_factory(metadata_database_url)
+    with session_factory() as session:
+        state = session.get(TargetDbState, workspace_id)
+        if state is None or not state.active_target_db_id:
+            return None
+        profile = _load_target_db_profile(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=state.active_target_db_id,
+        )
+        if profile is None:
+            return None
+        return {
+            "target_db_id": profile.target_db_id,
+            "db_type": str(profile.db_type),
+            "connection": dict(profile.connection_json),
+            "current_build_id": state.current_build_id,
+            "current_schema_ref": state.current_schema_ref,
+        }
+
+
+def _load_target_db_profile(
+    *, session: Session, workspace_id: str, target_db_id: str
+) -> TargetDbProfile | None:
+    profile = session.get(TargetDbProfile, target_db_id)
+    if profile is None:
+        return None
+    if profile.workspace_id != workspace_id:
+        return None
+    return profile

@@ -14,7 +14,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.gateway.abac import apply_mask, evaluate_abac
-from backend.gateway.executor import QueryTimeoutError, UnsafeSqlError, execute_sql
+from backend.gateway.executor import (
+    QueryEngineUnavailableError,
+    QueryTimeoutError,
+    UnsafeSqlError,
+    execute_sql,
+)
 from backend.gateway.policy import AccessDecision, evaluate_access
 from backend.gateway.query_cache import InMemoryQueryCache
 from backend.gateway.retrieval_opensearch import (
@@ -51,7 +56,7 @@ from backend.shared_domain.errors import (
 )
 from backend.shared_domain.gold_pointer import load_latest_gold_pointer
 from backend.shared_domain.ids import new_ulid
-from backend.shared_domain.metadata_models import CatalogDataset, GovernancePolicy
+from backend.shared_domain.metadata_models import CatalogDataset, GovernancePolicy, TargetDbState
 from backend.shared_domain.observability import (
     increment_audit_write_failure,
     increment_cost_bytes_scanned,
@@ -494,8 +499,13 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
             query_engine=settings.query_engine,
             policy_pack=effective_policy_pack,
             storage_root=settings.storage_root,
+            target_cache_scope=_load_target_db_cache_scope(
+                session_factory=session_factory,
+                workspace_id=workspace_id,
+            ),
         )
         cached_payload = query_cache.get(query_cache_key)
+        query_execution_metadata: dict[str, object] = {}
         if cached_payload is not None:
             increment_gateway_query_cache(workspace_id=workspace_id, result="hit")
             result_columns = (
@@ -507,6 +517,12 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 cached_payload.get("rows", [])
                 if isinstance(cached_payload.get("rows", []), list)
                 else []
+            )
+            query_execution_metadata_raw = cached_payload.get("execution_metadata", {})
+            query_execution_metadata = (
+                dict(query_execution_metadata_raw)
+                if isinstance(query_execution_metadata_raw, dict)
+                else {}
             )
         else:
             increment_gateway_query_cache(workspace_id=workspace_id, result="miss")
@@ -524,6 +540,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                         trino_user=settings.trino_user,
                         trino_catalog=settings.trino_catalog,
                         trino_schema=settings.trino_schema,
+                        metadata_database_url=settings.database_url,
                     )
                 except UnsafeSqlError as exc:
                     reason = "sql_unsafe"
@@ -558,6 +575,37 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     ) from exc
                 except QueryTimeoutError as exc:
                     reason = "query_timeout"
+                    _record_access_decision(
+                        session_factory(),
+                        workspace_id=workspace_id,
+                        actor_id=str(actor_dict.get("actor_id", "unknown")),
+                        result="deny",
+                        reason=reason,
+                        request_context=request_context,
+                        resources={"endpoint": "query", "query_text": query_text},
+                        applied_filters=_serialize_row_filter(abac.row_filter),
+                        applied_masks=abac.masks,
+                        policy_decision_id=policy_decision_id,
+                        event_type="gateway.query",
+                        correlation_id=request.state.request_id,
+                    )
+                    increment_policy_denial(workspace_id=workspace_id, reason=reason)
+                    observe_query_latency(
+                        workspace_id=workspace_id,
+                        engine="sql",
+                        result="deny",
+                        latency_ms=(perf_counter() - started_at) * 1000.0,
+                    )
+                    raise PolicyDeniedError(
+                        "Access denied by policy",
+                        details={
+                            "reason": reason,
+                            "policy_decision_id": policy_decision_id,
+                            "error": str(exc),
+                        },
+                    ) from exc
+                except QueryEngineUnavailableError as exc:
+                    reason = "engine_unavailable"
                     _record_access_decision(
                         session_factory(),
                         workspace_id=workspace_id,
@@ -643,9 +691,19 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     mask_mode = abac.masks.get(column_name)
                     masked_row.append(apply_mask(value, mask_mode) if mask_mode else value)
                 masked_rows.append(masked_row)
+            query_execution_metadata_raw = result_set.execution_metadata
+            query_execution_metadata = (
+                dict(query_execution_metadata_raw)
+                if isinstance(query_execution_metadata_raw, dict)
+                else {}
+            )
             query_cache.set(
                 query_cache_key,
-                {"columns": result_columns, "rows": masked_rows},
+                {
+                    "columns": result_columns,
+                    "rows": masked_rows,
+                    "execution_metadata": query_execution_metadata,
+                },
             )
             increment_gateway_query_cache(workspace_id=workspace_id, result="store")
         if cached_payload is not None:
@@ -700,7 +758,8 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 },
             )
 
-        build_id = new_ulid()
+        resolved_build_id = str(query_execution_metadata.get("current_build_id", "")).strip()
+        build_id = resolved_build_id or new_ulid()
         query_id = new_ulid()
         try:
             provenance = build_provenance_v1(
@@ -714,6 +773,10 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                 applied_filters=_serialize_row_filter(abac.row_filter),
                 applied_masks=abac.masks,
                 policy_pack=effective_policy_pack,
+                target_db_id=str(query_execution_metadata.get("target_db_id", "")).strip() or None,
+                target_schema_ref=(
+                    str(query_execution_metadata.get("current_schema_ref", "")).strip() or None
+                ),
             )
         except ValueError as exc:
             reason = "provenance_unavailable"
@@ -768,9 +831,7 @@ def create_gateway_app(settings_factory: Callable[[], Settings] = load_settings)
                     semantic_binding.manifest_checksum if semantic_binding is not None else None
                 ),
                 "policy_pack": effective_policy_pack,
-                "query_engine_metadata": (
-                    result_set.execution_metadata if cached_payload is None else {}
-                ),
+                "query_engine_metadata": query_execution_metadata,
             },
             applied_filters=_serialize_row_filter(abac.row_filter),
             applied_masks=abac.masks,
@@ -1523,6 +1584,7 @@ def _build_query_cache_key(
     query_engine: str,
     policy_pack: dict[str, object] | None,
     storage_root: str,
+    target_cache_scope: dict[str, object] | None = None,
 ) -> str:
     pointer = load_latest_gold_pointer(workspace_id=workspace_id, storage_root=storage_root) or {}
     payload = {
@@ -1541,7 +1603,31 @@ def _build_query_cache_key(
         "snapshot_id": str(pointer.get("snapshot_id", "")),
         "build_id": str(pointer.get("build_id", "")),
     }
+    if query_engine == "target_db":
+        scope = target_cache_scope or {}
+        payload["target_db_id"] = str(scope.get("target_db_id", ""))
+        payload["target_build_id"] = str(scope.get("current_build_id", ""))
+        payload["target_schema_ref"] = str(scope.get("current_schema_ref", ""))
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _load_target_db_cache_scope(
+    *,
+    session_factory: Callable[[], Session],
+    workspace_id: str,
+) -> dict[str, object]:
+    session = session_factory()
+    try:
+        row = session.get(TargetDbState, workspace_id)
+    finally:
+        session.close()
+    if row is None:
+        return {}
+    return {
+        "target_db_id": row.active_target_db_id,
+        "current_build_id": row.current_build_id,
+        "current_schema_ref": row.current_schema_ref,
+    }
 
 
 def _serialize_row_filter(row_filter: tuple[str, str] | None) -> dict[str, object]:
