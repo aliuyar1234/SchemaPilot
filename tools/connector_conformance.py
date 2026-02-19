@@ -118,6 +118,8 @@ def _load_reference_connectors() -> dict[str, ConnectorFn]:
         "sftp": "plugins.examples.sftp_connector",
         "google_drive": "plugins.examples.google_drive_connector",
         "imap": "plugins.examples.imap_connector",
+        "postgres_cdc": "plugins.examples.postgres_cdc_connector",
+        "mysql_cdc": "plugins.examples.mysql_cdc_connector",
     }
     connectors: dict[str, ConnectorFn] = {}
     for connector_id, module_name in connector_modules.items():
@@ -137,6 +139,14 @@ def _create_fixture_exports(root: Path) -> None:
         "sftp_customers.csv": "id,name\n1,Alice\n",
         "gdrive_invoices.csv": "id,amount\n1,10\n",
         "imap_mailbox_0001.eml": "From: a@example.com\nSubject: Test\n\nBody",
+        "postgres_cdc_events.jsonl": (
+            '{"lsn":"00000001","relation":"invoice_events","epoch":1700000001}\n'
+            '{"lsn":"00000002","relation":"invoice_events","epoch":1700000002}\n'
+        ),
+        "mysql_cdc_events.jsonl": (
+            '{"binlog_pos":"00000001","table":"ticket_events","epoch":1700000010}\n'
+            '{"binlog_pos":"00000002","table":"ticket_events","epoch":1700000011}\n'
+        ),
     }
     for name, content in fixtures.items():
         (root / name).write_text(content, encoding="utf-8")

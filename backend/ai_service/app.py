@@ -8,7 +8,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from backend.ai_service.clients import ServiceClientError, request_json
-from backend.ai_service.sql_agent import generate_sql_agent_plan
+from backend.ai_service.schema_change_advisor import build_schema_evolution_proposals
+from backend.ai_service.sql_agent import (
+    _load_effective_semantic_manifest,
+    generate_sql_agent_plan,
+)
 from backend.shared_domain.auth import authenticated_actor_from_request, load_local_auth_tokens
 from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.db import get_session_factory, prepare_database
@@ -417,5 +421,43 @@ def create_ai_service_app(settings_factory: Callable[[], Settings] = load_settin
         questions = payload.get("questions", [])
         count = len(questions) if isinstance(questions, list) else 0
         return {"status": "generated", "question_count": count, "input": payload}
+
+    @app.post("/api/v1/ai/schema-evolution-advisor")
+    async def schema_evolution_advisor(
+        payload: dict[str, object], request: Request
+    ) -> dict[str, object]:
+        _ = require_ai_enabled(request)
+        workspace_id = str(payload.get("workspace_id", "")).strip()
+        if not workspace_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_workspace"},
+            )
+        observed_raw = payload.get("observed_columns_by_entity", {})
+        if not isinstance(observed_raw, dict):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "invalid_observed_columns"},
+            )
+        observed: dict[str, list[str]] = {}
+        for entity_id, columns_raw in observed_raw.items():
+            if not isinstance(columns_raw, list):
+                continue
+            observed[str(entity_id)] = [str(item) for item in columns_raw if str(item).strip()]
+        semantic_manifest = _load_effective_semantic_manifest(
+            session_factory=session_factory,
+            workspace_id=workspace_id,
+        )
+        proposals = build_schema_evolution_proposals(
+            semantic_manifest=semantic_manifest,
+            observed_columns_by_entity=observed,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "status": "proposal_only",
+            "auto_apply": False,
+            "proposal_count": len(proposals),
+            "proposals": proposals,
+        }
 
     return app

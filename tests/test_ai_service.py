@@ -210,6 +210,15 @@ def test_ai_service_ai_track_endpoints_return_success(tmp_path: Path) -> None:
                 "/api/v1/ai/eval-generator",
                 {"workspace_id": workspace_id, "questions": ["q1", "q2"]},
             ),
+            (
+                "/api/v1/ai/schema-evolution-advisor",
+                {
+                    "workspace_id": workspace_id,
+                    "observed_columns_by_entity": {
+                        "invoice": ["invoice_id", "region", "customer_id", "gross_margin"]
+                    },
+                },
+            ),
         ]
         for path, payload in requests:
             response = client.post(path, headers=headers, json=payload)
