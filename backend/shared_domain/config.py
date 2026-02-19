@@ -13,7 +13,7 @@ from backend.shared_domain.errors import StartupConfigurationError
 
 LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
 SUPPORTED_AUTH_MODES = {"local", "oidc", "oidc_trusted_proxy", "oidc_jwt"}
-SUPPORTED_QUERY_ENGINES = {"duckdb", "trino"}
+SUPPORTED_QUERY_ENGINES = {"duckdb", "trino", "target_db"}
 SUPPORTED_RETRIEVAL_BACKENDS = {"filesystem", "opensearch", "qdrant"}
 SUPPORTED_SECRETS_BACKENDS = {"local_encrypted", "vault"}
 SUPPORTED_AUDIT_SINK_TYPES = {"disabled", "jsonl", "webhook"}
@@ -32,6 +32,7 @@ BOOL_FIELDS = {
     "artifact_encryption_enabled",
     "materialized_refresh_enabled",
     "policy_pack_canary_enabled",
+    "target_db_rls_enabled",
 }
 INT_FIELDS = {
     "oidc_jwks_cache_ttl_seconds",
@@ -162,6 +163,7 @@ class Settings:
     artifact_encryption_key_id: str = "v1"
     artifact_rotation_keep_previous_keys: int = 1
     policy_pack_canary_enabled: bool = False
+    target_db_rls_enabled: bool = False
 
     @property
     def is_local_bind(self) -> bool:
@@ -630,6 +632,9 @@ def load_settings(config_path: str | None = None) -> Settings:
         ),
         "policy_pack_canary_enabled": _parse_bool(
             os.getenv("SCHEMAPILOT_POLICY_PACK_CANARY_ENABLED"), default=False
+        ),
+        "target_db_rls_enabled": _parse_bool(
+            os.getenv("SCHEMAPILOT_TARGET_DB_RLS_ENABLED"), default=False
         ),
     }
     overrides = _load_config_overrides(config_path)

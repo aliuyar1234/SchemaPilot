@@ -75,14 +75,30 @@ def _normalize_entities(rows: list[object]) -> list[dict[str, object]]:
         if not isinstance(attributes_raw, list):
             raise ValueError("invalid_entity_attributes")
         attributes = sorted({_normalized_id(item, field="attribute") for item in attributes_raw})
-        normalized.append(
-            {
-                "entity_id": entity_id,
-                "dataset_id": dataset_id,
-                "primary_key": primary_key,
-                "attributes": attributes,
+        attribute_types_raw = row.get("attribute_types", {})
+        attribute_types: dict[str, str] = {}
+        if attribute_types_raw not in ({}, None):
+            if not isinstance(attribute_types_raw, Mapping):
+                raise ValueError("invalid_entity_attribute_types")
+            for key, value in attribute_types_raw.items():
+                attribute_name = _normalized_id(key, field="attribute_type_key")
+                if attribute_name not in {primary_key, *attributes}:
+                    raise ValueError("attribute_type_unknown_field")
+                type_name = str(value).strip().lower()
+                if not type_name:
+                    raise ValueError("invalid_attribute_type_value")
+                attribute_types[attribute_name] = type_name
+        normalized_row: dict[str, object] = {
+            "entity_id": entity_id,
+            "dataset_id": dataset_id,
+            "primary_key": primary_key,
+            "attributes": attributes,
+        }
+        if attribute_types:
+            normalized_row["attribute_types"] = {
+                key: attribute_types[key] for key in sorted(attribute_types)
             }
-        )
+        normalized.append(normalized_row)
     return sorted(normalized, key=lambda item: str(item["entity_id"]))
 
 

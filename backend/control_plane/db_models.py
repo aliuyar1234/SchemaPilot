@@ -15,6 +15,10 @@ from backend.shared_domain.metadata_models import (
     ReviewTask,
     RunRecord,
     RunStepRecord,
+    TargetDbPlan,
+    TargetDbProfile,
+    TargetDbState,
+    TargetDbSyncCursor,
     Workspace,
 )
 
@@ -24,6 +28,10 @@ __all__ = [
     "CatalogDataset",
     "RunRecord",
     "RunStepRecord",
+    "TargetDbProfile",
+    "TargetDbState",
+    "TargetDbPlan",
+    "TargetDbSyncCursor",
     "ReviewProposal",
     "ReviewTask",
     "ReviewApproval",

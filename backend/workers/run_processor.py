@@ -42,6 +42,7 @@ from backend.workers.pii import detect_pii_proposals
 from backend.workers.profiler import profile_csv_file
 from backend.workers.semantic_builder import build_semantic_manifest_candidate
 from backend.workers.semantic_drift import detect_semantic_manifest_drift
+from backend.workers.target_db_builder import process_target_db_run
 
 DEFAULT_INCLUDE_GLOBS = ["**/*.csv"]
 PROFILE_SAMPLE_LIMIT = 1000
@@ -133,6 +134,162 @@ RUN_STEP_DEFINITIONS: dict[str, tuple[RunStepDefinition, ...]] = {
             step_key="finalize_output",
             step_order=30,
             depends_on=("refresh_materializations",),
+        ),
+    ),
+    "TARGET_DB_VALIDATE": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_PROVISION_PLAN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_PROVISION_APPLY": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_MIGRATION_PLAN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_MIGRATION_APPLY": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_LOAD_PLAN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_LOAD_APPLY": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_INDEX_PLAN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_INDEX_APPLY": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_RLS_PLAN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_RLS_APPLY": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
+        ),
+    ),
+    "TARGET_DB_SYNC_RUN": (
+        RunStepDefinition(step_key="prepare_target_profile", step_order=10, depends_on=()),
+        RunStepDefinition(
+            step_key="execute_target_operation",
+            step_order=20,
+            depends_on=("prepare_target_profile",),
+        ),
+        RunStepDefinition(
+            step_key="finalize_output",
+            step_order=30,
+            depends_on=("execute_target_operation",),
         ),
     ),
 }
@@ -312,7 +469,73 @@ def _execute_run(
             storage_root=storage_root,
             step_rows=step_rows,
         )
+    if run.run_type.startswith("TARGET_DB_"):
+        return _process_target_db_lifecycle_run(
+            session,
+            run=run,
+            storage_root=storage_root,
+            step_rows=step_rows,
+        )
     raise ValueError(f"Unsupported run_type for worker processor: {run.run_type}")
+
+
+def _process_target_db_lifecycle_run(
+    session: Session,
+    *,
+    run: RunRecord,
+    storage_root: str,
+    step_rows: dict[str, RunStepRecord],
+) -> dict[str, object]:
+    _start_step(session, step_rows=step_rows, step_key="prepare_target_profile")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="prepare_target_profile")
+    input_refs = _json_dict(run.input_refs_json)
+    target_db_id = str(input_refs.get("target_db_id", "")).strip()
+    plan_id = str(input_refs.get("plan_id", "")).strip()
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="prepare_target_profile",
+        details={
+            "target_db_id": target_db_id,
+            "plan_id": plan_id or None,
+            "run_type": run.run_type,
+        },
+    )
+
+    _start_step(session, step_rows=step_rows, step_key="execute_target_operation")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="execute_target_operation")
+    output = process_target_db_run(
+        session,
+        run_id=run.run_id,
+        run_type=run.run_type,
+        workspace_id=run.workspace_id,
+        input_refs=input_refs,
+        storage_root=storage_root,
+    )
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="execute_target_operation",
+        details={
+            "target_db_id": target_db_id,
+            "status": str(output.get("status", "unknown")),
+        },
+        evidence_bundle_uri=str(output.get("evidence_bundle_uri", "")) or None,
+    )
+
+    _start_step(session, step_rows=step_rows, step_key="finalize_output")
+    _enforce_worker_step_timeout(step_rows=step_rows, step_key="finalize_output")
+    _succeed_step(
+        session,
+        step_rows=step_rows,
+        step_key="finalize_output",
+        details={
+            "target_db_id": target_db_id,
+            "status": str(output.get("status", "unknown")),
+        },
+        evidence_bundle_uri=str(output.get("evidence_bundle_uri", "")) or None,
+    )
+    return output
 
 
 def _ensure_run_steps(session: Session, *, run: RunRecord) -> dict[str, RunStepRecord]:

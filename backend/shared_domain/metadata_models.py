@@ -200,6 +200,85 @@ class GovernanceDeletionApproval(Base):
     decision_reason: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class TargetDbProfile(Base):
+    """Workspace-scoped target database profile configuration."""
+
+    __tablename__ = "target_db_profiles"
+
+    target_db_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.workspace_id"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    db_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    desired_config_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    connection_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+    credential_refs_json: Mapped[dict[str, object]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class TargetDbState(Base):
+    """Current active target-db state for one workspace."""
+
+    __tablename__ = "target_db_state"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.workspace_id"), primary_key=True
+    )
+    active_target_db_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    current_build_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_schema_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_successful_sync_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    health_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    last_validation_run_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    last_error_evidence_bundle_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sync_status_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class TargetDbPlan(Base):
+    """Plan metadata for provision/migration/load/sync operations."""
+
+    __tablename__ = "target_db_plans"
+
+    plan_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    target_db_id: Mapped[str] = mapped_column(String(26), index=True, nullable=False)
+    plan_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    destructive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by_run_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    evidence_bundle_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class TargetDbSyncCursor(Base):
+    """Dataset-level sync status and cursor hash for target DB sync runs."""
+
+    __tablename__ = "target_db_sync_cursors"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "target_db_id",
+            "dataset_id",
+            name="uq_target_db_sync_cursor_workspace_target_dataset",
+        ),
+    )
+
+    sync_cursor_id: Mapped[str] = mapped_column(String(26), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    target_db_id: Mapped[str] = mapped_column(String(26), index=True, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    cursor_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    last_run_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    last_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+
+
 __all__ = [
     "Workspace",
     "CatalogSource",
@@ -214,6 +293,10 @@ __all__ = [
     "GovernancePurgeRun",
     "GovernanceDeletionRequest",
     "GovernanceDeletionApproval",
+    "TargetDbProfile",
+    "TargetDbState",
+    "TargetDbPlan",
+    "TargetDbSyncCursor",
     "AuditEvent",
     "AccessDecision",
     "AuditOutboxEvent",
