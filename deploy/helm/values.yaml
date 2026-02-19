@@ -14,6 +14,11 @@ worker:
   image: ghcr.io/example/schemapilot-worker:latest
   replicas: 1
 
+managedPostgres:
+  enabled: true
+  image: postgres:16.6
+  replicas: 1
+
 ui:
   image: ghcr.io/example/schemapilot-ui:latest
   replicas: 1
@@ -28,6 +33,7 @@ service:
   gatewayPort: 8001
   uiPort: 5173
   aiServicePort: 8002
+  managedPostgresPort: 5432
 
 env:
   profile: team

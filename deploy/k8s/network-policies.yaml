@@ -64,3 +64,26 @@ spec:
         - podSelector:
             matchLabels:
               app: schemapilot-worker
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: schemapilot-allow-internal-to-managed-postgres
+  namespace: schemapilot
+spec:
+  podSelector:
+    matchLabels:
+      app: schemapilot-managed-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: schemapilot-control-plane
+        - podSelector:
+            matchLabels:
+              app: schemapilot-worker
+        - podSelector:
+            matchLabels:
+              app: schemapilot-gateway

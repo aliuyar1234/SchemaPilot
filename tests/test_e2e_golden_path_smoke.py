@@ -10,3 +10,6 @@ def test_e2e_golden_path_smoke() -> None:
     assert report["status"] == "pass"
     assert report["provenance_version"] == "1"
     assert report["run_status"] == "succeeded"
+    assert report["rollback_build_id"] == "build_old"
+    assert report["provenance_target_schema_ref"] == "main"
+    assert str(report["provenance_target_db_id"]).startswith("01")

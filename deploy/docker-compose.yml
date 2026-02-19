@@ -106,6 +106,7 @@ services:
       SCHEMAPILOT_EMBEDDINGS_DIMENSIONS: ${SCHEMAPILOT_EMBEDDINGS_DIMENSIONS:-16}
     depends_on:
       - control-plane
+      - postgres
 
   ui:
     build:
@@ -131,6 +132,16 @@ services:
     ports:
       - "9000:9000"
 
+  postgres:
+    image: postgres:16.6
+    profiles: ["team", "enterprise"]
+    environment:
+      POSTGRES_DB: schemapilot
+      POSTGRES_USER: schemapilot
+      POSTGRES_PASSWORD: schemapilot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   trino:
     image: trinodb/trino:459
     profiles: ["team", "enterprise"]
@@ -154,3 +165,6 @@ services:
     command: ["run", "--server", "--addr=0.0.0.0:8181"]
     ports:
       - "8181:8181"
+
+volumes:
+  postgres_data:

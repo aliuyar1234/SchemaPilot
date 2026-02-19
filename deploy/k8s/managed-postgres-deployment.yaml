@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schemapilot-managed-postgres
+  namespace: schemapilot
+  labels:
+    app: schemapilot-managed-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schemapilot-managed-postgres
+  template:
+    metadata:
+      labels:
+        app: schemapilot-managed-postgres
+    spec:
+      containers:
+        - name: managed-postgres
+          image: postgres:16.6
+          env:
+            - name: POSTGRES_DB
+              value: schemapilot
+            - name: POSTGRES_USER
+              value: schemapilot
+            - name: POSTGRES_PASSWORD
+              value: schemapilot
+          ports:
+            - containerPort: 5432

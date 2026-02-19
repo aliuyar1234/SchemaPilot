@@ -33,6 +33,20 @@ spec:
   ports:
     - port: {{ .Values.service.uiPort }}
       targetPort: {{ .Values.service.uiPort }}
+{{- if .Values.managedPostgres.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-managed-postgres
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: schemapilot-managed-postgres
+  ports:
+    - port: {{ .Values.service.managedPostgresPort }}
+      targetPort: {{ .Values.service.managedPostgresPort }}
+{{- end }}
 {{- if .Values.aiService.enabled }}
 ---
 apiVersion: v1

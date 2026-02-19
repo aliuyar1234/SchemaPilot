@@ -45,3 +45,15 @@ spec:
   ports:
     - port: 8002
       targetPort: 8002
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schemapilot-managed-postgres
+  namespace: schemapilot
+spec:
+  selector:
+    app: schemapilot-managed-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

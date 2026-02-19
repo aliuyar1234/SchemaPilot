@@ -40,6 +40,47 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+{{- if .Values.managedPostgres.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-managed-postgres
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "schemapilot.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.managedPostgres.replicas }}
+  selector:
+    matchLabels:
+      app: schemapilot-managed-postgres
+  template:
+    metadata:
+      labels:
+        app: schemapilot-managed-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: managed-postgres
+          image: {{ .Values.managedPostgres.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: "schemapilot"
+            - name: POSTGRES_USER
+              value: "schemapilot"
+            - name: POSTGRES_PASSWORD
+              value: "schemapilot"
+          ports:
+            - containerPort: {{ .Values.service.managedPostgresPort }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

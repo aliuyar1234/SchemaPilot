@@ -57,7 +57,18 @@ This prints a JSON payload with `workspace_id`, suggested `next_steps`, and star
 schemapilot query --workspace <workspace_id> --sql "select 1 as one" --dataset-id dataset-1
 ```
 
-More onboarding details: `docs/quickstart/FIRST_HOUR.md`.
+### 5) Build a serving target database (optional, recommended for teams)
+
+```bash
+schemapilot target-db create --workspace <workspace_id> --name serving-db --type sqlite --mode managed
+schemapilot target-db provision-plan --workspace <workspace_id> --target-db <target_db_id> --wait
+schemapilot target-db provision-apply --workspace <workspace_id> --target-db <target_db_id> --plan-id <plan_id> --expected-checksum <checksum> --wait
+```
+
+More onboarding details:
+
+- `docs/quickstart/FIRST_HOUR.md`
+- `docs/quickstart/DB_BUILDER.md`
 
 ## High-Level Architecture
 
@@ -151,6 +162,7 @@ python tools/release_gate.py
 - Detailed architecture: `docs/ARCHITECTURE.md`
 - Operator runbook index: `docs/runbook/README.md`
 - Quickstart: `docs/quickstart/FIRST_HOUR.md`
+- Database Builder quickstart: `docs/quickstart/DB_BUILDER.md`
 - Security model: `docs/security/SECURITY_MODEL.md`
 - Plugin SDK: `docs/PLUGIN_SDK.md`
 - Deployment guide: `deploy/README.md`

@@ -21,3 +21,4 @@ def test_backup_restore_drill_passes() -> None:
         (root / "runtime" / "backup_restore_drill" / "report.json").read_text(encoding="utf-8")
     )
     assert report["status"] == "pass"
+    assert report["gateway_query_value"] == 42
