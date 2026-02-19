@@ -41,11 +41,13 @@ def create_run_schedule(
     schedule_expression: str,
     enabled: bool,
     actor_id: str,
+    input_refs: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Create a run schedule represented as a governance policy row."""
     interval_seconds = validate_schedule_expression(schedule_expression)
     schedule_id = new_ulid()
     now_epoch = int(time.time())
+    resolved_input_refs = dict(input_refs or {})
     payload = {
         "schedule_id": schedule_id,
         "workspace_id": workspace_id,
@@ -55,6 +57,7 @@ def create_run_schedule(
         "enabled": enabled,
         "next_run_epoch": now_epoch + interval_seconds if enabled else None,
         "created_by": actor_id,
+        "input_refs": resolved_input_refs,
     }
     session.add(
         GovernancePolicy(
@@ -125,6 +128,11 @@ def enqueue_due_scheduled_runs(
             input_refs_json={
                 "source": "scheduler",
                 "schedule_id": str(payload.get("schedule_id", row.policy_id)),
+                **(
+                    payload.get("input_refs", {})
+                    if isinstance(payload.get("input_refs"), dict)
+                    else {}
+                ),
             },
             output_refs_json={},
         )

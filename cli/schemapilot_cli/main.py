@@ -29,6 +29,7 @@ from cli.schemapilot_cli.doctor import run_doctor_preflight
 app = typer.Typer(help="SchemaPilot CLI")
 templates_app = typer.Typer(help="Gold template pack commands")
 plugins_app = typer.Typer(help="Plugin SDK helper commands")
+target_db_app = typer.Typer(help="Target database builder commands")
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_GATEWAY_BASE_URL = "http://127.0.0.1:8001"
 DEFAULT_CP_AUTH_TOKEN = os.getenv("SCHEMAPILOT_CP_TOKEN", "local-platform-admin-token")
@@ -145,6 +146,36 @@ def _wait_for_run_completion(
     latest["timed_out"] = True
     latest["timeout_seconds"] = max(timeout_seconds, 1)
     return latest
+
+
+def _target_db_wait_if_requested(
+    *,
+    response: dict[str, object],
+    wait: bool,
+    api_base_url: str,
+    workspace_id: str,
+    wait_timeout_seconds: int,
+    poll_interval_seconds: float,
+) -> dict[str, object]:
+    if not wait:
+        return {}
+    run_id = str(response.get("run_id", "")).strip()
+    if not run_id:
+        return {}
+    return _wait_for_run_completion(
+        api_base_url=api_base_url,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+def _emit_target_db_run_output(
+    *, response: dict[str, object], observed: dict[str, object]
+) -> None:
+    payload = {"request": response, "run_observed": observed}
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _next_steps_payload(
@@ -372,6 +403,685 @@ def connect(
         "POST", f"{api_base_url}/api/v1/workspaces/{workspace}/sources", payload
     )
     typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@target_db_app.command("create")
+def target_db_create(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    name: str = typer.Option(..., "--name"),
+    type: str = typer.Option(..., "--type"),  # noqa: A002
+    mode: str = typer.Option(..., "--mode"),
+    connection_json: str = typer.Option("{}", "--connection"),
+    credential_refs_json: str = typer.Option("{}", "--credential-refs"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Create a target DB profile."""
+    connection = _parse_json_mapping(connection_json, field_name="connection")
+    credential_refs = _parse_json_mapping(credential_refs_json, field_name="credential_refs")
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs",
+        {
+            "name": name,
+            "db_type": type,
+            "mode": mode,
+            "connection": connection,
+            "credential_refs": credential_refs,
+        },
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("list")
+def target_db_list(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """List target DB profiles for a workspace."""
+    response = _request_json("GET", f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs")
+    typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@target_db_app.command("get")
+def target_db_get(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Get one target DB profile."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}",
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("disable")
+def target_db_disable(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Disable one target DB profile."""
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}:disable",
+        {},
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("validate")
+def target_db_validate(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    strict: bool = typer.Option(True, "--strict/--no-strict"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB validation run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/validate",
+            {"strict": strict},
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("provision-plan")
+def target_db_provision_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    payload_json: str = typer.Option("{}", "--payload"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB provision plan run."""
+    payload = _parse_json_mapping(payload_json, field_name="payload")
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/provision/plan",
+            payload,
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("provision-apply")
+def target_db_provision_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB provision apply run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/provision/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("migrate-plan")
+def target_db_migrate_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    semantic: str | None = typer.Option(None, "--semantic"),
+    build: str | None = typer.Option(None, "--build"),
+    destructive: bool = typer.Option(False, "--destructive"),
+    requires_approval: bool = typer.Option(False, "--requires-approval"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB migration plan run."""
+    payload: dict[str, object] = {
+        "destructive": destructive,
+        "requires_approval": requires_approval,
+    }
+    if semantic:
+        payload["semantic_manifest_id"] = semantic
+    if build:
+        payload["target_build_id"] = build
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/migrations/plan",
+            payload,
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("migrate-apply")
+def target_db_migrate_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB migration apply run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/migrations/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("load-plan")
+def target_db_load_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    build: str | None = typer.Option(None, "--build"),
+    datasets: str | None = typer.Option(None, "--datasets"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB load plan run."""
+    payload: dict[str, object] = {}
+    if build:
+        payload["target_build_id"] = build
+    if datasets:
+        payload["datasets"] = [item.strip() for item in datasets.split(",") if item.strip()]
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/load/plan",
+            payload,
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("load-apply")
+def target_db_load_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB load apply run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/load/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("sync-run")
+def target_db_sync_run(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    datasets: str = typer.Option("", "--datasets"),
+    strict: bool = typer.Option(True, "--strict/--no-strict"),
+    max_runtime_seconds: int = typer.Option(0, "--max-runtime-seconds"),
+    max_rows_per_dataset: int = typer.Option(0, "--max-rows-per-dataset"),
+    max_datasets: int = typer.Option(0, "--max-datasets"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB sync run."""
+    dataset_ids = [item.strip() for item in datasets.split(",") if item.strip()]
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/sync:run",
+            {
+                "datasets": dataset_ids,
+                "strict_completeness": strict,
+                "max_runtime_seconds": max(max_runtime_seconds, 0),
+                "max_rows_per_dataset": max(max_rows_per_dataset, 0),
+                "max_datasets": max(max_datasets, 0),
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("sync-status")
+def target_db_sync_status(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Show target DB sync status."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/sync/status",
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("index-plan")
+def target_db_index_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    build: str | None = typer.Option(None, "--build"),
+    include_constraints: bool = typer.Option(
+        True,
+        "--include-constraints/--no-include-constraints",
+    ),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB index/constraint plan run."""
+    payload: dict[str, object] = {"include_constraints": include_constraints}
+    if build:
+        payload["target_build_id"] = build
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/indexes/plan",
+            payload,
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("index-apply")
+def target_db_index_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB index/constraint apply run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/indexes/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("rls-plan")
+def target_db_rls_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB RLS plan run (optional defense-in-depth)."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/rls/plan",
+            {},
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("rls-apply")
+def target_db_rls_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Request target DB RLS apply run."""
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/rls/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("sync-schedule-list")
+def target_db_sync_schedule_list(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """List sync schedules for one target DB profile."""
+    response = _request_json(
+        "GET",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/sync/schedules",
+    )
+    typer.echo(json.dumps(response, indent=2, sort_keys=True))
+
+
+@target_db_app.command("sync-schedule-create")
+def target_db_sync_schedule_create(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    schedule: str = typer.Option(..., "--schedule"),
+    datasets: str = typer.Option("", "--datasets"),
+    strict: bool = typer.Option(True, "--strict/--no-strict"),
+    enabled: bool = typer.Option(True, "--enabled/--disabled"),
+    max_runtime_seconds: int = typer.Option(0, "--max-runtime-seconds"),
+    max_rows_per_dataset: int = typer.Option(0, "--max-rows-per-dataset"),
+    max_datasets: int = typer.Option(0, "--max-datasets"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Create deterministic sync schedule profile with fail-closed budgets."""
+    dataset_ids = [item.strip() for item in datasets.split(",") if item.strip()]
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/sync/schedules",
+        {
+            "schedule_expression": schedule,
+            "datasets": dataset_ids,
+            "strict_completeness": strict,
+            "enabled": enabled,
+            "max_runtime_seconds": max(max_runtime_seconds, 0),
+            "max_rows_per_dataset": max(max_rows_per_dataset, 0),
+            "max_datasets": max(max_datasets, 0),
+        },
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("cutover")
+def target_db_cutover(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    to_target_db: str = typer.Option(..., "--to-target-db"),
+    from_target_db: str | None = typer.Option(None, "--from-target-db"),
+    approval_task_id: str | None = typer.Option(None, "--approval-task-id"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Switch active workspace target DB (shadow target cutover)."""
+    payload: dict[str, object] = {"to_target_db_id": to_target_db}
+    if from_target_db:
+        payload["from_target_db_id"] = from_target_db
+    if approval_task_id:
+        payload["approval_task_id"] = approval_task_id
+    response = _request_json(
+        "POST",
+        f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/cutover",
+        payload,
+    )
+    typer.echo(json.dumps(_as_dict(response), indent=2, sort_keys=True))
+
+
+@target_db_app.command("status")
+def target_db_status(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Show target DB profile, sync state, and blocking review task summary."""
+    profile = _as_dict(
+        _request_json(
+            "GET",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}",
+        )
+    )
+    sync_status = _as_dict(
+        _request_json(
+            "GET",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/sync/status",
+        )
+    )
+    review_summary = _as_dict(
+        _request_json(
+            "GET",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/review_tasks/summary",
+        )
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "workspace_id": workspace,
+                "target_db_id": target_db,
+                "profile": profile,
+                "sync_status": sync_status,
+                "review_summary": review_summary,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@target_db_app.command("plan")
+def target_db_plan(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    kind: str = typer.Option(..., "--kind", help="provision|migration|load|index|rls"),
+    payload_json: str = typer.Option("{}", "--payload"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Generic target DB plan command for operator workflows."""
+    normalized_kind = kind.strip().lower()
+    route_by_kind = {
+        "provision": "provision",
+        "migration": "migrations",
+        "load": "load",
+        "index": "indexes",
+        "rls": "rls",
+    }
+    route = route_by_kind.get(normalized_kind)
+    if route is None:
+        typer.echo("kind must be one of: provision,migration,load,index,rls", err=True)
+        raise typer.Exit(code=1)
+    payload = _parse_json_mapping(payload_json, field_name="payload")
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/{route}/plan",
+            payload,
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
+
+
+@target_db_app.command("apply")
+def target_db_apply(
+    workspace: str = typer.Option(..., "--workspace", "-w"),
+    target_db: str = typer.Option(..., "--target-db"),
+    kind: str = typer.Option(..., "--kind", help="provision|migration|load|index|rls"),
+    plan_id: str = typer.Option(..., "--plan-id"),
+    expected_checksum: str = typer.Option(..., "--expected-checksum"),
+    wait: bool = typer.Option(False, "--wait/--no-wait"),
+    wait_timeout_seconds: int = typer.Option(180, "--wait-timeout-seconds"),
+    poll_interval_seconds: float = typer.Option(2.0, "--poll-interval-seconds"),
+    api_base_url: str = typer.Option(DEFAULT_API_BASE_URL, "--api-base-url"),
+) -> None:
+    """Generic target DB apply command for operator workflows."""
+    normalized_kind = kind.strip().lower()
+    route_by_kind = {
+        "provision": "provision",
+        "migration": "migrations",
+        "load": "load",
+        "index": "indexes",
+        "rls": "rls",
+    }
+    route = route_by_kind.get(normalized_kind)
+    if route is None:
+        typer.echo("kind must be one of: provision,migration,load,index,rls", err=True)
+        raise typer.Exit(code=1)
+    response = _as_dict(
+        _request_json(
+            "POST",
+            f"{api_base_url}/api/v1/workspaces/{workspace}/target-dbs/{target_db}/{route}/apply",
+            {
+                "plan_id": plan_id,
+                "expected_plan_checksum": expected_checksum,
+            },
+        )
+    )
+    observed = _target_db_wait_if_requested(
+        response=response,
+        wait=wait,
+        api_base_url=api_base_url,
+        workspace_id=workspace,
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _emit_target_db_run_output(response=response, observed=observed)
 
 
 @app.command("onboard-demo")
@@ -909,6 +1619,7 @@ def templates_apply(
 
 app.add_typer(templates_app, name="templates")
 app.add_typer(plugins_app, name="plugins")
+app.add_typer(target_db_app, name="target-db")
 
 
 @plugins_app.command("scaffold")

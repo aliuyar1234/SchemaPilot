@@ -41,6 +41,256 @@ def test_connect_command_calls_control_plane(monkeypatch) -> None:
     assert captured["payload"]["scope"]["root_path"] == "/tmp/data"
 
 
+def test_target_db_create_calls_control_plane(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        return {"target_db": {"target_db_id": "tdb1"}}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "create",
+            "--workspace",
+            "w1",
+            "--name",
+            "serving-db",
+            "--type",
+            "postgres",
+            "--mode",
+            "managed",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://cp/api/v1/workspaces/w1/target-dbs"
+    assert captured["payload"]["db_type"] == "postgres"
+
+
+def test_target_db_validate_waits_for_run(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        calls.append((method, url, payload))
+        if url.endswith("/validate"):
+            return {"run_id": "run-target-db-1"}
+        if "/runs/" in url:
+            return {"run_id": "run-target-db-1", "status": "succeeded"}
+        return {}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "validate",
+            "--workspace",
+            "w1",
+            "--target-db",
+            "tdb1",
+            "--wait",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert (
+        "POST",
+        "http://cp/api/v1/workspaces/w1/target-dbs/tdb1/validate",
+        {"strict": True},
+    ) in calls
+    assert (
+        "GET",
+        "http://cp/api/v1/workspaces/w1/runs/run-target-db-1",
+        None,
+    ) in calls
+
+
+def test_target_db_index_plan_calls_control_plane(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        if method == "POST":
+            return {"run_id": "run-index-1"}
+        return {"run_id": "run-index-1", "status": "succeeded"}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "index-plan",
+            "--workspace",
+            "w1",
+            "--target-db",
+            "tdb1",
+            "--build",
+            "b1",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://cp/api/v1/workspaces/w1/target-dbs/tdb1/indexes/plan"
+    assert captured["payload"]["target_build_id"] == "b1"
+
+
+def test_target_db_cutover_calls_control_plane(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        return {"state": {"active_target_db_id": "tdb-shadow"}}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "cutover",
+            "--workspace",
+            "w1",
+            "--to-target-db",
+            "tdb-shadow",
+            "--from-target-db",
+            "tdb-primary",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://cp/api/v1/workspaces/w1/target-dbs/cutover"
+    assert captured["payload"]["to_target_db_id"] == "tdb-shadow"
+    assert captured["payload"]["from_target_db_id"] == "tdb-primary"
+
+
+def test_target_db_sync_schedule_create_calls_control_plane(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None):  # type: ignore[no-untyped-def]
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        return {"schedule_id": "sched_1"}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "sync-schedule-create",
+            "--workspace",
+            "w1",
+            "--target-db",
+            "tdb1",
+            "--schedule",
+            "*/10 * * * *",
+            "--datasets",
+            "ds_a,ds_b",
+            "--max-runtime-seconds",
+            "120",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["method"] == "POST"
+    assert (
+        captured["url"]
+        == "http://cp/api/v1/workspaces/w1/target-dbs/tdb1/sync/schedules"
+    )
+    assert captured["payload"]["datasets"] == ["ds_a", "ds_b"]
+    assert captured["payload"]["max_runtime_seconds"] == 120
+
+
+def test_target_db_generic_plan_command_calls_expected_route(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        if method == "POST":
+            return {"run_id": "run-plan-1"}
+        return {"run_id": "run-plan-1", "status": "succeeded"}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "plan",
+            "--workspace",
+            "w1",
+            "--target-db",
+            "tdb1",
+            "--kind",
+            "index",
+            "--payload",
+            "{\"target_build_id\":\"b1\"}",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["url"] == "http://cp/api/v1/workspaces/w1/target-dbs/tdb1/indexes/plan"
+    assert captured["payload"]["target_build_id"] == "b1"
+
+
+def test_target_db_generic_apply_command_calls_expected_route(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_request_json(method: str, url: str, payload=None, *, auth_token=None):  # type: ignore[no-untyped-def]
+        _ = auth_token
+        captured["method"] = method
+        captured["url"] = url
+        captured["payload"] = payload
+        if method == "POST":
+            return {"run_id": "run-apply-1"}
+        return {"run_id": "run-apply-1", "status": "succeeded"}
+
+    monkeypatch.setattr("cli.schemapilot_cli.main._request_json", fake_request_json)
+    result = runner.invoke(
+        app,
+        [
+            "target-db",
+            "apply",
+            "--workspace",
+            "w1",
+            "--target-db",
+            "tdb1",
+            "--kind",
+            "rls",
+            "--plan-id",
+            "plan1",
+            "--expected-checksum",
+            "sha256:123",
+            "--api-base-url",
+            "http://cp",
+        ],
+    )
+    assert result.exit_code == 0
+    assert captured["url"] == "http://cp/api/v1/workspaces/w1/target-dbs/tdb1/rls/apply"
+    assert captured["payload"]["plan_id"] == "plan1"
+
+
 def test_doctor_command_returns_ok_report_for_valid_config(tmp_path: Path) -> None:
     config_path = tmp_path / "doctor.json"
     config_path.write_text(

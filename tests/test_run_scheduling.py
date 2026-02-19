@@ -8,7 +8,7 @@ from backend.control_plane.app import create_app
 from backend.control_plane.repository import create_workspace
 from backend.shared_domain.config import Settings
 from backend.shared_domain.db import get_engine, get_session_factory
-from backend.shared_domain.metadata_models import Base
+from backend.shared_domain.metadata_models import Base, RunRecord
 from backend.shared_domain.scheduling import (
     create_run_schedule,
     enqueue_due_scheduled_runs,
@@ -88,3 +88,43 @@ def test_enqueue_due_schedules_creates_runs(tmp_path: Path) -> None:
         session.commit()
     assert len(created) == 1
     assert created[0]["run_type"] == "discover"
+
+
+def test_enqueue_due_schedules_preserves_input_refs_payload(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    Base.metadata.create_all(bind=get_engine(settings.database_url))
+    session_factory = get_session_factory(settings.database_url)
+    with session_factory() as session:
+        workspace = create_workspace(
+            session,
+            name="Sched Target Sync Workspace",
+            profile="starter",
+            security_baseline="standard",
+        )
+        schedule = create_run_schedule(
+            session,
+            workspace_id=str(workspace["workspace_id"]),
+            run_type="TARGET_DB_SYNC_RUN",
+            schedule_expression="*/1 * * * *",
+            enabled=True,
+            actor_id="user:local_steward",
+            input_refs={
+                "target_db_id": "tdb_1",
+                "datasets": ["ds_orders"],
+                "strict_completeness": True,
+                "max_runtime_seconds": 120,
+            },
+        )
+        created = enqueue_due_scheduled_runs(
+            session,
+            now_epoch=int(schedule["next_run_epoch"]) + 1,  # type: ignore[arg-type]
+        )
+        created_run_id = str(created[0]["run_id"])
+        run_row = session.get(RunRecord, created_run_id)
+        assert run_row is not None
+        assert run_row.input_refs_json["target_db_id"] == "tdb_1"
+        assert run_row.input_refs_json["datasets"] == ["ds_orders"]
+        assert run_row.input_refs_json["max_runtime_seconds"] == 120
+        session.commit()
+    assert len(created) == 1
+    assert created[0]["run_type"] == "TARGET_DB_SYNC_RUN"

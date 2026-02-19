@@ -22,6 +22,7 @@ from backend.shared_domain.secrets_store import (
 
 BYPASS_PORTS = (8080, 8083, 9200, 6333)
 BYPASS_TOKENS = tuple(f"{port}:{port}" for port in BYPASS_PORTS)
+COMPOSE_ONLY_BLOCKED_MAPPINGS = ("5432:5432",)
 PORT_PATTERN = re.compile(r"\b(?:port|targetPort|nodePort)\s*:\s*(\d+)\b")
 
 
@@ -168,6 +169,9 @@ def _collect_bypass_port_errors(root: Path) -> list[str]:
         for token in BYPASS_TOKENS:
             if token in compose:
                 errors.append(f"{compose_path.as_posix()}: contains mapping {token}")
+        for mapping in COMPOSE_ONLY_BLOCKED_MAPPINGS:
+            if mapping in compose:
+                errors.append(f"{compose_path.as_posix()}: contains mapping {mapping}")
     for directory in [root / "deploy" / "k8s", root / "deploy" / "helm" / "templates"]:
         if not directory.exists():
             continue

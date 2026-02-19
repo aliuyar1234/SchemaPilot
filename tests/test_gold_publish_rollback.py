@@ -105,3 +105,74 @@ def test_gold_rollback_returns_not_found_for_unknown_target() -> None:
     body = response.json()
     assert body["error"]["code"] == "NOT_FOUND"
     assert body["error"]["message"] == "Rollback target not found."
+
+
+def test_publish_and_rollback_update_target_db_state_snapshot() -> None:
+    settings = _settings()
+    client = TestClient(create_app(settings_factory=lambda: settings))
+    workspace = client.post(
+        "/api/v1/workspaces",
+        json={"name": "gold-target-db", "profile": "team", "security_baseline": "strict"},
+        headers=_admin_headers(),
+    ).json()
+    workspace_id = workspace["workspace_id"]
+    target_db = client.post(
+        f"/api/v1/workspaces/{workspace_id}/target-dbs",
+        json={
+            "name": "serving-db",
+            "db_type": "postgres",
+            "mode": "managed",
+            "connection": {"schema": "gold_serving"},
+        },
+        headers=_admin_headers(),
+    ).json()["target_db"]
+    target_db_id = str(target_db["target_db_id"])
+
+    write_build_contract_report(
+        workspace_id=workspace_id,
+        build_id="build-1",
+        contracts_passed=True,
+        failures=[],
+        storage_root=settings.storage_root,
+    )
+    publish_1 = client.post(
+        f"/api/v1/workspaces/{workspace_id}/builds/build-1/publish",
+        json={
+            "snapshot_id": "snap-1",
+            "model_name": "orders",
+            "target_db_id": target_db_id,
+        },
+        headers=_admin_headers(),
+    )
+    assert publish_1.status_code == 200
+    published_1 = publish_1.json()
+    assert published_1["target_db_state_after"]["current_build_id"] == "build-1"
+    assert published_1["target_db_state_after"]["current_schema_ref"] == "gold_serving"
+
+    write_build_contract_report(
+        workspace_id=workspace_id,
+        build_id="build-2",
+        contracts_passed=True,
+        failures=[],
+        storage_root=settings.storage_root,
+    )
+    publish_2 = client.post(
+        f"/api/v1/workspaces/{workspace_id}/builds/build-2/publish",
+        json={
+            "snapshot_id": "snap-2",
+            "model_name": "orders",
+            "target_db_id": target_db_id,
+        },
+        headers=_admin_headers(),
+    )
+    assert publish_2.status_code == 200
+    assert publish_2.json()["target_db_state_after"]["current_build_id"] == "build-2"
+
+    rollback = client.post(
+        f"/api/v1/workspaces/{workspace_id}/builds/build-1/rollback",
+        headers=_admin_headers(),
+    )
+    assert rollback.status_code == 200
+    rolled_back = rollback.json()
+    assert rolled_back["target_db_state_after"]["current_build_id"] == "build-1"
+    assert rolled_back["target_db_state_after"]["current_schema_ref"] == "gold_serving"

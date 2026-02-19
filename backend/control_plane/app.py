@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -38,15 +39,24 @@ from backend.control_plane.repository import (
 from backend.control_plane.repository import (
     create_run,
     create_source,
+    create_target_db_plan,
+    create_target_db_profile,
     create_workspace,
+    disable_target_db_profile,
     get_dataset,
     get_run,
+    get_target_db_plan,
+    get_target_db_profile,
     get_workspace,
     list_datasets,
     list_run_steps,
     list_sources,
+    list_target_db_profiles,
+    list_target_db_sync_cursors,
     list_workspaces,
+    mark_target_db_plan_applied,
     update_source,
+    upsert_target_db_sync_cursor,
 )
 from backend.control_plane.retention import (
     configure_retention_policy,
@@ -93,7 +103,7 @@ from backend.shared_domain.auth import (
 from backend.shared_domain.config import Settings, load_settings
 from backend.shared_domain.contract_reports import load_build_contract_report
 from backend.shared_domain.db import get_session_factory, prepare_database
-from backend.shared_domain.errors import PolicyDeniedError, SchemaPilotError
+from backend.shared_domain.errors import NotFoundError, PolicyDeniedError, SchemaPilotError
 from backend.shared_domain.evidence_store import load_evidence_bundle, store_evidence_bundle
 from backend.shared_domain.gold_pointer import (
     load_latest_gold_pointer,
@@ -243,6 +253,176 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             )
         )
         return JSONResponse(status_code=404, content=payload.model_dump())
+
+    def target_db_operation_key(
+        *,
+        workspace_id: str,
+        target_db_id: str,
+        operation: str,
+        plan_checksum: str,
+    ) -> str:
+        canonical = json_dumps_sorted(
+            {
+                "workspace_id": workspace_id,
+                "target_db_id": target_db_id,
+                "operation": operation,
+                "plan_checksum": plan_checksum,
+            }
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"opk_{digest}"
+
+    def _target_db_state_snapshot(
+        session: Session, *, workspace_id: str
+    ) -> dict[str, object]:
+        row = session.get(db_models.TargetDbState, workspace_id)
+        if row is None:
+            return {
+                "active_target_db_id": None,
+                "current_build_id": None,
+                "current_schema_ref": None,
+                "health_status": "unknown",
+            }
+        return {
+            "active_target_db_id": row.active_target_db_id,
+            "current_build_id": row.current_build_id,
+            "current_schema_ref": row.current_schema_ref,
+            "health_status": row.health_status,
+        }
+
+    def _ensure_target_db_state_row(
+        session: Session, *, workspace_id: str
+    ) -> db_models.TargetDbState:
+        row = session.get(db_models.TargetDbState, workspace_id)
+        if row is not None:
+            return row
+        row = db_models.TargetDbState(
+            workspace_id=workspace_id,
+            active_target_db_id=None,
+            current_build_id=None,
+            current_schema_ref=None,
+            last_successful_sync_epoch=None,
+            health_status="unknown",
+            last_validation_run_id=None,
+            last_error_evidence_bundle_uri=None,
+            sync_status_json={"datasets": []},
+        )
+        session.add(row)
+        session.flush()
+        return row
+
+    def _derive_target_schema_ref(
+        *,
+        profile_row: db_models.TargetDbProfile | None,
+        workspace_id: str,
+        build_id: str,
+    ) -> str:
+        if profile_row is not None:
+            schema = str(profile_row.connection_json.get("schema", "")).strip()
+            if schema:
+                return schema
+            if str(profile_row.db_type).lower() == "sqlite":
+                return f"sqlite_build_{build_id}"
+        safe_workspace = workspace_id.replace("-", "_")
+        safe_build = build_id.replace("-", "_")
+        return f"sp_{safe_workspace}_{safe_build}"
+
+    def _record_target_db_publish_state(
+        *,
+        session: Session,
+        workspace_id: str,
+        build_id: str,
+        target_db_id: str | None,
+        requested_schema_ref: str | None,
+    ) -> dict[str, object]:
+        state_row = _ensure_target_db_state_row(session, workspace_id=workspace_id)
+        effective_target_db_id = (target_db_id or state_row.active_target_db_id or "").strip()
+        if not effective_target_db_id:
+            return _target_db_state_snapshot(session, workspace_id=workspace_id)
+        profile_row = session.get(db_models.TargetDbProfile, effective_target_db_id)
+        if profile_row is None or profile_row.workspace_id != workspace_id:
+            return _target_db_state_snapshot(session, workspace_id=workspace_id)
+        schema_ref = (
+            str(requested_schema_ref).strip()
+            if requested_schema_ref and str(requested_schema_ref).strip()
+            else _derive_target_schema_ref(
+                profile_row=profile_row, workspace_id=workspace_id, build_id=build_id
+            )
+        )
+        sync_status_raw = state_row.sync_status_json
+        sync_status = dict(sync_status_raw) if isinstance(sync_status_raw, dict) else {}
+        dataset_rows = sync_status.get("datasets", [])
+        build_schema_refs_raw = sync_status.get("build_schema_refs", {})
+        build_schema_refs = (
+            dict(build_schema_refs_raw) if isinstance(build_schema_refs_raw, dict) else {}
+        )
+        build_schema_refs[build_id] = schema_ref
+        sync_status["datasets"] = dataset_rows if isinstance(dataset_rows, list) else []
+        sync_status["build_schema_refs"] = build_schema_refs
+        state_row.active_target_db_id = effective_target_db_id
+        state_row.current_build_id = build_id
+        state_row.current_schema_ref = schema_ref
+        state_row.health_status = "healthy"
+        if str(profile_row.db_type).lower() == "sqlite":
+            build_database_refs_raw = sync_status.get("build_database_refs", {})
+            build_database_refs = (
+                dict(build_database_refs_raw)
+                if isinstance(build_database_refs_raw, dict)
+                else {}
+            )
+            active_database = str(build_database_refs.get(build_id, "")).strip()
+            if active_database:
+                connection_payload = dict(profile_row.connection_json)
+                connection_payload["active_database"] = active_database
+                profile_row.connection_json = connection_payload
+        state_row.sync_status_json = sync_status
+        session.flush()
+        return _target_db_state_snapshot(session, workspace_id=workspace_id)
+
+    def _rollback_target_db_publish_state(
+        *,
+        session: Session,
+        workspace_id: str,
+        rollback_build_id: str,
+    ) -> dict[str, object]:
+        state_row = session.get(db_models.TargetDbState, workspace_id)
+        if state_row is None:
+            return _target_db_state_snapshot(session, workspace_id=workspace_id)
+        sync_status_raw = state_row.sync_status_json
+        sync_status = dict(sync_status_raw) if isinstance(sync_status_raw, dict) else {}
+        build_schema_refs_raw = sync_status.get("build_schema_refs", {})
+        build_schema_refs = (
+            dict(build_schema_refs_raw) if isinstance(build_schema_refs_raw, dict) else {}
+        )
+        target_schema_ref = str(build_schema_refs.get(rollback_build_id, "")).strip()
+        profile_row = (
+            session.get(db_models.TargetDbProfile, state_row.active_target_db_id)
+            if state_row.active_target_db_id
+            else None
+        )
+        if not target_schema_ref:
+            target_schema_ref = _derive_target_schema_ref(
+                profile_row=profile_row,
+                workspace_id=workspace_id,
+                build_id=rollback_build_id,
+            )
+        if profile_row is not None and str(profile_row.db_type).lower() == "sqlite":
+            build_database_refs_raw = sync_status.get("build_database_refs", {})
+            build_database_refs = (
+                dict(build_database_refs_raw)
+                if isinstance(build_database_refs_raw, dict)
+                else {}
+            )
+            active_database = str(build_database_refs.get(rollback_build_id, "")).strip()
+            if active_database:
+                connection_payload = dict(profile_row.connection_json)
+                connection_payload["active_database"] = active_database
+                profile_row.connection_json = connection_payload
+        state_row.current_build_id = rollback_build_id
+        state_row.current_schema_ref = target_schema_ref
+        state_row.health_status = "healthy"
+        session.flush()
+        return _target_db_state_snapshot(session, workspace_id=workspace_id)
 
     def append_audit_event(
         session: Session,
@@ -833,6 +1013,897 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         )
         return source
 
+    def _target_db_not_found(
+        *,
+        request: Request,
+        workspace_id: str,
+        target_db_id: str,
+    ) -> JSONResponse:
+        return not_found_response(
+            request=request,
+            message="Target DB profile not found.",
+            details={"workspace_id": workspace_id, "target_db_id": target_db_id},
+        )
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs")
+    async def api_create_target_db_profile(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        name = str(payload.get("name", "")).strip()
+        db_type = str(payload.get("db_type", "")).strip()
+        mode = str(payload.get("mode", "")).strip()
+        connection_raw = payload.get("connection")
+        connection = connection_raw if isinstance(connection_raw, dict) else {}
+        credential_refs_raw = payload.get("credential_refs")
+        credential_refs = credential_refs_raw if isinstance(credential_refs_raw, dict) else {}
+        if not name or not db_type or not mode:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_target_db_profile_fields"},
+            )
+        profile = create_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            name=name,
+            db_type=db_type,
+            mode=mode,
+            connection=connection,
+            credential_refs=credential_refs,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.profile_created",
+            event_json=profile,
+            correlation_id=request.state.request_id,
+        )
+        return {"target_db": profile}
+
+    @app.get("/api/v1/workspaces/{workspace_id}/target-dbs")
+    async def api_list_target_db_profiles(
+        workspace_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        return list_target_db_profiles(session, workspace_id=workspace_id)
+
+    @app.get("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}")
+    async def api_get_target_db_profile(
+        workspace_id: str,
+        target_db_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        return profile
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}:disable")
+    async def api_disable_target_db_profile(
+        workspace_id: str,
+        target_db_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        profile = disable_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.profile_disabled",
+            event_json=profile,
+            correlation_id=request.state.request_id,
+        )
+        return {"target_db": profile}
+
+    def _create_target_db_plan_and_run(
+        *,
+        session: Session,
+        workspace_id: str,
+        target_db_id: str,
+        plan_kind: str,
+        run_type: str,
+        payload: dict[str, object] | None = None,
+        requires_approval: bool = False,
+        destructive: bool = False,
+    ) -> dict[str, object]:
+        plan = create_target_db_plan(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind=plan_kind,
+            payload=payload,
+            requires_approval=requires_approval,
+            destructive=destructive,
+        )
+        run = create_run(session, workspace_id=workspace_id, run_type=run_type)
+        run_row = session.get(db_models.RunRecord, str(run["run_id"]))
+        if run_row is not None:
+            run_input_refs: dict[str, object] = {
+                "target_db_id": target_db_id,
+                "plan_id": str(plan["plan_id"]),
+                "plan_kind": plan_kind,
+                "plan_checksum": str(plan["plan_checksum"]),
+            }
+            if payload:
+                for key, value in payload.items():
+                    run_input_refs[str(key)] = value
+            run_row.input_refs_json = run_input_refs
+            session.flush()
+        return {
+            "run_id": run["run_id"],
+            "operation_key": target_db_operation_key(
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+                operation=plan_kind,
+                plan_checksum=str(plan["plan_checksum"]),
+            ),
+            "status_url": f"/api/v1/workspaces/{workspace_id}/runs/{run['run_id']}",
+            "plan": plan,
+        }
+
+    def _apply_target_db_plan(
+        *,
+        session: Session,
+        workspace_id: str,
+        target_db_id: str,
+        run_type: str,
+        plan_kind: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        plan_id = str(payload.get("plan_id", "")).strip()
+        expected_checksum = str(payload.get("expected_plan_checksum", "")).strip()
+        if not plan_id or not expected_checksum:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_plan_id_or_checksum"},
+            )
+        plan = get_target_db_plan(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_id=plan_id,
+        )
+        if plan is None:
+            raise NotFoundError(
+                "Target DB plan not found.",
+                details={
+                    "workspace_id": workspace_id,
+                    "target_db_id": target_db_id,
+                    "plan_id": plan_id,
+                },
+            )
+        if str(plan.get("plan_kind")) != plan_kind:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "plan_kind_mismatch", "expected": plan_kind},
+            )
+        if str(plan.get("plan_checksum")) != expected_checksum:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "plan_checksum_mismatch"},
+            )
+        if bool(plan.get("requires_approval")):
+            payload_raw = plan.get("payload", {})
+            payload_details = payload_raw if isinstance(payload_raw, dict) else {}
+            worker_plan = payload_details.get("worker_plan")
+            worker_plan_details = worker_plan if isinstance(worker_plan, dict) else {}
+            detail_payload_raw = worker_plan_details.get("details", {})
+            detail_payload = detail_payload_raw if isinstance(detail_payload_raw, dict) else {}
+            approval_task_id = str(
+                detail_payload.get("approval_task_id")
+                or payload_details.get("approval_task_id")
+                or ""
+            ).strip()
+            task_row = (
+                session.get(db_models.ReviewTask, approval_task_id)
+                if approval_task_id
+                else None
+            )
+            if task_row is None or task_row.workspace_id != workspace_id:
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": "approval_required",
+                        "plan_id": plan_id,
+                        "blocking_review_task_ids": [approval_task_id]
+                        if approval_task_id
+                        else [],
+                    },
+                )
+            if task_row.status != "approved":
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": "approval_required",
+                        "plan_id": plan_id,
+                        "blocking_review_task_ids": [task_row.task_id],
+                    },
+                )
+        mark_target_db_plan_applied(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_id=plan_id,
+        )
+        run = create_run(session, workspace_id=workspace_id, run_type=run_type)
+        run_row = session.get(db_models.RunRecord, str(run["run_id"]))
+        if run_row is not None:
+            run_row.input_refs_json = {
+                "target_db_id": target_db_id,
+                "plan_id": plan_id,
+                "plan_kind": plan_kind,
+                "plan_checksum": expected_checksum,
+            }
+            session.flush()
+        return {
+            "run_id": run["run_id"],
+            "status_url": f"/api/v1/workspaces/{workspace_id}/runs/{run['run_id']}",
+            "operation_key": target_db_operation_key(
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+                operation=f"{plan_kind}_apply",
+                plan_checksum=expected_checksum,
+            ),
+            "plan_id": plan_id,
+            "plan_checksum": expected_checksum,
+        }
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/validate")
+    async def api_target_db_validate(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="validate",
+            run_type="TARGET_DB_VALIDATE",
+            payload={"strict": bool(payload.get("strict", True))},
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.validate_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/provision/plan")
+    async def api_target_db_provision_plan(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="provision",
+            run_type="TARGET_DB_PROVISION_PLAN",
+            payload=dict(payload),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.provision_plan_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/provision/apply")
+    async def api_target_db_provision_apply(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _apply_target_db_plan(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            run_type="TARGET_DB_PROVISION_APPLY",
+            plan_kind="provision",
+            payload=payload,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.provision_apply_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/migrations/plan")
+    async def api_target_db_migration_plan(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="migration",
+            run_type="TARGET_DB_MIGRATION_PLAN",
+            payload=dict(payload),
+            requires_approval=bool(payload.get("requires_approval", False)),
+            destructive=bool(payload.get("destructive", False)),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.migration_plan_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/migrations/apply")
+    async def api_target_db_migration_apply(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _apply_target_db_plan(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            run_type="TARGET_DB_MIGRATION_APPLY",
+            plan_kind="migration",
+            payload=payload,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.migration_apply_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/load/plan")
+    async def api_target_db_load_plan(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="load",
+            run_type="TARGET_DB_LOAD_PLAN",
+            payload=dict(payload),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.load_plan_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/load/apply")
+    async def api_target_db_load_apply(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _apply_target_db_plan(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            run_type="TARGET_DB_LOAD_APPLY",
+            plan_kind="load",
+            payload=payload,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.load_apply_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/indexes/plan")
+    async def api_target_db_index_plan(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="index",
+            run_type="TARGET_DB_INDEX_PLAN",
+            payload=dict(payload),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.index_plan_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/indexes/apply")
+    async def api_target_db_index_apply(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _apply_target_db_plan(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            run_type="TARGET_DB_INDEX_APPLY",
+            plan_kind="index",
+            payload=payload,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.index_apply_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/rls/plan")
+    async def api_target_db_rls_plan(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        if not settings.target_db_rls_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "module_disabled", "module": "target_db_rls"},
+            )
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _create_target_db_plan_and_run(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            plan_kind="rls",
+            run_type="TARGET_DB_RLS_PLAN",
+            payload=dict(payload),
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.rls_plan_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/rls/apply")
+    async def api_target_db_rls_apply(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        if not settings.target_db_rls_enabled:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "module_disabled", "module": "target_db_rls"},
+            )
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        result = _apply_target_db_plan(
+            session=session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            run_type="TARGET_DB_RLS_APPLY",
+            plan_kind="rls",
+            payload=payload,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.rls_apply_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/sync:run")
+    async def api_target_db_sync_run(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        run = create_run(session, workspace_id=workspace_id, run_type="TARGET_DB_SYNC_RUN")
+        datasets_raw = payload.get("datasets", [])
+        dataset_ids = (
+            [str(item) for item in datasets_raw if isinstance(item, (str, int, float))]
+            if isinstance(datasets_raw, list)
+            else []
+        )
+        max_runtime_seconds_raw = payload.get("max_runtime_seconds", 0)
+        max_rows_per_dataset_raw = payload.get("max_rows_per_dataset", 0)
+        max_datasets_raw = payload.get("max_datasets", 0)
+        max_runtime_seconds = (
+            int(max_runtime_seconds_raw)
+            if isinstance(max_runtime_seconds_raw, (int, float, str))
+            else 0
+        )
+        max_rows_per_dataset = (
+            int(max_rows_per_dataset_raw)
+            if isinstance(max_rows_per_dataset_raw, (int, float, str))
+            else 0
+        )
+        max_datasets = (
+            int(max_datasets_raw)
+            if isinstance(max_datasets_raw, (int, float, str))
+            else 0
+        )
+        dataset_updates: list[dict[str, object]] = []
+        for dataset_id in dataset_ids:
+            cursor_hash = hashlib.sha256(
+                json_dumps_sorted(
+                    {
+                        "dataset_id": dataset_id,
+                        "run_id": str(run["run_id"]),
+                        "target_db_id": target_db_id,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+            dataset_updates.append(
+                upsert_target_db_sync_cursor(
+                    session,
+                    workspace_id=workspace_id,
+                    target_db_id=target_db_id,
+                    dataset_id=dataset_id,
+                    cursor_hash=f"sha256:{cursor_hash}",
+                    run_id=str(run["run_id"]),
+                    status="queued",
+                )
+            )
+        result = {
+            "run_id": run["run_id"],
+            "status_url": f"/api/v1/workspaces/{workspace_id}/runs/{run['run_id']}",
+            "target_db_id": target_db_id,
+            "strict_completeness": bool(payload.get("strict_completeness", True)),
+            "max_runtime_seconds": max_runtime_seconds,
+            "max_rows_per_dataset": max_rows_per_dataset,
+            "max_datasets": max_datasets,
+            "datasets": dataset_updates,
+        }
+        run_row = session.get(db_models.RunRecord, str(run["run_id"]))
+        if run_row is not None:
+            run_row.input_refs_json = {
+                "target_db_id": target_db_id,
+                "datasets": dataset_ids,
+                "strict_completeness": bool(payload.get("strict_completeness", True)),
+                "max_runtime_seconds": max_runtime_seconds,
+                "max_rows_per_dataset": max_rows_per_dataset,
+                "max_datasets": max_datasets,
+            }
+            session.flush()
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.sync_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
+    @app.get("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/sync/status")
+    async def api_target_db_sync_status(
+        workspace_id: str,
+        target_db_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        state = profile.get("state", {})
+        if not isinstance(state, dict):
+            state = {}
+        return {
+            "workspace_id": workspace_id,
+            "target_db_id": target_db_id,
+            "last_successful_sync_at": state.get("last_successful_sync_at"),
+            "datasets": list_target_db_sync_cursors(
+                session,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            ),
+        }
+
+    @app.get("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/sync/schedules")
+    async def api_target_db_sync_schedule_list(
+        workspace_id: str,
+        target_db_id: str,
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> list[dict[str, object]]:
+        _ = require_actor(request, roles=analyst_or_steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        schedules = list_run_schedules(session, workspace_id=workspace_id)
+        filtered: list[dict[str, object]] = []
+        for schedule in schedules:
+            if str(schedule.get("run_type", "")).strip() != "TARGET_DB_SYNC_RUN":
+                continue
+            input_refs_raw = schedule.get("input_refs", {})
+            input_refs = input_refs_raw if isinstance(input_refs_raw, dict) else {}
+            if str(input_refs.get("target_db_id", "")).strip() != target_db_id:
+                continue
+            filtered.append(schedule)
+        return filtered
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/{target_db_id}/sync/schedules")
+    async def api_target_db_sync_schedule_create(
+        workspace_id: str,
+        target_db_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+        )
+        if profile is None:
+            return _target_db_not_found(
+                request=request,
+                workspace_id=workspace_id,
+                target_db_id=target_db_id,
+            )  # type: ignore[return-value]
+        schedule_expression = str(payload.get("schedule_expression", "")).strip()
+        if not schedule_expression:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_schedule_expression"},
+            )
+        datasets_raw = payload.get("datasets", [])
+        datasets = (
+            [str(item) for item in datasets_raw if str(item).strip()]
+            if isinstance(datasets_raw, list)
+            else []
+        )
+        def _payload_int(name: str) -> int:
+            raw = payload.get(name, 0)
+            if isinstance(raw, bool):
+                return int(raw)
+            if isinstance(raw, (int, float)):
+                return int(raw)
+            if isinstance(raw, str):
+                try:
+                    return int(raw.strip())
+                except ValueError:
+                    return 0
+            return 0
+        input_refs = {
+            "target_db_id": target_db_id,
+            "datasets": sorted(set(datasets)),
+            "strict_completeness": bool(payload.get("strict_completeness", True)),
+            "max_runtime_seconds": _payload_int("max_runtime_seconds"),
+            "max_rows_per_dataset": _payload_int("max_rows_per_dataset"),
+            "max_datasets": _payload_int("max_datasets"),
+        }
+        schedule = create_run_schedule(
+            session,
+            workspace_id=workspace_id,
+            run_type="TARGET_DB_SYNC_RUN",
+            schedule_expression=schedule_expression,
+            enabled=bool(payload.get("enabled", True)),
+            actor_id=str(actor.get("actor_id", "unknown")),
+            input_refs=input_refs,
+        )
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.sync_schedule_created",
+            event_json=schedule,
+            correlation_id=request.state.request_id,
+        )
+        return schedule
+
+    @app.post("/api/v1/workspaces/{workspace_id}/target-dbs/cutover")
+    async def api_target_db_cutover(
+        workspace_id: str,
+        payload: dict[str, object],
+        request: Request,
+        session: Session = Depends(get_session),
+    ) -> dict[str, object]:
+        actor = require_actor(request, roles=steward_or_admin_roles)
+        to_target_db_id = str(payload.get("to_target_db_id", "")).strip()
+        from_target_db_id = str(payload.get("from_target_db_id", "")).strip()
+        approval_task_id = str(payload.get("approval_task_id", "")).strip()
+        if not to_target_db_id:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "missing_to_target_db_id"},
+            )
+        to_profile = get_target_db_profile(
+            session,
+            workspace_id=workspace_id,
+            target_db_id=to_target_db_id,
+        )
+        if to_profile is None:
+            raise NotFoundError(
+                "Target DB profile not found.",
+                details={"workspace_id": workspace_id, "target_db_id": to_target_db_id},
+            )
+        if bool(to_profile.get("disabled", False)):
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={"reason": "target_db_disabled", "target_db_id": to_target_db_id},
+            )
+        state_row = _ensure_target_db_state_row(session, workspace_id=workspace_id)
+        current_active = str(state_row.active_target_db_id or "").strip()
+        if from_target_db_id and current_active and from_target_db_id != current_active:
+            raise PolicyDeniedError(
+                "Access denied by policy",
+                details={
+                    "reason": "cutover_source_mismatch",
+                    "current_active_target_db_id": current_active,
+                },
+            )
+        if approval_task_id:
+            task_row = session.get(db_models.ReviewTask, approval_task_id)
+            if (
+                task_row is None
+                or task_row.workspace_id != workspace_id
+                or task_row.status != "approved"
+            ):
+                raise PolicyDeniedError(
+                    "Access denied by policy",
+                    details={
+                        "reason": "approval_required",
+                        "blocking_review_task_ids": [approval_task_id],
+                    },
+                )
+        state_row.active_target_db_id = to_target_db_id
+        state_row.health_status = "healthy"
+        session.flush()
+        snapshot = _target_db_state_snapshot(session, workspace_id=workspace_id)
+        result: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "from_target_db_id": current_active or None,
+            "to_target_db_id": to_target_db_id,
+            "state": snapshot,
+        }
+        append_audit_event(
+            session,
+            workspace_id=workspace_id,
+            actor_id=str(actor.get("actor_id", "unknown")),
+            event_type="target_db.cutover_requested",
+            event_json=result,
+            correlation_id=request.state.request_id,
+        )
+        return result
+
     @app.get("/api/v1/workspaces/{workspace_id}/datasets")
     async def api_list_datasets(
         workspace_id: str, session: Session = Depends(get_session)
@@ -1080,6 +2151,8 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         run_type = str(payload.get("run_type", "discover")).strip()
         schedule_expression = str(payload.get("schedule_expression", "")).strip()
         enabled = bool(payload.get("enabled", True))
+        input_refs_raw = payload.get("input_refs", {})
+        input_refs = input_refs_raw if isinstance(input_refs_raw, dict) else {}
         if not run_type or not schedule_expression:
             raise PolicyDeniedError(
                 "Access denied by policy",
@@ -1093,6 +2166,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 schedule_expression=schedule_expression,
                 enabled=enabled,
                 actor_id=str(actor.get("actor_id", "unknown")),
+                input_refs=input_refs,
             )
         except ValueError as exc:
             raise PolicyDeniedError(
@@ -1360,11 +2434,13 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
             contracts_passed=contracts_passed,
             unresolved_blocking_tasks=unresolved_blocking_task_count(session, workspace_id),
         )
+        target_db_state_before = _target_db_state_snapshot(session, workspace_id=workspace_id)
         latest_pointer_before = load_latest_gold_pointer(
             workspace_id=workspace_id,
             storage_root=settings.storage_root,
         )
         pointer: dict[str, object] | None = None
+        target_db_state_after = target_db_state_before
         if gate["allowed"]:
             pointer = publish_gold_pointer(
                 workspace_id=workspace_id,
@@ -1372,6 +2448,13 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 snapshot_id=str(payload.get("snapshot_id", build_id)),
                 model_name=str(payload.get("model_name", "default_model")),
                 storage_root=settings.storage_root,
+            )
+            target_db_state_after = _record_target_db_publish_state(
+                session=session,
+                workspace_id=workspace_id,
+                build_id=build_id,
+                target_db_id=str(payload.get("target_db_id", "")).strip() or None,
+                requested_schema_ref=str(payload.get("target_schema_ref", "")).strip() or None,
             )
         result_payload: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -1387,6 +2470,8 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 workspace_id=workspace_id,
                 storage_root=settings.storage_root,
             ),
+            "target_db_state_before": target_db_state_before,
+            "target_db_state_after": target_db_state_after,
         }
         if not gate["allowed"] and gate["reason"] == "contract_failure":
             increment_contract_failure(workspace_id=workspace_id, layer="gold")
@@ -1414,6 +2499,7 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
         session: Session = Depends(get_session),
     ) -> dict[str, object]:
         actor = require_actor(request, roles=platform_admin_roles)
+        target_db_state_before = _target_db_state_snapshot(session, workspace_id=workspace_id)
         try:
             rollback_result = rollback_gold_pointer(
                 workspace_id=workspace_id,
@@ -1426,11 +2512,25 @@ def create_app(settings_factory: Callable[[], Settings] = load_settings) -> Fast
                 message="Rollback target not found.",
                 details={"workspace_id": workspace_id, "build_id": build_id, "reason": str(exc)},
             )  # type: ignore[return-value]
+        rolled_back_to_raw = rollback_result.get("rolled_back_to", {})
+        rolled_back_to = rolled_back_to_raw if isinstance(rolled_back_to_raw, dict) else {}
+        rollback_build_id = str(rolled_back_to.get("build_id", "")).strip()
+        target_db_state_after = (
+            _rollback_target_db_publish_state(
+                session=session,
+                workspace_id=workspace_id,
+                rollback_build_id=rollback_build_id,
+            )
+            if rollback_build_id
+            else target_db_state_before
+        )
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
             "build_id": build_id,
             "status": "rolled_back",
             "rollback": rollback_result,
+            "target_db_state_before": target_db_state_before,
+            "target_db_state_after": target_db_state_after,
         }
         append_audit_event(
             session,

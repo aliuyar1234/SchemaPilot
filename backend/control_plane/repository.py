@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.shared_domain.audit_models import AuditEvent
-from backend.shared_domain.errors import NotFoundError
+from backend.shared_domain.errors import NotFoundError, PolicyDeniedError
 from backend.shared_domain.ids import new_ulid, new_uuid
 from backend.shared_domain.metadata_models import (
     CatalogDataset,
     CatalogSource,
     RunRecord,
     RunStepRecord,
+    TargetDbPlan,
+    TargetDbProfile,
+    TargetDbState,
+    TargetDbSyncCursor,
     Workspace,
 )
+from backend.shared_domain.target_db.hash import target_db_profile_hash
 
 
 def create_workspace(
@@ -212,6 +221,337 @@ def create_run(session: Session, *, workspace_id: str, run_type: str) -> dict[st
         "input_refs": run.input_refs_json,
         "output_refs": run.output_refs_json,
     }
+
+
+SUPPORTED_TARGET_DB_TYPES = {"postgres", "mysql", "sqlite"}
+SUPPORTED_TARGET_DB_MODES = {"managed", "external"}
+
+
+def _canonical_checksum(payload: dict[str, object]) -> str:
+    rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _serialize_target_db_profile(row: TargetDbProfile) -> dict[str, object]:
+    return {
+        "target_db_id": row.target_db_id,
+        "workspace_id": row.workspace_id,
+        "name": row.name,
+        "db_type": row.db_type,
+        "mode": row.mode,
+        "status": row.status,
+        "desired_config_hash": row.desired_config_hash,
+        "connection": dict(row.connection_json),
+        "credential_refs": dict(row.credential_refs_json),
+        "disabled": bool(row.disabled),
+    }
+
+
+def _serialize_target_db_state(row: TargetDbState | None) -> dict[str, object]:
+    if row is None:
+        return {
+            "active_target_db_id": None,
+            "current_build_id": None,
+            "current_schema_ref": None,
+            "last_successful_sync_at": None,
+            "health": {
+                "status": "unknown",
+                "last_validation_run_id": None,
+                "last_error_evidence_bundle_id": None,
+            },
+            "datasets": [],
+        }
+    return {
+        "active_target_db_id": row.active_target_db_id,
+        "current_build_id": row.current_build_id,
+        "current_schema_ref": row.current_schema_ref,
+        "last_successful_sync_at": row.last_successful_sync_epoch,
+        "health": {
+            "status": row.health_status,
+            "last_validation_run_id": row.last_validation_run_id,
+            "last_error_evidence_bundle_id": row.last_error_evidence_bundle_uri,
+        },
+        "datasets": row.sync_status_json.get("datasets", []),
+    }
+
+
+def _ensure_target_db_state(session: Session, workspace_id: str) -> TargetDbState:
+    row = session.get(TargetDbState, workspace_id)
+    if row is not None:
+        return row
+    row = TargetDbState(
+        workspace_id=workspace_id,
+        active_target_db_id=None,
+        current_build_id=None,
+        current_schema_ref=None,
+        last_successful_sync_epoch=None,
+        health_status="unknown",
+        last_validation_run_id=None,
+        last_error_evidence_bundle_uri=None,
+        sync_status_json={"datasets": []},
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def create_target_db_profile(
+    session: Session,
+    *,
+    workspace_id: str,
+    name: str,
+    db_type: str,
+    mode: str,
+    connection: dict[str, object] | None = None,
+    credential_refs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise NotFoundError(
+            "Workspace not found.",
+            details={"workspace_id": workspace_id},
+        )
+    normalized_db_type = db_type.strip().lower()
+    normalized_mode = mode.strip().lower()
+    if normalized_db_type not in SUPPORTED_TARGET_DB_TYPES:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "unsupported_target_db_type", "db_type": normalized_db_type},
+        )
+    if normalized_mode not in SUPPORTED_TARGET_DB_MODES:
+        raise PolicyDeniedError(
+            "Access denied by policy",
+            details={"reason": "unsupported_target_db_mode", "mode": normalized_mode},
+        )
+    resolved_connection = dict(connection or {})
+    resolved_credential_refs = dict(credential_refs or {})
+    profile = TargetDbProfile(
+        target_db_id=new_ulid(),
+        workspace_id=workspace_id,
+        name=name.strip(),
+        db_type=normalized_db_type,
+        mode=normalized_mode,
+        status="draft",
+        desired_config_hash=target_db_profile_hash(
+            workspace_id=workspace_id,
+            name=name.strip(),
+            db_type=normalized_db_type,
+            mode=normalized_mode,
+            connection=resolved_connection,
+            credential_refs=resolved_credential_refs,
+        ),
+        connection_json=resolved_connection,
+        credential_refs_json=resolved_credential_refs,
+        disabled=False,
+    )
+    session.add(profile)
+    state = _ensure_target_db_state(session, workspace_id)
+    if state.active_target_db_id is None:
+        state.active_target_db_id = profile.target_db_id
+        state.health_status = "draft"
+    session.flush()
+    return _serialize_target_db_profile(profile)
+
+
+def list_target_db_profiles(session: Session, *, workspace_id: str) -> list[dict[str, object]]:
+    rows = (
+        session.execute(
+            select(TargetDbProfile)
+            .where(TargetDbProfile.workspace_id == workspace_id)
+            .order_by(TargetDbProfile.target_db_id)
+        )
+        .scalars()
+        .all()
+    )
+    return [_serialize_target_db_profile(row) for row in rows]
+
+
+def get_target_db_profile(
+    session: Session, *, workspace_id: str, target_db_id: str
+) -> dict[str, object] | None:
+    row = session.get(TargetDbProfile, target_db_id)
+    if row is None or row.workspace_id != workspace_id:
+        return None
+    profile = _serialize_target_db_profile(row)
+    state = session.get(TargetDbState, workspace_id)
+    profile["state"] = _serialize_target_db_state(state)
+    return profile
+
+
+def disable_target_db_profile(
+    session: Session, *, workspace_id: str, target_db_id: str
+) -> dict[str, object] | None:
+    row = session.get(TargetDbProfile, target_db_id)
+    if row is None or row.workspace_id != workspace_id:
+        return None
+    row.disabled = True
+    row.status = "disabled"
+    state = _ensure_target_db_state(session, workspace_id)
+    if state.active_target_db_id == target_db_id:
+        state.active_target_db_id = None
+        state.health_status = "disabled"
+    session.flush()
+    response = _serialize_target_db_profile(row)
+    response["disabled_at_epoch"] = int(time.time())
+    return response
+
+
+def create_target_db_plan(
+    session: Session,
+    *,
+    workspace_id: str,
+    target_db_id: str,
+    plan_kind: str,
+    payload: dict[str, object] | None = None,
+    requires_approval: bool = False,
+    destructive: bool = False,
+) -> dict[str, object]:
+    profile = session.get(TargetDbProfile, target_db_id)
+    if profile is None or profile.workspace_id != workspace_id:
+        raise NotFoundError(
+            "Target DB profile not found.",
+            details={"workspace_id": workspace_id, "target_db_id": target_db_id},
+        )
+    payload_json = dict(payload or {})
+    checksum = _canonical_checksum(
+        {
+            "workspace_id": workspace_id,
+            "target_db_id": target_db_id,
+            "plan_kind": plan_kind,
+            "payload": payload_json,
+        }
+    )
+    plan = TargetDbPlan(
+        plan_id=new_ulid(),
+        workspace_id=workspace_id,
+        target_db_id=target_db_id,
+        plan_kind=plan_kind,
+        plan_checksum=checksum,
+        status="draft",
+        requires_approval=requires_approval,
+        destructive=destructive,
+        created_by_run_id=None,
+        evidence_bundle_uri=None,
+        payload_json=payload_json,
+    )
+    session.add(plan)
+    session.flush()
+    return {
+        "plan_id": plan.plan_id,
+        "plan_kind": plan.plan_kind,
+        "workspace_id": plan.workspace_id,
+        "target_db_id": plan.target_db_id,
+        "plan_checksum": plan.plan_checksum,
+        "requires_approval": bool(plan.requires_approval),
+        "destructive": bool(plan.destructive),
+        "status": plan.status,
+        "payload": dict(plan.payload_json),
+    }
+
+
+def get_target_db_plan(
+    session: Session, *, workspace_id: str, target_db_id: str, plan_id: str
+) -> dict[str, object] | None:
+    row = session.get(TargetDbPlan, plan_id)
+    if row is None or row.workspace_id != workspace_id or row.target_db_id != target_db_id:
+        return None
+    return {
+        "plan_id": row.plan_id,
+        "plan_kind": row.plan_kind,
+        "workspace_id": row.workspace_id,
+        "target_db_id": row.target_db_id,
+        "plan_checksum": row.plan_checksum,
+        "requires_approval": bool(row.requires_approval),
+        "destructive": bool(row.destructive),
+        "status": row.status,
+        "payload": dict(row.payload_json),
+    }
+
+
+def mark_target_db_plan_applied(
+    session: Session, *, workspace_id: str, target_db_id: str, plan_id: str
+) -> dict[str, object] | None:
+    row = session.get(TargetDbPlan, plan_id)
+    if row is None or row.workspace_id != workspace_id or row.target_db_id != target_db_id:
+        return None
+    row.status = "applied"
+    session.flush()
+    return {
+        "plan_id": row.plan_id,
+        "plan_kind": row.plan_kind,
+        "status": row.status,
+    }
+
+
+def upsert_target_db_sync_cursor(
+    session: Session,
+    *,
+    workspace_id: str,
+    target_db_id: str,
+    dataset_id: str,
+    cursor_hash: str,
+    run_id: str | None,
+    status: str,
+) -> dict[str, object]:
+    row = (
+        session.execute(
+            select(TargetDbSyncCursor).where(
+                TargetDbSyncCursor.workspace_id == workspace_id,
+                TargetDbSyncCursor.target_db_id == target_db_id,
+                TargetDbSyncCursor.dataset_id == dataset_id,
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if row is None:
+        row = TargetDbSyncCursor(
+            sync_cursor_id=new_ulid(),
+            workspace_id=workspace_id,
+            target_db_id=target_db_id,
+            dataset_id=dataset_id,
+            cursor_hash=cursor_hash,
+            last_run_id=run_id,
+            last_status=status,
+        )
+        session.add(row)
+    else:
+        row.cursor_hash = cursor_hash
+        row.last_run_id = run_id
+        row.last_status = status
+    session.flush()
+    return {
+        "dataset_id": row.dataset_id,
+        "cursor_hash": row.cursor_hash,
+        "last_run_id": row.last_run_id,
+        "last_status": row.last_status,
+    }
+
+
+def list_target_db_sync_cursors(
+    session: Session, *, workspace_id: str, target_db_id: str
+) -> list[dict[str, object]]:
+    rows = (
+        session.execute(
+            select(TargetDbSyncCursor)
+            .where(
+                TargetDbSyncCursor.workspace_id == workspace_id,
+                TargetDbSyncCursor.target_db_id == target_db_id,
+            )
+            .order_by(TargetDbSyncCursor.dataset_id)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "dataset_id": row.dataset_id,
+            "cursor_hash": row.cursor_hash,
+            "last_run_id": row.last_run_id,
+            "last_status": row.last_status,
+        }
+        for row in rows
+    ]
 
 
 def get_run(session: Session, *, workspace_id: str, run_id: str) -> dict[str, object] | None:
