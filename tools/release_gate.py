@@ -157,6 +157,12 @@ def main() -> int:
             None,
         ),
         (
+            "RG-007D",
+            "Semantic test harness",
+            [sys.executable, "tools/semantic_test.py"],
+            None,
+        ),
+        (
             "RG-008",
             "Performance harness",
             [sys.executable, "tools/perf_harness.py"],

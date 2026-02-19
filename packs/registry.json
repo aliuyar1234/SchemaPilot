@@ -8,12 +8,30 @@
     },
     {
       "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "jira-export",
+      "path": "plugins/examples/jira_connector.py",
+      "version": "0.1.0"
+    },
+    {
+      "checksum_hint": "generated-by-pack-lint",
       "pack_id": "zendesk-export",
       "path": "plugins/examples/zendesk_export_connector.py",
       "version": "0.1.0"
     }
   ],
   "policy_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "analyst-readonly",
+      "path": "packs/policy/analyst-readonly.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "8cf1d70c00a4d93906abe951f2326a4f704fa9c1f75e5db9306bf89f83dc766b"
+      },
+      "version": "1.0.0"
+    },
     {
       "checksum_hint": "generated-by-pack-lint",
       "pack_id": "baseline-team",
@@ -25,10 +43,34 @@
         "value": "acca2f5efbd732c679eeacd796270277ca443825c9cdfded9aba14ef5ed2608e"
       },
       "version": "1.0.0"
+    },
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "steward-governed",
+      "path": "packs/policy/steward-governed.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "a8f2717921bd50f61d9c4421136cf0104fdbd918245e210d327df6f46a10f344"
+      },
+      "version": "1.0.0"
     }
   ],
   "registry_version": "v1",
   "semantic_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "starter-crm",
+      "path": "packs/semantic/starter-crm.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "0aebf017c61f9b41b2ec827e061bb1d64de8a42a7dca96acb4db7b89d241b235"
+      },
+      "version": "1.0.0"
+    },
     {
       "checksum_hint": "generated-by-pack-lint",
       "pack_id": "starter-invoices",
@@ -40,9 +82,33 @@
         "value": "6337bd6400cbb174415965b63598124026a13c18c5b20d0ae17c546c554b04de"
       },
       "version": "1.0.0"
+    },
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "starter-support",
+      "path": "packs/semantic/starter-support.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "1412d2abaf9daee652bc9488a506395b6c16ea5c81948c0d799d7f2f55ab3c9b"
+      },
+      "version": "1.0.0"
     }
   ],
   "template_packs": [
+    {
+      "checksum_hint": "generated-by-pack-lint",
+      "pack_id": "crm-export",
+      "path": "packs/templates/crm-export.json",
+      "schema_version": "v2",
+      "signature": {
+        "algorithm": "hmac-sha256",
+        "key_id": "local-dev-v1",
+        "value": "0b9bd9f146702dc468dce96e9f9e5a300eae64dd9acbc7623cf02d31f88a6d82"
+      },
+      "version": "1.0.0"
+    },
     {
       "checksum_hint": "generated-by-pack-lint",
       "pack_id": "crm",

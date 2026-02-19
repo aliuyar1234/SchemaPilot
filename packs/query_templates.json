@@ -1,0 +1,18 @@
+{
+  "templates": [
+    {
+      "template_id": "invoice_count",
+      "name": "Invoice Count",
+      "description": "Count rows in invoice table.",
+      "dataset_id": "dataset-invoice",
+      "sql": "select count(*) as invoice_count from {{table_name}}"
+    },
+    {
+      "template_id": "invoice_revenue_by_region",
+      "name": "Invoice Revenue by Region",
+      "description": "Aggregate invoice amount by region.",
+      "dataset_id": "dataset-invoice",
+      "sql": "select region, sum(amount) as gross_revenue from {{table_name}} group by region order by region"
+    }
+  ]
+}

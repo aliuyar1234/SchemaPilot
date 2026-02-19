@@ -43,6 +43,7 @@ def main() -> int:
     run([sys.executable, "tools/generate_clients.py", "--check"], cwd=root)
     run([sys.executable, "tools/pack_lint.py"], cwd=root)
     run([sys.executable, "tools/policy_pack_test.py"], cwd=root)
+    run([sys.executable, "tools/semantic_test.py"], cwd=root)
     run(
         [
             sys.executable,

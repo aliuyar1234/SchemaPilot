@@ -115,8 +115,11 @@ def _load_reference_connectors() -> dict[str, ConnectorFn]:
     connector_modules = {
         "hubspot_export": "plugins.examples.hubspot_export_connector",
         "zendesk_export": "plugins.examples.zendesk_export_connector",
+        "jira": "plugins.examples.jira_connector",
         "sftp": "plugins.examples.sftp_connector",
+        "smb": "plugins.examples.smb_connector",
         "google_drive": "plugins.examples.google_drive_connector",
+        "sharepoint": "plugins.examples.sharepoint_connector",
         "imap": "plugins.examples.imap_connector",
         "postgres_cdc": "plugins.examples.postgres_cdc_connector",
         "mysql_cdc": "plugins.examples.mysql_cdc_connector",
@@ -136,8 +139,11 @@ def _create_fixture_exports(root: Path) -> None:
     fixtures = {
         "hubspot_contacts.csv": "id,email\n1,a@example.com\n",
         "zendesk_tickets.csv": "id,subject\n1,hello\n",
+        "jira_issues.csv": "id,summary\nSP-1,Investigate outage\n",
         "sftp_customers.csv": "id,name\n1,Alice\n",
+        "smb_customers.csv": "id,name\n1,Alice\n",
         "gdrive_invoices.csv": "id,amount\n1,10\n",
+        "sp_invoices.csv": "id,amount\n1,10\n",
         "imap_mailbox_0001.eml": "From: a@example.com\nSubject: Test\n\nBody",
         "postgres_cdc_events.jsonl": (
             '{"lsn":"00000001","relation":"invoice_events","epoch":1700000001}\n'

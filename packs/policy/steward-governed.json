@@ -1,0 +1,30 @@
+{
+  "pack_id": "steward-governed",
+  "schema_version": "v2",
+  "version": "1.0.0",
+  "compatibility": {
+    "max_runtime_version": "0.x",
+    "min_runtime_version": "0.1.0"
+  },
+  "defaults": {
+    "abac_mode": "strict",
+    "masking_enabled": true,
+    "ai_semantic_required": true
+  },
+  "roles": {
+    "data_steward": {
+      "query": true,
+      "retrieve": true,
+      "policy_simulate": true,
+      "review_approve": true
+    },
+    "platform_admin": {
+      "query": true,
+      "retrieve": true,
+      "policy_simulate": true,
+      "review_approve": true
+    }
+  },
+  "notes": "Template policy pack with steward/admin governance responsibilities."
+}
+
