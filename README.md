@@ -141,6 +141,8 @@ For a deeper breakdown, request flows, security boundaries, and deployment views
 - Support package: `schemapilot diag-bundle --workspace <id>`
 - Policy dry-run: `schemapilot policy-simulate ...`
 - Policy audit report: `schemapilot policy-audit-report ...`
+- Policy impact diff: `schemapilot policy-diff --before ... --after ...`
+- Safe templates: `schemapilot query-templates` and `schemapilot query-template-run ...`
 
 ## Quality, Testing, and Release Discipline
 
