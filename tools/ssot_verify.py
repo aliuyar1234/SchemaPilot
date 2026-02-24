@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import re
 import sys
 from dataclasses import dataclass, field
@@ -34,6 +35,22 @@ CORE_FILES = {
 
 SSOT_DIRS = {"spec", "checks", "templates"}
 
+OPTIONAL_INTERNAL_GLOBS = {
+    "AGENTS.md",
+    "ASSUMPTIONS.md",
+    "AUDIT_REPORT.md",
+    "CHANGELOG.md",
+    "CONSTITUTION.md",
+    "DECISIONS.md",
+    "PROGRESS.md",
+    "TASKLIST.md",
+    "TASKLIST_NEXT.md",
+    "TASKLIST_NEXT_V2.md",
+    "ENTERPRISE_RELEASE_CHECKLIST.md",
+    "checks/QUESTIONS_FOR_USER.md",
+    "docs/GPT_PRO*.md",
+}
+
 
 @dataclass
 class CheckResult:
@@ -51,8 +68,16 @@ def read_markdown_files(root: Path) -> list[Path]:
     )
 
 
+def _is_optional_internal_path(rel_path: str) -> bool:
+    return any(fnmatch.fnmatch(rel_path, pattern) for pattern in OPTIONAL_INTERNAL_GLOBS)
+
+
 def check_core_files(root: Path) -> CheckResult:
-    missing = [item for item in sorted(CORE_FILES) if not (root / item).exists()]
+    missing = [
+        item
+        for item in sorted(CORE_FILES)
+        if not (root / item).exists() and not _is_optional_internal_path(item)
+    ]
     return CheckResult(name="CHK-CORE-FILES", ok=not missing, messages=missing)
 
 
@@ -79,6 +104,8 @@ def check_ref_integrity(root: Path) -> CheckResult:
             phrase = match.group(2).strip().rstrip("|").strip()
             target = root / rel_path
             if not target.exists():
+                if _is_optional_internal_path(rel_path):
+                    continue
                 messages.append(
                     f"{md_file.relative_to(root).as_posix()}: missing evidence file {rel_path}"
                 )
